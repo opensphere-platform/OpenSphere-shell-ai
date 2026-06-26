@@ -1,0 +1,41 @@
+/* OpenSphere AI Shell — 전역 스타일
+ * Clarity UI 엔진 + OpenSphere 디자인 토큰
+ * DESIGN-RULES: 구조·컴포넌트는 Clarity. 커스텀은 CSS 변수(토큰)로만. */
+@import '@clr/ui/clr-ui.min.css';
+
+/* ──────────────────────────────────────────────────────────────────
+ * OpenSphere Design Tokens (opensphere-shell/src/styles.scss 동일 세트)
+ * ────────────────────────────────────────────────────────────────── */
+:root {
+  /* 브랜드 팔레트 */
+  --os-brand-900: #0b1530;
+  --os-brand-700: #16224d;
+  --os-brand-500: #4c6fff;
+  --os-brand-300: #8fa6ff;
+  --os-accent:    #00bfa5;
+  --os-surface:   #f6f7fb;
+  --os-ink:       #1b2438;
+  --os-muted:     #667193;
+
+  /* Clarity 토큰 매핑 */
+  --clr-btn-primary-bg-color:       var(--os-brand-500);
+  --clr-btn-primary-hover-bg-color: #3a5af0;
+  --clr-link-color:                 var(--os-brand-500);
+  --clr-link-hover-color:           #3a5af0;
+  --clr-global-app-background:      var(--os-surface);
+  --clr-card-border-radius:         8px;
+
+  /* Vertical nav 토큰 (light variant — subShell은 화이트 배경) */
+  --clr-vertical-nav-bg-color:              var(--os-surface);
+  --clr-vertical-nav-item-color:            var(--os-ink);
+  --clr-vertical-nav-item-active-color:     var(--os-brand-500);
+  --clr-vertical-nav-item-active-bg-color:  rgba(76, 111, 255, 0.1);
+  --clr-vertical-nav-icon-active-color:     var(--os-brand-500);
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--os-surface);
+  color: var(--os-ink);
+}

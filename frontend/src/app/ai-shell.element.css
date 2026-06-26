@@ -1,0 +1,295 @@
+/* ──────────────────────────────────────────────────────────────────
+ * AI Shell Component Styles
+ * DESIGN-RULES: token-only — var(--os-*) / var(--clr-*), NO hex.
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Host */
+:host {
+  display: block;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+*, *::before, *::after { box-sizing: inherit; }
+
+/* ── App shell layout ── */
+.ai-app {
+  display: flex;
+  height: 100%;
+}
+
+/* ── Clarity clr-vertical-nav 다크 테마 (cluster nav 동일 코드) ── */
+.os-sidebar-nav {
+  flex: 0 0 220px;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  /* 다크 nav 토큰 */
+  --clr-vertical-nav-bg-color: #101a38;
+  --clr-vertical-nav-item-color: #c7d0e8;
+  --clr-vertical-nav-item-active-color: #ffffff;
+  --clr-vertical-nav-item-active-bg-color: rgba(76, 111, 255, 0.22);
+  --clr-vertical-nav-icon-active-color: #8fa6ff;
+  --clr-vertical-nav-hover-bg-color: rgba(255, 255, 255, 0.06);
+  --clr-vertical-nav-selected-bg-color: rgba(76, 111, 255, 0.22);
+}
+
+/* nav 브랜드 헤더 — cluster nav 동일 */
+.os-brand {
+  padding: 10px 16px 12px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--clr-vertical-nav-item-active-color, #fff);
+  background: var(--clr-vertical-nav-bg-color, #101a38);
+}
+
+/* SVG 아이콘 — cluster nav 동일 */
+.os-tree-ic { width: 16px; height: 16px; fill: currentColor; flex: 0 0 auto; opacity: 0.85; }
+.os-tree-ic-child { width: 14px; height: 14px; }
+
+/* nav 그룹 children 패널 — 흰 배경 버그 방지 (cluster nav 동일) */
+clr-vertical-nav-group-children,
+.nav-group-children,
+.nav-group-content { background: transparent !important; }
+
+/* active 링크 강조 (cluster nav 동일) */
+a[clrVerticalNavLink].active,
+a.nav-link.active {
+  color: var(--clr-vertical-nav-item-active-color, #fff) !important;
+  background: var(--clr-vertical-nav-item-active-bg-color, rgba(76,111,255,0.22)) !important;
+}
+
+/* ── Right content area ── */
+.ai-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--clr-global-app-background, var(--os-surface));
+}
+
+/* ── Top bar ── */
+.ai-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--clr-color-neutral-0, #fff);
+  border-bottom: 1px solid var(--clr-color-neutral-300, #c5c8d0);
+  padding: 0.9rem 1.5rem;
+  flex-shrink: 0;
+}
+
+.ai-topbar-title {}
+
+.ai-eyebrow {
+  color: var(--os-muted);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0 0 0.15rem;
+}
+
+.ai-topbar h1 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--os-ink);
+  margin: 0;
+}
+
+.ai-topbar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+/* ── Home page ── */
+.page-home {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── Section header inside card ── */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.section-icon {
+  font-size: 1.2rem;
+  color: var(--os-brand-500);
+  flex-shrink: 0;
+}
+
+.section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--os-ink);
+  margin: 0;
+}
+
+.section-sub {
+  font-size: 0.7rem;
+  color: var(--os-muted);
+  margin: 0.1rem 0 0;
+}
+
+/* ── Card grid (agent cards) ── */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+/* ── Action card grid ── */
+.action-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+/* Clickable card variant */
+.card-clickable {
+  cursor: pointer;
+}
+
+.card-clickable:hover {
+  border-color: var(--os-brand-300);
+  box-shadow: 0 2px 8px rgba(76, 111, 255, 0.12);
+}
+
+/* ── Add-on / catalog grid ── */
+.addon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 1rem;
+}
+
+/* ── Action card body layout ── */
+.action-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.action-card-desc {
+  font-size: 0.7rem;
+  color: var(--os-muted);
+  margin: 0.2rem 0 0.4rem;
+}
+
+.action-count {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--os-brand-500);
+}
+
+.action-icon {
+  font-size: 1.2rem;
+  color: var(--os-brand-500);
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.action-arrow {
+  color: var(--os-muted);
+  flex-shrink: 0;
+  align-self: center;
+}
+
+/* ── Addon card layout ── */
+.addon-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+}
+
+.addon-icon {
+  font-size: 1.1rem;
+}
+
+.addon-kind {
+  font-size: 0.65rem;
+  color: var(--os-muted);
+  margin: 0.1rem 0 0.3rem;
+}
+
+/* ── Section link (push to right in header) ── */
+.section-link-right {
+  margin-left: auto;
+}
+
+/* ── Card text small (kind label in agent card) ── */
+.card-text-kind {
+  font-size: 0.65rem;
+  color: var(--os-muted);
+  margin: 0;
+}
+
+/* ── Loading row ── */
+.loading-row {
+  padding: 1.5rem 1rem;
+  color: var(--os-muted);
+  font-size: 0.75rem;
+}
+
+/* ── Resource page ── */
+.page-resource {
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.resource-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.resource-page-header h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--os-ink);
+  margin: 0;
+}
+
+/* ── Ready indicator in agent cards ── */
+.ready-indicator {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--os-muted);
+}
+
+.ready-indicator--ok {
+  color: var(--clr-color-success-700, #1d7b1d);
+}
+
+/* ── Responsive ── */
+@media (max-width: 860px) {
+  .ai-app {
+    flex-direction: column;
+  }
+
+  .ai-nav-wrap {
+    flex: 0 0 auto;
+    height: auto;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--clr-color-neutral-300, #c5c8d0);
+  }
+
+  .action-card-grid,
+  .card-grid,
+  .addon-grid {
+    grid-template-columns: 1fr;
+  }
+}
