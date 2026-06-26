@@ -1,0 +1,72 @@
+# Perspective 2 K8s Cluster — 구 k8s-console-ng RBAC 전체 흡수(누락 없이): 광범위 read-only(인벤토리 28종) + impersonate.
+# secrets는 의도적으로 제외(보안 기조 + 프록시도 차단). 쓰기는 검증된 사용자 임퍼소네이션(SA 자체 write 없음).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: cluster-reader }
+rules:
+  - apiGroups: [""]
+    resources: ["nodes","namespaces","pods","pods/log","services","configmaps","endpoints","limitranges","resourcequotas","serviceaccounts","events","persistentvolumeclaims","persistentvolumes","replicationcontrollers"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments","replicasets","statefulsets","daemonsets","controllerrevisions"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs","cronjobs"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses","networkpolicies","ingressclasses"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles","rolebindings","clusterroles","clusterrolebindings"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes","pods"]
+    verbs: ["get","list"]
+  # fleet/OCM read(P1과 공유 — cluster 트리 상단 컨텍스트)
+  - apiGroups: ["fleet.opensphere.io"]
+    resources: ["opensphereclusters"]
+    verbs: ["get","list","watch"]
+  - apiGroups: ["cluster.open-cluster-management.io"]
+    resources: ["managedclusters"]
+    verbs: ["get","list","watch"]
+  # 쓰기 인가: 검증된 사용자로 임퍼소네이션(쓰기는 K8s가 사용자 본인 RBAC로 인가).
+  - apiGroups: [""]
+    resources: ["users","groups"]
+    verbs: ["impersonate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: cluster-reader-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-reader }
+subjects:
+  - { kind: ServiceAccount, name: default, namespace: opensphere-system }

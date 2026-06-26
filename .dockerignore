@@ -1,0 +1,9 @@
+.git
+.gitignore
+.gitattributes
+*.md
+rbac.yaml
+uipluginpackage.yaml
+node_modules
+dist
+.angular

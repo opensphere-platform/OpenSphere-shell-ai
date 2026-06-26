@@ -1,0 +1,48 @@
+# AI — OpenSphere subShell (SDK 표준 빈 골격). _skeleton에서 인스턴스화.
+# 로컬: image=localhost:5000/ai:dev (태그 pull). manifest.sha256는 서명 핀 — 서명 시 자동 갱신(빈 골격은 미서명).
+apiVersion: plugins.opensphere.io/v1alpha1
+kind: UIPluginPackage
+metadata:
+  name: ai
+  namespace: opensphere-system
+spec:
+  kind: subShell
+  displayName: "AI"
+  owner: platform-experience
+  version: 0.1.0
+  description: "AI — OpenSphere subShell (SDK 표준 골격)"
+  image:
+    repository: localhost:5000/ai
+    digest: v1
+  nav:
+    band: "운영 Operate"
+    label: "AI"
+  manifest:
+    path: /plugins/ui-shell.manifest.json
+    sha256: "REPLACE_ON_SIGN"
+    signaturePath: /plugins/ui-shell.manifest.json.sig
+  trust:
+    keyId: opensphere-plugins-v1
+  shellCompat: ">=0.2.0 <0.9.0"
+  permissions:
+    - page:register
+    - api:proxy
+  api:
+    basePath: /api/plugins/ai
+---
+apiVersion: plugins.opensphere.io/v1alpha1
+kind: UIPluginRegistration
+metadata:
+  name: ai
+  namespace: opensphere-system
+spec:
+  packageRef:
+    name: ai
+  desiredState: Enabled
+  installPolicy:
+    createWorkload: true
+    createProxyRoute: false
+    exposeInNavigation: true
+  approval:
+    requestedBy: cmars
+    reason: "AI subShell (SDK 표준 골격)"

@@ -1,0 +1,6 @@
+/* 전역(문서) 스타일은 최소화 — 컴포넌트 스타일은 Shadow DOM 안에 격리.
+   DUPA 임베드 시 이 파일이 셸 문서에 로드되더라도 셸에 영향 없도록 host 외엔 규칙을 두지 않는다. */
+:root, body { margin: 0; }
+/* 임베드(DUPA) 시 셸 content-area를 꽉 채우도록 호스트 체인을 100% 높이/폭으로 전달. */
+os-plugin-host, os-plugin-host > div { display: block; height: 100%; min-height: 0; }
+osp-ai-shell { display: block; height: 100%; width: 100%; }
