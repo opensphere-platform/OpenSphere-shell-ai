@@ -1,25 +1,22 @@
-# AI — OpenSphere subShell (SDK 표준 빈 골격). _skeleton에서 인스턴스화.
-# 로컬: image=localhost:5000/ai:dev (태그 pull). manifest.sha256는 서명 핀 — 서명 시 자동 갱신(빈 골격은 미서명).
 apiVersion: plugins.opensphere.io/v1alpha1
 kind: UIPluginPackage
 metadata:
   name: ai
   namespace: opensphere-system
 spec:
-  kind: subShell
-  displayName: "AI"
+  displayName: "OpenSphere AI Hub"
   owner: platform-experience
   version: 0.1.0
-  description: "AI — OpenSphere subShell (SDK 표준 골격)"
+  description: "OpenSphere AI Hub operations dashboard"
   image:
     repository: localhost:5000/ai
-    digest: v1
+    digest: v126
   nav:
-    band: "운영 Operate"
-    label: "AI"
+    band: "Operate"
+    label: "OpenSphere AI Hub"
   manifest:
     path: /plugins/ui-shell.manifest.json
-    sha256: "REPLACE_ON_SIGN"
+    sha256: "1dd84465b6aeaf9fc2e590931496797786f9d50b73700309dd7f9b457ff6891e"
     signaturePath: /plugins/ui-shell.manifest.json.sig
   trust:
     keyId: opensphere-plugins-v1
@@ -45,4 +42,4 @@ spec:
     exposeInNavigation: true
   approval:
     requestedBy: cmars
-    reason: "AI subShell (SDK 표준 골격)"
+    reason: "OpenSphere AI Hub subShell dashboard deployment"

@@ -2,7 +2,7 @@
   "name": "opensphere-ai-shell-ui",
   "version": "0.1.0",
   "private": true,
-  "description": "OpenSphere AI subShell UI",
+  "description": "OpenSphere AI Hub subShell UI",
   "scripts": {
     "build": "ng build --configuration production",
     "start": "ng serve"
@@ -17,6 +17,7 @@
     "@angular/forms": "^22.0.0",
     "@angular/platform-browser": "^22.0.0",
     "@angular/router": "^22.0.0",
+    "@carbon/icons": "^11.82.0",
     "@cds/core": "^6.17.0",
     "@clr/angular": "^18.2.0",
     "@clr/ui": "^18.2.0",

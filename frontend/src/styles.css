@@ -1,12 +1,16 @@
-/* OpenSphere AI Shell — 전역 스타일
+/* OpenSphere AI Hub — 전역 스타일
  * Clarity UI 엔진 + OpenSphere 디자인 토큰
  * DESIGN-RULES: 구조·컴포넌트는 Clarity. 커스텀은 CSS 변수(토큰)로만. */
 @import '@clr/ui/clr-ui.min.css';
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
 
 /* ──────────────────────────────────────────────────────────────────
  * OpenSphere Design Tokens (opensphere-shell/src/styles.scss 동일 세트)
  * ────────────────────────────────────────────────────────────────── */
 :root {
+  --os-font: "IBM Plex Sans", "IBM Plex Sans KR", system-ui, "Segoe UI", sans-serif;
+  --os-font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
   /* 브랜드 팔레트 */
   --os-brand-900: #0b1530;
   --os-brand-700: #16224d;
@@ -38,4 +42,16 @@ html, body {
   margin: 0;
   background: var(--os-surface);
   color: var(--os-ink);
+  font-family: var(--os-font) !important;
+}
+
+body * {
+  font-family: var(--os-font) !important;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--os-font-mono) !important;
 }
