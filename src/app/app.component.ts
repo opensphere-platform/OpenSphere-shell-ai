@@ -43,7 +43,7 @@ type PageId =
   | 'developer-learning'
   | 'resources';
 
-type ClusterSettingsTab = 'setup' | 'readiness' | 'gpu' | 'demo' | 'operations';
+type ClusterSettingsTab = 'setup' | 'support' | 'readiness' | 'gpu' | 'demo' | 'operations';
 
 interface NavLeaf {
   kind: 'leaf';
@@ -101,7 +101,111 @@ interface ResourceItem {
   maxConcurrency?: string | number;
   currentConcurrency?: string | number;
   source?: string;
+  backendMode?: string;
+  parityReady?: boolean;
   reference?: boolean;
+}
+
+interface K8sObjectSummary {
+  name: string;
+  namespace: string;
+  kind: string;
+  phase: string;
+  ready: boolean;
+  message?: string;
+}
+
+interface WorkbenchDetailResponse {
+  item: ResourceItem;
+  runtime: {
+    name: string;
+    namespace: string;
+    image: string;
+    openUrl: string;
+    proxyUrl: string;
+    backendMode: string;
+    computeBackendRef?: string;
+    gpuClass?: string;
+    reachability?: {
+      checked: boolean;
+      ready: boolean;
+      status: number;
+      phase: string;
+      message: string;
+    };
+  };
+  storage?: K8sObjectSummary | null;
+  deployment?: K8sObjectSummary | null;
+  service?: K8sObjectSummary | null;
+  pods: K8sObjectSummary[];
+  events: Array<{ time: string; type: string; reason: string; message: string }>;
+  logs: { pod: string; tailLines: string[] };
+}
+
+interface PipelineDetailResponse {
+  item: ResourceItem;
+  pipelineName: string;
+  backendMode: string;
+  definition: {
+    version: string;
+    source: string;
+    parameters: Record<string, unknown>;
+  };
+  runs: ResourceItem[];
+  experiments: ResourceItem[];
+  artifacts: ResourceItem[];
+  lineage: PipelineLineageItem[];
+  logs: string[];
+}
+
+interface InferenceDetailResponse {
+  item: ResourceItem;
+  runtime: {
+    name: string;
+    namespace: string;
+    image: string;
+    modelName: string;
+    runtime: string;
+    modelUri: string;
+    url: string;
+    predictUrl: string;
+    backendMode: string;
+    backendResource: string;
+    reachability?: {
+      checked: boolean;
+      ready: boolean;
+      status: number;
+      phase: string;
+      message: string;
+    };
+  };
+  deployment?: K8sObjectSummary | null;
+  service?: K8sObjectSummary | null;
+  inferenceService?: K8sObjectSummary | null;
+  pods: K8sObjectSummary[];
+  conditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
+  upstreamConditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
+  events: Array<{ time: string; type: string; reason: string; message: string }>;
+  logs: { pod: string; tailLines: string[] };
+}
+
+interface DataConnectionDetailResponse {
+  item: ResourceItem;
+  provider: string;
+  endpoint: string;
+  database: string;
+  owner: string;
+  secret: {
+    name: string;
+    namespace: string;
+    readable: boolean;
+    type: string;
+    keys: string[];
+    masked: boolean;
+    message: string;
+  };
+  usage: ResourceItem[];
+  conditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
 }
 
 interface LearningResource {
@@ -143,6 +247,9 @@ interface ResourceListResponse {
   actualCount?: number;
   referenceCount?: number;
   source?: string;
+  sourceBreakdown?: Record<string, number>;
+  backendModes?: Record<string, number>;
+  readinessModel?: ResourceReadinessModel;
 }
 
 interface ProjectListResponse {
@@ -156,6 +263,16 @@ interface ResourceMeta {
   actualCount: number;
   referenceCount: number;
   source: string;
+  sourceBreakdown?: Record<string, number>;
+  backendModes?: Record<string, number>;
+  readinessModel?: ResourceReadinessModel;
+}
+
+interface ResourceReadinessModel {
+  nativeReady: number;
+  upstreamAdapterReady: number;
+  upstreamParityReady: number;
+  reference: number;
 }
 
 interface CapabilityItem {
@@ -637,6 +754,275 @@ interface ComputeRoutingResponse {
   routes: ComputeRoutingRoute[];
 }
 
+interface SupportServiceResource {
+  kind: string;
+  namespace?: string;
+  name: string;
+  phase?: string;
+}
+
+interface SupportServiceItem {
+  id: string;
+  label: string;
+  category: string;
+  required: boolean;
+  requiredFor: string[];
+  phase: string;
+  ready: boolean;
+  installed: boolean;
+  configured: boolean;
+  evidence: string;
+  nextStep: string;
+  resources: SupportServiceResource[];
+}
+
+interface BackboneComponent {
+  id: string;
+  label: string;
+  kind: string;
+  name: string;
+  service: string;
+  role: string;
+  endpoint: string;
+  consoleEndpoint?: string;
+  phase: string;
+  ready: boolean;
+  installed: boolean;
+  detail: string;
+  resources?: SupportServiceResource[];
+}
+
+interface BackboneInventory {
+  namespace: string;
+  phase: string;
+  ready: boolean;
+  installed: boolean;
+  components: BackboneComponent[];
+  defaults?: {
+    objectStorage?: Partial<ObjectStorageConfig>;
+    metadata?: Partial<MetadataConfig>;
+  };
+}
+
+interface SupportServicesResponse {
+  generatedAt: string;
+  phase: string;
+  summary: {
+    total: number;
+    ready: number;
+    configured: number;
+    missing: number;
+    requiredMissing: number;
+  };
+  items: SupportServiceItem[];
+  installPlan?: Array<{
+    order: number;
+    id: string;
+    title: string;
+    menu: string;
+    status: string;
+    action: string;
+    blocks: string[];
+  }>;
+  configurationPages?: Array<{
+    id: string;
+    service: string;
+    page: string;
+    route: string;
+    action: string;
+    mode: string;
+    requiredBefore: string[];
+  }>;
+  backbone?: BackboneInventory;
+  setupPrerequisites: Array<{ id: string; label: string; ready: boolean; required?: boolean; scope?: string; detail: string }>;
+}
+
+interface ObjectStorageConfig {
+  name: string;
+  namespace: string;
+  provider: string;
+  endpoint: string;
+  bucket: string;
+  region: string;
+  secretName: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  useTls: boolean;
+  insecureSkipTlsVerify: boolean;
+}
+
+interface ObjectStorageBootstrapResponse {
+  phase: string;
+  secret?: { namespace: string; name: string };
+  dataConnection?: ResourceItem;
+  supportServices?: SupportServicesResponse;
+}
+
+interface MetadataConfig {
+  name: string;
+  namespace: string;
+  provider: string;
+  host: string;
+  port: string;
+  database: string;
+  username: string;
+  password: string;
+  sslMode: string;
+  purposes: string[];
+}
+
+interface MetadataPreviewResponse {
+  phase: string;
+  summary: {
+    manifests: number;
+    namespaceExists: boolean;
+    passwordProvided: boolean;
+    purposes: number;
+  };
+  target: {
+    namespace: string;
+    secret: string;
+    provider: string;
+    host: string;
+    database: string;
+    purposes: string[];
+  };
+  manifests: unknown[];
+}
+
+interface MetadataBootstrapResponse {
+  phase: string;
+  secret?: { namespace: string; name: string };
+  supportServices?: SupportServicesResponse;
+}
+
+interface ObjectStoragePreviewResponse {
+  phase: string;
+  summary: {
+    manifests: number;
+    crdInstalled: boolean;
+    namespaceExists: boolean;
+    credentialsProvided: boolean;
+  };
+  target: {
+    namespace: string;
+    dataConnection: string;
+    secret: string;
+    endpoint: string;
+    bucket: string;
+    provider: string;
+  };
+  manifests: unknown[];
+}
+
+interface ServingFoundationPreviewResponse {
+  phase: string;
+  generatedAt: string;
+  summary: {
+    ready: number;
+    configured: number;
+    required: number;
+    total: number;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: string;
+    evidence: string;
+    nextStep: string;
+    resources?: Array<{ name: string; label: string; installed: boolean }>;
+  }>;
+  installOptions: Array<{
+    id: string;
+    label: string;
+    recommended: boolean;
+    phase: string;
+    action: string;
+    manifests: unknown[];
+  }>;
+}
+
+interface PipelinesFoundationPreviewResponse {
+  phase: string;
+  generatedAt: string;
+  summary: {
+    ready: number;
+    configured: number;
+    required: number;
+    total: number;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: string;
+    evidence: string;
+    nextStep: string;
+    resources?: Array<{ name: string; label: string; installed: boolean }>;
+  }>;
+  installOptions: Array<{
+    id: string;
+    label: string;
+    recommended: boolean;
+    phase: string;
+    action: string;
+    manifests: unknown[];
+  }>;
+}
+
+interface ModelRegistryFoundationPreviewResponse {
+  phase: string;
+  generatedAt: string;
+  summary: {
+    ready: number;
+    configured: number;
+    required: number;
+    total: number;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: string;
+    evidence: string;
+    nextStep: string;
+    resources?: Array<{ name: string; label: string; installed: boolean }>;
+  }>;
+  installOptions: Array<{
+    id: string;
+    label: string;
+    recommended: boolean;
+    phase: string;
+    action: string;
+    manifests: unknown[];
+  }>;
+}
+
+interface ObservabilityFoundationPreviewResponse {
+  phase: string;
+  generatedAt: string;
+  summary: {
+    ready: number;
+    configured: number;
+    required: number;
+    total: number;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: string;
+    evidence: string;
+    nextStep: string;
+    resources?: Array<{ name: string; label: string; installed: boolean }>;
+  }>;
+  installOptions: Array<{
+    id: string;
+    label: string;
+    recommended: boolean;
+    phase: string;
+    action: string;
+    manifests: unknown[];
+  }>;
+}
+
 interface DemoPrerequisiteItem {
   id: string;
   label: string;
@@ -975,6 +1361,24 @@ interface FinalReadinessResponse {
     total: number;
   };
   checks: FinalReadinessCheck[];
+  readinessModel?: {
+    nativeReadiness: FinalReadinessStage;
+    upstreamAdapterReadiness: FinalReadinessStage;
+    parityReadiness: FinalReadinessStage;
+  };
+}
+
+interface FinalReadinessStage {
+  phase: string;
+  ready: boolean;
+  checks: number;
+  readyChecks: number;
+  warningChecks?: number;
+  failedChecks?: number;
+  notInstalledChecks?: number;
+  requiredReadyChecks?: number;
+  mode: string;
+  evidence?: string;
 }
 
 interface SetupForm {
@@ -1114,6 +1518,7 @@ const PAGE_ROUTE: Record<PageId, string> = {
 
 const CLUSTER_SETTINGS_TAB_ROUTE: Record<ClusterSettingsTab, string> = {
   setup: 'setup',
+  support: 'support-services',
   readiness: 'readiness',
   gpu: 'gpu',
   demo: 'demo',
@@ -1258,6 +1663,37 @@ function defaultSetupForm(): SetupForm {
     installInternalCrds: true,
     installOperator: false,
     createDataScienceCluster: false,
+  };
+}
+
+function defaultObjectStorageConfig(): ObjectStorageConfig {
+  return {
+    name: 'default-object-storage',
+    namespace: 'opensphere-system',
+    provider: 's3',
+    endpoint: '',
+    bucket: '',
+    region: 'us-east-1',
+    secretName: 'default-object-storage-credentials',
+    accessKeyId: '',
+    secretAccessKey: '',
+    useTls: true,
+    insecureSkipTlsVerify: false,
+  };
+}
+
+function defaultMetadataConfig(): MetadataConfig {
+  return {
+    name: 'oah-metadata-credentials',
+    namespace: 'opensphere-system',
+    provider: 'postgres',
+    host: '',
+    port: '5432',
+    database: 'opensphere_metadata',
+    username: '',
+    password: '',
+    sslMode: 'prefer',
+    purposes: ['kfp', 'model-registry', 'trustyai'],
   };
 }
 
@@ -1537,8 +1973,8 @@ function groupForPage(page: PageId): string | null {
 function phaseClass(phase: string): string {
   const normalized = (phase || '').toLowerCase();
   if (['ready', 'active', 'running', 'bound', 'passed'].some((term) => normalized.includes(term))) return 'label-success';
-  if (['failed', 'error', 'blocked', 'unavailable'].some((term) => normalized.includes(term))) return 'label-danger';
-  if (['pending', 'waiting', 'draft', 'planned', 'partial', 'degraded', 'warning', 'external', 'required', 'notinstalled', 'parity'].some((term) => normalized.includes(term))) return 'label-warning';
+  if (['failed', 'error', 'blocked', 'unavailable', 'missing'].some((term) => normalized.includes(term))) return 'label-danger';
+  if (['pending', 'waiting', 'draft', 'planned', 'partial', 'degraded', 'warning', 'external', 'required', 'notinstalled', 'parity', 'configured'].some((term) => normalized.includes(term))) return 'label-warning';
   return 'label-info';
 }
 
@@ -1635,6 +2071,86 @@ function phaseClass(phase: string): string {
         }
 
         @if (activePage() === 'home') {
+          <section class="card ai-gpu-overview-card ai-clickable-card" role="button" tabindex="0" aria-label="Available GPU resources" (click)="selectClusterSettingsTab('gpu'); navigate('cluster-settings')" (keydown.enter)="selectClusterSettingsTab('gpu'); navigate('cluster-settings')">
+            <div class="card-block">
+              <div class="ai-gpu-overview-layout">
+                <div class="ai-gpu-overview-main">
+                  <p class="ai-section-kicker">AVAILABLE GPU RESOURCES</p>
+                  <div class="ai-gpu-overview-count">
+                    <strong>{{ overviewAvailableGpuCount() }}</strong>
+                    <span>GPU(s)</span>
+                  </div>
+                  <div class="ai-label-row">
+                    <span [class]="'label ' + statusClass(overviewGpuPhase())">{{ overviewGpuPhase() }}</span>
+                    <span [class]="overviewAvailableGpuCount() ? 'label label-success' : 'label label-warning'">{{ overviewAvailableGpuCount() ? 'Ready for AI workloads' : 'No GPU resource detected' }}</span>
+                    <span class="label label-info">{{ gpuInventory().summary.totalAllocatable }} Kubernetes allocatable</span>
+                    <span class="label label-info">{{ overviewExternalGpuCount() }} external bridge GPU(s)</span>
+                  </div>
+                </div>
+                <div class="ai-gpu-product">
+                  <img class="ai-gpu-product-logo" [src]="gpuProductLogoUrl()" alt="NVIDIA GeForce RTX" loading="lazy" />
+                  <span>Detected GPU product</span>
+                  <strong>{{ overviewGpuProductName() }}</strong>
+                </div>
+                <div class="ai-gpu-overview-facts">
+                  <div>
+                    <span>GPU nodes</span>
+                    <strong>{{ gpuInventory().summary.gpuNodes }}</strong>
+                  </div>
+                  <div>
+                    <span>Ready nodes</span>
+                    <strong>{{ gpuInventory().summary.readyNodes }}/{{ gpuInventory().summary.nodes }}</strong>
+                  </div>
+                  <div>
+                    <span>Backends</span>
+                    <strong>{{ overviewGpuBackends().length }}</strong>
+                  </div>
+                </div>
+              </div>
+
+              @if (overviewGpuBackends().length) {
+                <div class="ai-gpu-overview-backends" aria-label="Registered GPU compute backends">
+                  @for (backend of overviewGpuBackends(); track backend.namespace + '/' + backend.name) {
+                    <div class="ai-gpu-overview-backend">
+                      <div>
+                        <strong>{{ backend.name }}</strong>
+                        <span>{{ backend.backendType || 'external' }} · {{ backend.resourceName || 'external GPU' }}</span>
+                      </div>
+                      <div class="ai-chip-list">
+                        <span [class]="'label ' + statusClass(backend.phase)">{{ backend.phase }}</span>
+                        @if (backend.provider) {
+                          <span class="label label-info">{{ backend.provider }}</span>
+                        }
+                        @for (gpu of backend.gpus || []; track gpu['id'] || gpu['name']) {
+                          <span class="label label-success">{{ gpu['name'] || gpu['id'] }}</span>
+                        }
+                      </div>
+                    </div>
+                  }
+                </div>
+              } @else if (gpuInventory().nodes.length) {
+                <div class="ai-gpu-overview-backends" aria-label="Kubernetes GPU resources">
+                  @for (node of gpuInventory().nodes; track node.name) {
+                    @for (resource of node.gpuResources; track resource.name) {
+                      <div class="ai-gpu-overview-backend">
+                        <div>
+                          <strong>{{ resource.name }}</strong>
+                          <span>{{ node.name }}</span>
+                        </div>
+                        <div class="ai-chip-list">
+                          <span class="label label-success">{{ resource.allocatable }} allocatable</span>
+                          <span class="label label-info">{{ resource.capacity }} capacity</span>
+                        </div>
+                      </div>
+                    }
+                  }
+                </div>
+              } @else if (gpuInventory().nextSteps.length) {
+                <p class="ai-footnote">{{ gpuInventory().nextSteps[0] }}</p>
+              }
+            </div>
+          </section>
+
           <section class="ai-overview-grid" aria-label="AI overview summary">
             <div class="card ai-metric-card ai-clickable-card" role="button" tabindex="0" (click)="navigate('projects')" (keydown.enter)="navigate('projects')">
               <div class="card-block">
@@ -1848,7 +2364,6 @@ function phaseClass(phase: string): string {
               @if (!resourceItems().length) {
                 <clr-dg-placeholder>No application data loaded.</clr-dg-placeholder>
               }
-              <clr-dg-footer>{{ resourceMeta().actualCount }} actual, {{ resourceMeta().referenceCount }} reference</clr-dg-footer>
             </clr-datagrid>
           </section>
         } @else if (activePage() === 'projects') {
@@ -2190,6 +2705,10 @@ function phaseClass(phase: string): string {
                   <clr-tab-content *clrIfActive="clusterSettingsTab() === 'setup'"></clr-tab-content>
                 </clr-tab>
                 <clr-tab>
+                  <button clrTabLink type="button" (click)="selectClusterSettingsTab('support')">Support services</button>
+                  <clr-tab-content *clrIfActive="clusterSettingsTab() === 'support'"></clr-tab-content>
+                </clr-tab>
+                <clr-tab>
                   <button clrTabLink type="button" (click)="selectClusterSettingsTab('readiness')">Readiness</button>
                   <clr-tab-content *clrIfActive="clusterSettingsTab() === 'readiness'"></clr-tab-content>
                 </clr-tab>
@@ -2206,6 +2725,677 @@ function phaseClass(phase: string): string {
                   <clr-tab-content *clrIfActive="clusterSettingsTab() === 'operations'"></clr-tab-content>
                 </clr-tab>
               </clr-tabs>
+              <div class="card ai-action-panel" [class.ai-tab-hidden]="clusterSettingsTab() !== 'support'">
+                <div class="card-header">
+                  <div class="card-title">OAH support services</div>
+                </div>
+                <div class="card-block">
+                  <div class="ai-section-header">
+                    <div>
+                      <h3 class="ai-panel-title">Prerequisite services</h3>
+                      <p class="ai-footnote">These services must be prepared before installing or validating KServe, Knative, KFP, Model Registry, TrustyAI, and distributed workload backends.</p>
+                    </div>
+                    <div class="ai-action-row">
+                      <span [class]="'label ' + statusClass(supportServices().phase)">{{ supportServices().phase }}</span>
+                      <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="loadSupportServices()">Refresh services</button>
+                    </div>
+                  </div>
+                  <div class="ai-gpu-metric-grid">
+                    <div class="ai-gpu-metric">
+                      <strong>{{ supportServices().summary.ready }}</strong>
+                      <span>ready</span>
+                    </div>
+                    <div class="ai-gpu-metric">
+                      <strong>{{ supportServices().summary.configured }}</strong>
+                      <span>configured fallback</span>
+                    </div>
+                    <div class="ai-gpu-metric">
+                      <strong>{{ supportServices().summary.requiredMissing }}</strong>
+                      <span>required missing</span>
+                    </div>
+                    <div class="ai-gpu-metric">
+                      <strong>{{ supportServices().summary.total }}</strong>
+                      <span>tracked services</span>
+                    </div>
+                  </div>
+                  @if (supportServices().backbone; as backbone) {
+                    <div class="ai-gpu-config-panel">
+                      <div class="ai-section-header">
+                        <div>
+                          <h3 class="ai-panel-title">Console Backbone provider</h3>
+                          <p class="ai-footnote">Backbone provides PostgreSQL, RustFS, and Gitea for portable OAH metadata, artifacts, and config-as-code expansion without depending on environment-specific external services.</p>
+                        </div>
+                        <div class="ai-action-row">
+                          <span [class]="'label ' + statusClass(backbone.phase)">{{ backbone.phase }}</span>
+                          <span class="label label-info">{{ backbone.namespace }}</span>
+                          <button type="button" class="btn btn-sm btn-outline" [disabled]="!backbone.ready" (click)="applyBackboneDefaults()">Use Backbone defaults</button>
+                          <button type="button" class="btn btn-sm btn-link" (click)="openConfigurationPage('/backbone', $event)">Open Backbone</button>
+                        </div>
+                      </div>
+                      <div class="ai-gpu-metric-grid">
+                        @for (component of backbone.components; track component.id) {
+                          <div class="ai-gpu-metric">
+                            <strong>{{ component.label }}</strong>
+                            <span>{{ component.ready ? 'Ready' : component.phase }}</span>
+                            <p class="ai-footnote">{{ component.endpoint }}</p>
+                          </div>
+                        }
+                      </div>
+                    </div>
+                  }
+                  <section>
+                    <h3 class="ai-panel-title">Installation and configuration sequence</h3>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Order</th><th>Step</th><th>Menu</th><th>Status</th><th>Action</th><th>Unblocks</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (step of supportServices().installPlan || []; track step.id) {
+                          <tr>
+                            <td>{{ step.order }}</td>
+                            <td><strong>{{ step.title }}</strong></td>
+                            <td>{{ step.menu }}</td>
+                            <td><span [class]="'label ' + statusClass(step.status)">{{ step.status }}</span></td>
+                            <td>{{ step.action }}</td>
+                            <td>
+                              <div class="ai-chip-list">
+                                @for (block of step.blocks; track block) {
+                                  <span class="label label-info">{{ block }}</span>
+                                }
+                              </div>
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </section>
+                  <section>
+                    <h3 class="ai-panel-title">Configuration pages</h3>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Support element</th><th>Page</th><th>Mode</th><th>Action</th><th>Required before</th><th>Open</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (page of supportServices().configurationPages || []; track page.id) {
+                          <tr>
+                            <td><strong>{{ page.service }}</strong></td>
+                            <td>{{ page.page }}</td>
+                            <td><span [class]="'label ' + statusClass(page.mode)">{{ page.mode }}</span></td>
+                            <td>{{ page.action }}</td>
+                            <td>
+                              <div class="ai-chip-list">
+                                @for (item of page.requiredBefore; track item) {
+                                  <span class="label label-info">{{ item }}</span>
+                                }
+                              </div>
+                            </td>
+                            <td>
+                              <button type="button" class="btn btn-sm btn-link" (click)="openConfigurationPage(page.route, $event)">Open</button>
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </section>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">OpenSphere-native fallback control plane</h3>
+                        <p class="ai-footnote">Use this path when ODH/RHOAI OperatorHub components are not installed yet. It seeds the native catalog, creates OpenSphereDataScienceCluster, and subscribes managed fallback components.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        <span class="label label-info">{{ nativePlatform().dataScienceClusters.length }} native DataScienceCluster</span>
+                        <span class="label label-success">{{ nativeInstalledCount() }} installed</span>
+                        <span class="label label-warning">{{ nativePendingCount() }} pending</span>
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="seedNativeCatalog()">Seed catalog</button>
+                        <button type="button" class="btn btn-sm btn-primary" [disabled]="saving()" (click)="createNativeDataScienceCluster()">Prepare native fallback</button>
+                      </div>
+                    </div>
+                    <div class="ai-gpu-metric-grid">
+                      <div class="ai-gpu-metric">
+                        <strong>{{ nativePlatform().components.length }}</strong>
+                        <span>catalog components</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ nativeSubscribedCount() }}</strong>
+                        <span>subscriptions</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ nativePlatform().installPlans.length }}</strong>
+                        <span>install plans</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ nativePlatform().dataScienceClusters.length }}</strong>
+                        <span>native clusters</span>
+                      </div>
+                    </div>
+                  </div>
+                  <table class="table table-compact ai-mini-table">
+                    <thead>
+                      <tr><th>Service</th><th>Required</th><th>Used by</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
+                    </thead>
+                    <tbody>
+                      @for (service of supportServices().items; track service.id) {
+                        <tr>
+                          <td>
+                            <strong>{{ service.label }}</strong>
+                            <p class="ai-footnote">{{ service.category }}</p>
+                            @if (service.resources.length) {
+                              <div class="ai-chip-list">
+                                @for (resource of service.resources.slice(0, 4); track resource.kind + ':' + resource.namespace + ':' + resource.name) {
+                                  <span class="label label-info">{{ resource.kind }} {{ resource.namespace ? resource.namespace + '/' : '' }}{{ resource.name }}</span>
+                                }
+                              </div>
+                            }
+                          </td>
+                          <td><span [class]="service.required ? 'label label-warning' : 'label label-info'">{{ service.required ? 'Required' : 'Optional' }}</span></td>
+                          <td>
+                            <div class="ai-chip-list">
+                              @for (usage of service.requiredFor; track usage) {
+                                <span class="label label-info">{{ usage }}</span>
+                              }
+                            </div>
+                          </td>
+                          <td><span [class]="'label ' + statusClass(service.phase)">{{ service.phase }}</span></td>
+                          <td>{{ service.evidence }}</td>
+                          <td>{{ service.nextStep }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Serving foundation preview</h3>
+                        <p class="ai-footnote">Checks the prerequisites and install paths for Knative Serving, KServe, and the OpenSphere-native serving fallback before running model serving e2e.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (servingFoundationPreview()) {
+                          <span [class]="'label ' + statusClass(servingFoundationPreview()?.phase || 'Pending')">{{ servingFoundationPreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="previewServingFoundation()">Preview serving foundation</button>
+                      </div>
+                    </div>
+                    @if (servingFoundationPreview()) {
+                      <div class="ai-gpu-metric-grid">
+                        <div class="ai-gpu-metric">
+                          <strong>{{ servingFoundationPreview()?.summary?.ready || 0 }}</strong>
+                          <span>ready</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ servingFoundationPreview()?.summary?.configured || 0 }}</strong>
+                          <span>configured</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ servingFoundationPreview()?.summary?.required || 0 }}</strong>
+                          <span>required</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ servingFoundationPreview()?.summary?.total || 0 }}</strong>
+                          <span>checks</span>
+                        </div>
+                      </div>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Check</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (check of servingFoundationPreview()?.checks || []; track check.id) {
+                            <tr>
+                              <td>
+                                <strong>{{ check.label }}</strong>
+                                @if (check.resources?.length) {
+                                  <div class="ai-chip-list">
+                                    @for (resource of check.resources; track resource.name) {
+                                      <span [class]="resource.installed ? 'label label-success' : 'label label-warning'">{{ resource.label }}</span>
+                                    }
+                                  </div>
+                                }
+                              </td>
+                              <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                              <td>{{ check.evidence }}</td>
+                              <td>{{ check.nextStep }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Install path</th><th>Phase</th><th>Recommended</th><th>Action</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (option of servingFoundationPreview()?.installOptions || []; track option.id) {
+                            <tr>
+                              <td><strong>{{ option.label }}</strong></td>
+                              <td><span [class]="'label ' + statusClass(option.phase)">{{ option.phase }}</span></td>
+                              <td>{{ option.recommended ? 'Yes' : 'No' }}</td>
+                              <td>{{ option.action }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (servingFoundationManifestPreview()) {
+                      <pre class="ai-log-output">{{ servingFoundationManifestPreview() }}</pre>
+                    }
+                  </div>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Pipelines foundation preview</h3>
+                        <p class="ai-footnote">Checks the artifact store, metadata credentials, compute route, and Tekton/KFP/DSPA install paths before validating Data Science Pipelines.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (pipelinesFoundationPreview()) {
+                          <span [class]="'label ' + statusClass(pipelinesFoundationPreview()?.phase || 'Pending')">{{ pipelinesFoundationPreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="previewPipelinesFoundation()">Preview pipelines foundation</button>
+                      </div>
+                    </div>
+                    @if (pipelinesFoundationPreview()) {
+                      <div class="ai-gpu-metric-grid">
+                        <div class="ai-gpu-metric">
+                          <strong>{{ pipelinesFoundationPreview()?.summary?.ready || 0 }}</strong>
+                          <span>ready</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ pipelinesFoundationPreview()?.summary?.configured || 0 }}</strong>
+                          <span>configured</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ pipelinesFoundationPreview()?.summary?.required || 0 }}</strong>
+                          <span>required</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ pipelinesFoundationPreview()?.summary?.total || 0 }}</strong>
+                          <span>checks</span>
+                        </div>
+                      </div>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Check</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (check of pipelinesFoundationPreview()?.checks || []; track check.id) {
+                            <tr>
+                              <td>
+                                <strong>{{ check.label }}</strong>
+                                @if (check.resources?.length) {
+                                  <div class="ai-chip-list">
+                                    @for (resource of check.resources; track resource.name) {
+                                      <span [class]="resource.installed ? 'label label-success' : 'label label-warning'">{{ resource.label }}</span>
+                                    }
+                                  </div>
+                                }
+                              </td>
+                              <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                              <td>{{ check.evidence }}</td>
+                              <td>{{ check.nextStep }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Install path</th><th>Phase</th><th>Recommended</th><th>Action</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (option of pipelinesFoundationPreview()?.installOptions || []; track option.id) {
+                            <tr>
+                              <td><strong>{{ option.label }}</strong></td>
+                              <td><span [class]="'label ' + statusClass(option.phase)">{{ option.phase }}</span></td>
+                              <td>{{ option.recommended ? 'Yes' : 'No' }}</td>
+                              <td>{{ option.action }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (pipelinesFoundationManifestPreview()) {
+                      <pre class="ai-log-output">{{ pipelinesFoundationManifestPreview() }}</pre>
+                    }
+                  </div>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Metadata credential bootstrap</h3>
+                        <p class="ai-footnote">Registers database credentials used by KFP metadata, Model Registry, and TrustyAI. Store each production service in its own database or schema when operating upstream components.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (metadataBootstrap()) {
+                          <span [class]="'label ' + statusClass(metadataBootstrap()?.phase || 'Configured')">{{ metadataBootstrap()?.phase }}</span>
+                        }
+                        @if (metadataPreview()) {
+                          <span [class]="'label ' + statusClass(metadataPreview()?.phase || 'ReadyToApply')">{{ metadataPreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving() || !metadataConfig().host || !metadataConfig().username" (click)="previewMetadataStore()">Preview metadata Secret</button>
+                        <button type="button" class="btn btn-sm btn-primary" [disabled]="saving() || !metadataConfig().host || !metadataConfig().username || !metadataConfig().password" (click)="bootstrapMetadataStore()">
+                          {{ saving() ? 'Configuring...' : 'Configure metadata Secret' }}
+                        </button>
+                      </div>
+                    </div>
+                    <form clrForm clrLayout="vertical" class="ai-setup-form">
+                      <clr-input-container>
+                        <label>Secret</label>
+                        <input clrInput name="metadataSecretName" [value]="metadataConfig().name" (input)="setMetadataField('name', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Namespace</label>
+                        <input clrInput name="metadataNamespace" [value]="metadataConfig().namespace" (input)="setMetadataField('namespace', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-select-container>
+                        <label>Provider</label>
+                        <select clrSelect name="metadataProvider" [value]="metadataConfig().provider" (change)="setMetadataField('provider', $any($event.target).value)">
+                          <option value="postgres">PostgreSQL</option>
+                          <option value="mysql">MySQL</option>
+                          <option value="mariadb">MariaDB</option>
+                        </select>
+                      </clr-select-container>
+                      <clr-input-container>
+                        <label>Host</label>
+                        <input clrInput name="metadataHost" placeholder="postgres.example.internal" [value]="metadataConfig().host" (input)="setMetadataField('host', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Port</label>
+                        <input clrInput name="metadataPort" [value]="metadataConfig().port" (input)="setMetadataField('port', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Database</label>
+                        <input clrInput name="metadataDatabase" [value]="metadataConfig().database" (input)="setMetadataField('database', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Username</label>
+                        <input clrInput name="metadataUsername" autocomplete="off" [value]="metadataConfig().username" (input)="setMetadataField('username', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Password</label>
+                        <input clrInput type="password" name="metadataPassword" autocomplete="new-password" [value]="metadataConfig().password" (input)="setMetadataField('password', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-select-container>
+                        <label>SSL mode</label>
+                        <select clrSelect name="metadataSslMode" [value]="metadataConfig().sslMode" (change)="setMetadataField('sslMode', $any($event.target).value)">
+                          <option value="disable">disable</option>
+                          <option value="prefer">prefer</option>
+                          <option value="require">require</option>
+                          <option value="verify-full">verify-full</option>
+                        </select>
+                      </clr-select-container>
+                      <div class="ai-option-list">
+                        <clr-checkbox-wrapper>
+                          <input type="checkbox" clrCheckbox [checked]="metadataConfig().purposes.includes('kfp')" (change)="toggleMetadataPurpose('kfp', $any($event.target).checked)" />
+                          <label>KFP metadata</label>
+                        </clr-checkbox-wrapper>
+                        <clr-checkbox-wrapper>
+                          <input type="checkbox" clrCheckbox [checked]="metadataConfig().purposes.includes('model-registry')" (change)="toggleMetadataPurpose('model-registry', $any($event.target).checked)" />
+                          <label>Model Registry</label>
+                        </clr-checkbox-wrapper>
+                        <clr-checkbox-wrapper>
+                          <input type="checkbox" clrCheckbox [checked]="metadataConfig().purposes.includes('trustyai')" (change)="toggleMetadataPurpose('trustyai', $any($event.target).checked)" />
+                          <label>TrustyAI</label>
+                        </clr-checkbox-wrapper>
+                      </div>
+                    </form>
+                    @if (metadataBootstrap()?.secret) {
+                      <p class="ai-footnote">Configured {{ metadataBootstrap()?.secret?.namespace }}/{{ metadataBootstrap()?.secret?.name }} for metadata-backed services.</p>
+                    }
+                    @if (metadataPreview()) {
+                      <div class="ai-chip-list">
+                        <span class="label label-info">{{ metadataPreview()?.summary?.manifests || 0 }} manifest(s)</span>
+                        <span [class]="metadataPreview()?.summary?.namespaceExists ? 'label label-success' : 'label label-warning'">Namespace {{ metadataPreview()?.summary?.namespaceExists ? 'exists' : 'will be created' }}</span>
+                        <span [class]="metadataPreview()?.summary?.passwordProvided ? 'label label-success' : 'label label-warning'">Password {{ metadataPreview()?.summary?.passwordProvided ? 'provided' : 'required before apply' }}</span>
+                        <span class="label label-info">{{ metadataPreview()?.summary?.purposes || 0 }} purpose(s)</span>
+                      </div>
+                    }
+                    @if (metadataManifestPreview()) {
+                      <pre class="ai-log-output">{{ metadataManifestPreview() }}</pre>
+                    }
+                  </div>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Model Registry foundation preview</h3>
+                        <p class="ai-footnote">Checks metadata credentials, artifact storage, serving handoff, and upstream ODH Model Registry readiness before running registry write/read validation.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (modelRegistryFoundationPreview()) {
+                          <span [class]="'label ' + statusClass(modelRegistryFoundationPreview()?.phase || 'Pending')">{{ modelRegistryFoundationPreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="previewModelRegistryFoundation()">Preview registry foundation</button>
+                      </div>
+                    </div>
+                    @if (modelRegistryFoundationPreview()) {
+                      <div class="ai-gpu-metric-grid">
+                        <div class="ai-gpu-metric">
+                          <strong>{{ modelRegistryFoundationPreview()?.summary?.ready || 0 }}</strong>
+                          <span>ready</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ modelRegistryFoundationPreview()?.summary?.configured || 0 }}</strong>
+                          <span>configured</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ modelRegistryFoundationPreview()?.summary?.required || 0 }}</strong>
+                          <span>required</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ modelRegistryFoundationPreview()?.summary?.total || 0 }}</strong>
+                          <span>checks</span>
+                        </div>
+                      </div>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Check</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (check of modelRegistryFoundationPreview()?.checks || []; track check.id) {
+                            <tr>
+                              <td>
+                                <strong>{{ check.label }}</strong>
+                                @if (check.resources?.length) {
+                                  <div class="ai-chip-list">
+                                    @for (resource of check.resources; track resource.name) {
+                                      <span [class]="resource.installed ? 'label label-success' : 'label label-warning'">{{ resource.label }}</span>
+                                    }
+                                  </div>
+                                }
+                              </td>
+                              <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                              <td>{{ check.evidence }}</td>
+                              <td>{{ check.nextStep }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Install path</th><th>Phase</th><th>Recommended</th><th>Action</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (option of modelRegistryFoundationPreview()?.installOptions || []; track option.id) {
+                            <tr>
+                              <td><strong>{{ option.label }}</strong></td>
+                              <td><span [class]="'label ' + statusClass(option.phase)">{{ option.phase }}</span></td>
+                              <td>{{ option.recommended ? 'Yes' : 'No' }}</td>
+                              <td>{{ option.action }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (modelRegistryFoundationManifestPreview()) {
+                      <pre class="ai-log-output">{{ modelRegistryFoundationManifestPreview() }}</pre>
+                    }
+                  </div>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Observability foundation preview</h3>
+                        <p class="ai-footnote">Checks metadata credentials, serving targets, registry evidence, TrustyAI/Prometheus APIs, and the OpenSphere-native MonitoringTarget fallback before validating model monitoring.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (observabilityFoundationPreview()) {
+                          <span [class]="'label ' + statusClass(observabilityFoundationPreview()?.phase || 'Pending')">{{ observabilityFoundationPreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="previewObservabilityFoundation()">Preview observability foundation</button>
+                      </div>
+                    </div>
+                    @if (observabilityFoundationPreview()) {
+                      <div class="ai-gpu-metric-grid">
+                        <div class="ai-gpu-metric">
+                          <strong>{{ observabilityFoundationPreview()?.summary?.ready || 0 }}</strong>
+                          <span>ready</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ observabilityFoundationPreview()?.summary?.configured || 0 }}</strong>
+                          <span>configured</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ observabilityFoundationPreview()?.summary?.required || 0 }}</strong>
+                          <span>required</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ observabilityFoundationPreview()?.summary?.total || 0 }}</strong>
+                          <span>checks</span>
+                        </div>
+                      </div>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Check</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (check of observabilityFoundationPreview()?.checks || []; track check.id) {
+                            <tr>
+                              <td>
+                                <strong>{{ check.label }}</strong>
+                                @if (check.resources?.length) {
+                                  <div class="ai-chip-list">
+                                    @for (resource of check.resources; track resource.name) {
+                                      <span [class]="resource.installed ? 'label label-success' : 'label label-warning'">{{ resource.label }}</span>
+                                    }
+                                  </div>
+                                }
+                              </td>
+                              <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                              <td>{{ check.evidence }}</td>
+                              <td>{{ check.nextStep }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Install path</th><th>Phase</th><th>Recommended</th><th>Action</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (option of observabilityFoundationPreview()?.installOptions || []; track option.id) {
+                            <tr>
+                              <td><strong>{{ option.label }}</strong></td>
+                              <td><span [class]="'label ' + statusClass(option.phase)">{{ option.phase }}</span></td>
+                              <td>{{ option.recommended ? 'Yes' : 'No' }}</td>
+                              <td>{{ option.action }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (observabilityFoundationManifestPreview()) {
+                      <pre class="ai-log-output">{{ observabilityFoundationManifestPreview() }}</pre>
+                    }
+                  </div>
+                  <div class="ai-gpu-config-panel">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">Object storage bootstrap</h3>
+                        <p class="ai-footnote">Registers an S3-compatible bucket as a DataConnectionClaim and stores credentials in a Kubernetes Secret. KServe storageUri, KFP artifacts, model registry imports, and data connections depend on this service.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        @if (objectStorageBootstrap()) {
+                          <span [class]="'label ' + statusClass(objectStorageBootstrap()?.phase || 'Configured')">{{ objectStorageBootstrap()?.phase }}</span>
+                        }
+                        @if (objectStoragePreview()) {
+                          <span [class]="'label ' + statusClass(objectStoragePreview()?.phase || 'ReadyToApply')">{{ objectStoragePreview()?.phase }}</span>
+                        }
+                        <button type="button" class="btn btn-sm btn-outline" [disabled]="saving() || !objectStorageConfig().endpoint || !objectStorageConfig().bucket" (click)="previewObjectStorage()">
+                          Preview manifests
+                        </button>
+                        <button type="button" class="btn btn-sm btn-primary" [disabled]="saving() || !objectStorageConfig().endpoint || !objectStorageConfig().bucket || !objectStorageConfig().accessKeyId || !objectStorageConfig().secretAccessKey" (click)="bootstrapObjectStorage()">
+                          {{ saving() ? 'Configuring...' : 'Configure object storage' }}
+                        </button>
+                      </div>
+                    </div>
+                    <form clrForm clrLayout="vertical" class="ai-setup-form">
+                      <clr-input-container>
+                        <label>DataConnectionClaim</label>
+                        <input clrInput name="objectStorageName" [value]="objectStorageConfig().name" (input)="setObjectStorageField('name', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Namespace</label>
+                        <input clrInput name="objectStorageNamespace" [value]="objectStorageConfig().namespace" (input)="setObjectStorageField('namespace', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-select-container>
+                        <label>Provider</label>
+                        <select clrSelect name="objectStorageProvider" [value]="objectStorageConfig().provider" (change)="setObjectStorageField('provider', $any($event.target).value)">
+                          <option value="s3">S3 compatible</option>
+                          <option value="minio">MinIO</option>
+                          <option value="ceph-rgw">Ceph RGW</option>
+                          <option value="rgw">RGW</option>
+                        </select>
+                      </clr-select-container>
+                      <clr-input-container>
+                        <label>Endpoint</label>
+                        <input clrInput name="objectStorageEndpoint" placeholder="https://s3.example.internal" [value]="objectStorageConfig().endpoint" (input)="setObjectStorageField('endpoint', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Bucket</label>
+                        <input clrInput name="objectStorageBucket" [value]="objectStorageConfig().bucket" (input)="setObjectStorageField('bucket', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Region</label>
+                        <input clrInput name="objectStorageRegion" [value]="objectStorageConfig().region" (input)="setObjectStorageField('region', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Credential Secret</label>
+                        <input clrInput name="objectStorageSecretName" [value]="objectStorageConfig().secretName" (input)="setObjectStorageField('secretName', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Access key</label>
+                        <input clrInput name="objectStorageAccessKey" autocomplete="off" [value]="objectStorageConfig().accessKeyId" (input)="setObjectStorageField('accessKeyId', $any($event.target).value)" />
+                      </clr-input-container>
+                      <clr-input-container>
+                        <label>Secret key</label>
+                        <input clrInput type="password" name="objectStorageSecretKey" autocomplete="new-password" [value]="objectStorageConfig().secretAccessKey" (input)="setObjectStorageField('secretAccessKey', $any($event.target).value)" />
+                      </clr-input-container>
+                      <div class="ai-option-list">
+                        <clr-checkbox-wrapper>
+                          <input type="checkbox" clrCheckbox [checked]="objectStorageConfig().useTls" (change)="setObjectStorageField('useTls', $any($event.target).checked)" />
+                          <label>Use TLS</label>
+                        </clr-checkbox-wrapper>
+                        <clr-checkbox-wrapper>
+                          <input type="checkbox" clrCheckbox [checked]="objectStorageConfig().insecureSkipTlsVerify" (change)="setObjectStorageField('insecureSkipTlsVerify', $any($event.target).checked)" />
+                          <label>Skip TLS verification</label>
+                        </clr-checkbox-wrapper>
+                      </div>
+                    </form>
+                    @if (objectStorageBootstrap()?.dataConnection) {
+                      <p class="ai-footnote">Configured {{ objectStorageBootstrap()?.dataConnection?.namespace }}/{{ objectStorageBootstrap()?.dataConnection?.name }} with Secret {{ objectStorageBootstrap()?.secret?.namespace }}/{{ objectStorageBootstrap()?.secret?.name }}.</p>
+                    }
+                    @if (objectStoragePreview()) {
+                      <div class="ai-chip-list">
+                        <span class="label label-info">{{ objectStoragePreview()?.summary?.manifests || 0 }} manifest(s)</span>
+                        <span [class]="objectStoragePreview()?.summary?.crdInstalled ? 'label label-success' : 'label label-warning'">CRD {{ objectStoragePreview()?.summary?.crdInstalled ? 'installed' : 'will be created' }}</span>
+                        <span [class]="objectStoragePreview()?.summary?.namespaceExists ? 'label label-success' : 'label label-warning'">Namespace {{ objectStoragePreview()?.summary?.namespaceExists ? 'exists' : 'will be created' }}</span>
+                        <span [class]="objectStoragePreview()?.summary?.credentialsProvided ? 'label label-success' : 'label label-warning'">Credentials {{ objectStoragePreview()?.summary?.credentialsProvided ? 'provided' : 'required before apply' }}</span>
+                      </div>
+                    }
+                    @if (objectStorageManifestPreview()) {
+                      <pre class="ai-log-output">{{ objectStorageManifestPreview() }}</pre>
+                    }
+                  </div>
+                  @if (!supportServices().items.length) {
+                    <p class="ai-footnote">Support service inventory has not been loaded yet.</p>
+                  }
+                </div>
+              </div>
               <div class="card ai-action-panel" [class.ai-tab-hidden]="clusterSettingsTab() !== 'setup'">
                 <div class="card-header">
                   <div class="card-title">AI Platform Setup Wizard</div>
@@ -2460,10 +3650,14 @@ function phaseClass(phase: string): string {
                     <span class="label label-success">{{ finalReadiness().summary.nativeReady || 0 }} native ready</span>
                     <span class="label label-warning">{{ finalReadiness().summary.nativeWarning || 0 }} native warnings</span>
                     <span class="label label-danger">{{ finalReadiness().summary.nativeFail || 0 }} native failed</span>
-                    <span [class]="'label ' + statusClass(finalReadiness().upstreamPhase || 'Pending')">Upstream parity: {{ finalReadiness().upstreamPhase || 'Pending' }}</span>
+                    <span [class]="'label ' + statusClass(finalReadiness().readinessModel?.upstreamAdapterReadiness?.phase || finalReadiness().upstreamPhase || 'Pending')">Upstream adapter: {{ finalReadiness().readinessModel?.upstreamAdapterReadiness?.phase || finalReadiness().upstreamPhase || 'Pending' }}</span>
+                    <span [class]="'label ' + statusClass(finalReadiness().readinessModel?.parityReadiness?.phase || 'NotReady')">Parity: {{ finalReadiness().readinessModel?.parityReadiness?.phase || 'NotReady' }}</span>
                     <span class="label label-warning">{{ finalReadiness().summary.upstreamNotInstalled || 0 }} upstream not installed</span>
                     <span class="ai-footnote">Generated {{ finalReadiness().generatedAt || '-' }}</span>
                   </div>
+                  @if (finalReadiness().readinessModel?.parityReadiness?.evidence) {
+                    <p class="ai-footnote">{{ finalReadiness().readinessModel?.parityReadiness?.evidence }}</p>
+                  }
                   <table class="table table-compact ai-mini-table">
                     <thead>
                       <tr><th>Check</th><th>Scope</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
@@ -3709,13 +4903,19 @@ function phaseClass(phase: string): string {
                     <clr-dg-cell>{{ item.ready ? 'Ready' : 'Not ready' }}</clr-dg-cell>
                     <clr-dg-cell>
                       @if (activePage() === 'workbenches') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadWorkbenchDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="workbenchAction(item, 'start')">Start</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="workbenchAction(item, 'stop')">Stop</button>
                       }
+                      @if (activePage() === 'data-connections') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadDataConnectionDetail(item)">Details</button>
+                      }
                       @if (activePage() === 'pipelines') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="runPipeline(item)">Run</button>
                       }
                       @if (activePage() === 'pipeline-runs') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineLogs(item)">Logs</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineLineage(item)">Lineage</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="claimAction(item, 'retry')">Retry</button>
@@ -3733,6 +4933,7 @@ function phaseClass(phase: string): string {
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="claimAction(item, 'resume')">Resume</button>
                       }
                       @if (activePage() === 'inference') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadInferenceDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="editInferenceFrom(item)">Edit</button>
                       }
                       <button type="button" class="btn btn-sm btn-link" [disabled]="saving() || !canDelete(item)" (click)="deleteResource(item)">Delete</button>
@@ -3744,8 +4945,258 @@ function phaseClass(phase: string): string {
                   <clr-dg-placeholder>No items returned for this view.</clr-dg-placeholder>
                 }
 
-                <clr-dg-footer>{{ resourceMeta().actualCount }} actual, {{ resourceMeta().referenceCount }} reference</clr-dg-footer>
               </clr-datagrid>
+              @if (activePage() === 'data-connections' && dataConnectionDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Data connection detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ dataConnectionDetail()?.item?.namespace }}/{{ dataConnectionDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(dataConnectionDetail()?.item || {})">{{ sourceLabel(dataConnectionDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(dataConnectionDetail()?.item?.phase || '')">{{ dataConnectionDetail()?.item?.phase || '-' }}</span>
+                      <span class="label label-info">Secret masked</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Provider</span><strong>{{ dataConnectionDetail()?.provider || '-' }}</strong></div>
+                      <div><span>Endpoint</span><strong>{{ dataConnectionDetail()?.endpoint || '-' }}</strong></div>
+                      <div><span>Database/Bucket</span><strong>{{ dataConnectionDetail()?.database || '-' }}</strong></div>
+                      <div><span>Owner</span><strong>{{ dataConnectionDetail()?.owner || '-' }}</strong></div>
+                      <div><span>Secret</span><strong>{{ dataConnectionDetail()?.secret?.namespace }}/{{ dataConnectionDetail()?.secret?.name || '-' }}</strong></div>
+                      <div><span>Secret type</span><strong>{{ dataConnectionDetail()?.secret?.type || '-' }}</strong></div>
+                    </div>
+                    <p class="ai-footnote">{{ dataConnectionDetail()?.secret?.message || 'Credential values are not displayed.' }}</p>
+                    @if (dataConnectionDetail()?.secret?.keys?.length) {
+                      <div class="ai-label-row">
+                        @for (key of dataConnectionDetail()?.secret?.keys || []; track key) {
+                          <span class="label label-info">{{ key }}</span>
+                        }
+                      </div>
+                    }
+                    @if (dataConnectionDetail()?.usage?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Using resource</th><th>Kind</th><th>Phase</th><th>Ready</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (usage of dataConnectionDetail()?.usage || []; track usage.kind + ':' + usage.name) {
+                            <tr>
+                              <td>{{ usage.namespace }}/{{ usage.name }}</td>
+                              <td>{{ usage.kind }}</td>
+                              <td>{{ usage.phase || '-' }}</td>
+                              <td>{{ usage.ready ? 'Ready' : 'Not ready' }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (dataConnectionDetail()?.conditions?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Condition</th><th>Status</th><th>Reason</th><th>Message</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (condition of dataConnectionDetail()?.conditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                  </div>
+                </section>
+              }
+              @if (activePage() === 'workbenches' && workbenchDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Workbench runtime detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ workbenchDetail()?.item?.namespace }}/{{ workbenchDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(workbenchDetail()?.item || {})">{{ sourceLabel(workbenchDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(workbenchDetail()?.item?.phase || '')">{{ workbenchDetail()?.item?.phase || '-' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Runtime</span><strong>{{ workbenchDetail()?.runtime?.name || '-' }}</strong></div>
+                      <div><span>Image</span><strong>{{ workbenchDetail()?.runtime?.image || '-' }}</strong></div>
+                      <div><span>Compute backend</span><strong>{{ workbenchDetail()?.runtime?.computeBackendRef || workbenchDetail()?.item?.computeBackendRef || '-' }}</strong></div>
+                      <div><span>GPU class</span><strong>{{ workbenchDetail()?.runtime?.gpuClass || '-' }}</strong></div>
+                      <div><span>Open URL</span><strong>{{ workbenchDetail()?.runtime?.proxyUrl || workbenchDetail()?.runtime?.openUrl || '-' }}</strong></div>
+                      <div><span>Storage</span><strong>{{ workbenchDetail()?.storage?.name || '-' }}</strong></div>
+                    </div>
+                    <div class="ai-label-row">
+                      <button type="button" class="btn btn-sm btn-primary" [disabled]="saving() || !workbenchDetail()?.runtime?.proxyUrl" (click)="openWorkbenchProxy()">Open</button>
+                      <span [class]="workbenchDetail()?.runtime?.reachability?.ready ? 'label label-success' : 'label label-warning'">{{ workbenchDetail()?.runtime?.reachability?.phase || 'Unchecked' }}</span>
+                      <span class="ai-footnote">{{ workbenchDetail()?.runtime?.reachability?.message || 'Workbench reachability has not been checked.' }}</span>
+                    </div>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Object</th><th>Name</th><th>Phase</th><th>Ready</th><th>Message</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (obj of workbenchRuntimeObjects(); track obj.kind + ':' + obj.name) {
+                          <tr>
+                            <td>{{ obj.kind }}</td>
+                            <td>{{ obj.name }}</td>
+                            <td>{{ obj.phase || '-' }}</td>
+                            <td>{{ obj.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ obj.message || '-' }}</td>
+                          </tr>
+                        }
+                        @for (pod of workbenchDetail()?.pods || []; track pod.name) {
+                          <tr>
+                            <td>Pod</td>
+                            <td>{{ pod.name }}</td>
+                            <td>{{ pod.phase || '-' }}</td>
+                            <td>{{ pod.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ pod.message || '-' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                    @if (workbenchDetail()?.events?.length) {
+                      <div class="ai-log-block">
+                        @for (event of workbenchDetail()?.events || []; track event.time + event.reason) {
+                          <code>{{ event.time }} {{ event.type }} {{ event.reason }} - {{ event.message }}</code>
+                        }
+                      </div>
+                    }
+                    @if (workbenchDetail()?.logs?.tailLines?.length) {
+                      <div class="ai-log-block">
+                        @for (line of workbenchDetail()?.logs?.tailLines || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
+              @if ((activePage() === 'pipelines' || activePage() === 'pipeline-runs') && pipelineDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Pipeline detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ pipelineDetail()?.item?.namespace }}/{{ pipelineDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(pipelineDetail()?.item || {})">{{ sourceLabel(pipelineDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(pipelineDetail()?.item?.phase || '')">{{ pipelineDetail()?.item?.phase || '-' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Pipeline</span><strong>{{ pipelineDetail()?.pipelineName || '-' }}</strong></div>
+                      <div><span>Version</span><strong>{{ pipelineDetail()?.definition?.version || '-' }}</strong></div>
+                      <div><span>Backend</span><strong>{{ pipelineDetail()?.backendMode || '-' }}</strong></div>
+                      <div><span>Source</span><strong>{{ pipelineDetail()?.definition?.source || '-' }}</strong></div>
+                    </div>
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ pipelineDetail()?.runs?.length || 0 }} runs</span>
+                      <span class="label label-info">{{ pipelineDetail()?.experiments?.length || 0 }} experiments</span>
+                      <span class="label label-info">{{ pipelineDetail()?.artifacts?.length || 0 }} artifacts</span>
+                      <span class="label label-info">{{ pipelineDetail()?.lineage?.length || 0 }} lineage edges</span>
+                    </div>
+                    @if (pipelineDetail()?.lineage?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>From</th><th>To</th><th>Type</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (edge of pipelineDetail()?.lineage || []; track edge.from + edge.to + edge.type) {
+                            <tr><td>{{ edge.from }}</td><td>{{ edge.to }}</td><td>{{ edge.type }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (pipelineDetail()?.logs?.length) {
+                      <div class="ai-log-block">
+                        @for (line of pipelineDetail()?.logs || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
+              @if (activePage() === 'inference' && inferenceDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Model deployment detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ inferenceDetail()?.item?.namespace }}/{{ inferenceDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(inferenceDetail()?.item || {})">{{ sourceLabel(inferenceDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(inferenceDetail()?.item?.phase || '')">{{ inferenceDetail()?.item?.phase || '-' }}</span>
+                      <span [class]="inferenceDetail()?.runtime?.reachability?.ready ? 'label label-success' : 'label label-warning'">{{ inferenceDetail()?.runtime?.reachability?.phase || 'Unchecked' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Model</span><strong>{{ inferenceDetail()?.runtime?.modelName || '-' }}</strong></div>
+                      <div><span>Runtime</span><strong>{{ inferenceDetail()?.runtime?.runtime || '-' }}</strong></div>
+                      <div><span>Backend</span><strong>{{ inferenceDetail()?.runtime?.backendMode || '-' }}</strong></div>
+                      <div><span>Runtime object</span><strong>{{ inferenceDetail()?.runtime?.name || '-' }}</strong></div>
+                      <div><span>URL</span><strong>{{ inferenceDetail()?.runtime?.url || '-' }}</strong></div>
+                      <div><span>Predict URL</span><strong>{{ inferenceDetail()?.runtime?.predictUrl || '-' }}</strong></div>
+                      <div><span>Model URI</span><strong>{{ inferenceDetail()?.runtime?.modelUri || '-' }}</strong></div>
+                      <div><span>Image</span><strong>{{ inferenceDetail()?.runtime?.image || '-' }}</strong></div>
+                    </div>
+                    <p class="ai-footnote">{{ inferenceDetail()?.runtime?.reachability?.message || 'Inference reachability has not been checked.' }}</p>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Object</th><th>Name</th><th>Phase</th><th>Ready</th><th>Message</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (obj of inferenceRuntimeObjects(); track obj.kind + ':' + obj.name) {
+                          <tr>
+                            <td>{{ obj.kind }}</td>
+                            <td>{{ obj.name }}</td>
+                            <td>{{ obj.phase || '-' }}</td>
+                            <td>{{ obj.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ obj.message || '-' }}</td>
+                          </tr>
+                        }
+                        @for (pod of inferenceDetail()?.pods || []; track pod.name) {
+                          <tr>
+                            <td>Pod</td>
+                            <td>{{ pod.name }}</td>
+                            <td>{{ pod.phase || '-' }}</td>
+                            <td>{{ pod.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ pod.message || '-' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                    @if (inferenceDetail()?.conditions?.length || inferenceDetail()?.upstreamConditions?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Condition</th><th>Status</th><th>Reason</th><th>Message</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (condition of inferenceDetail()?.conditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                          @for (condition of inferenceDetail()?.upstreamConditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (inferenceDetail()?.events?.length) {
+                      <div class="ai-log-block">
+                        @for (event of inferenceDetail()?.events || []; track event.time + event.reason) {
+                          <code>{{ event.time }} {{ event.type }} {{ event.reason }} - {{ event.message }}</code>
+                        }
+                      </div>
+                    }
+                    @if (inferenceDetail()?.logs?.tailLines?.length) {
+                      <div class="ai-log-block">
+                        @for (line of inferenceDetail()?.logs?.tailLines || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
             }
           </section>
         }
@@ -4201,6 +5652,10 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly createForm = signal<CreateForm>(defaultCreateForm(this.activePage()));
   readonly operationTitle = signal('');
   readonly operationLines = signal<string[]>([]);
+  readonly workbenchDetail = signal<WorkbenchDetailResponse | null>(null);
+  readonly pipelineDetail = signal<PipelineDetailResponse | null>(null);
+  readonly inferenceDetail = signal<InferenceDetailResponse | null>(null);
+  readonly dataConnectionDetail = signal<DataConnectionDetailResponse | null>(null);
   readonly lineageItems = signal<PipelineLineageItem[]>([]);
   readonly trustyMetrics = signal<TrustyMetricItem[]>([]);
   readonly trustyAlerts = signal<TrustyAlertItem[]>([]);
@@ -4214,6 +5669,23 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly odhComponents = signal<ResourceItem[]>([]);
   readonly nativePlatform = signal<NativePlatformResponse>({ components: [], subscriptions: [], installPlans: [], dataScienceClusters: [] });
   readonly nativeBackends = signal<NativeBackendsResponse>({ summary: { upstreamReady: 0, fallbackReady: 0, unavailable: 0, total: 0, phase: 'Pending' }, items: [] });
+  readonly supportServices = signal<SupportServicesResponse>({ generatedAt: '', phase: 'Pending', summary: { total: 0, ready: 0, configured: 0, missing: 0, requiredMissing: 0 }, items: [], installPlan: [], configurationPages: [], setupPrerequisites: [] });
+  readonly servingFoundationPreview = signal<ServingFoundationPreviewResponse | null>(null);
+  readonly servingFoundationManifestPreview = signal('');
+  readonly pipelinesFoundationPreview = signal<PipelinesFoundationPreviewResponse | null>(null);
+  readonly pipelinesFoundationManifestPreview = signal('');
+  readonly modelRegistryFoundationPreview = signal<ModelRegistryFoundationPreviewResponse | null>(null);
+  readonly modelRegistryFoundationManifestPreview = signal('');
+  readonly observabilityFoundationPreview = signal<ObservabilityFoundationPreviewResponse | null>(null);
+  readonly observabilityFoundationManifestPreview = signal('');
+  readonly metadataConfig = signal<MetadataConfig>(defaultMetadataConfig());
+  readonly metadataPreview = signal<MetadataPreviewResponse | null>(null);
+  readonly metadataManifestPreview = signal('');
+  readonly metadataBootstrap = signal<MetadataBootstrapResponse | null>(null);
+  readonly objectStoragePreview = signal<ObjectStoragePreviewResponse | null>(null);
+  readonly objectStorageManifestPreview = signal('');
+  readonly objectStorageConfig = signal<ObjectStorageConfig>(defaultObjectStorageConfig());
+  readonly objectStorageBootstrap = signal<ObjectStorageBootstrapResponse | null>(null);
   readonly computeBackends = signal<ResourceItem[]>([]);
   readonly gpuInventory = signal<GpuInventoryResponse>({ phase: 'Pending', ready: false, generatedAt: '', summary: { nodes: 0, readyNodes: 0, gpuNodes: 0, totalCapacity: 0, totalAllocatable: 0, pluginPods: 0, pluginDaemonSets: 0, runtimeClasses: 0, diagnostics: 0 }, nodes: [], pluginPods: [], pluginDaemonSets: [], runtimeClasses: [], diagnostics: [], nextSteps: [] });
   readonly gpuEnablementProfile = signal('nvidia');
@@ -4259,6 +5731,18 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.activePage() !== 'training-jobs') return [];
     return this.resourceItems().filter((item) => item.backendType === 'external' || !!item.externalJob);
   });
+  readonly overviewGpuBackends = computed(() => {
+    const externalTypes = new Set(['external', 'docker-bridge', 'windows-service', 'windows-supervisor', 'wsl2-bridge', 'remote', 'notebook-bridge', 'cpu']);
+    return this.computeBackends().filter((item) => {
+      const type = (item.backendType || '').toLowerCase();
+      return externalTypes.has(type) || !!item.endpoint || !!item.resourceName || !!item.gpus?.length;
+    });
+  });
+  readonly overviewExternalGpuCount = computed(() => this.overviewGpuBackends().reduce((sum, backend) => sum + (backend.gpus?.length || 0), 0));
+  readonly overviewAvailableGpuCount = computed(() => (this.gpuInventory().summary.totalAllocatable || 0) + this.overviewExternalGpuCount());
+  readonly overviewGpuPhase = computed(() => this.overviewAvailableGpuCount() > 0 ? 'Ready' : this.gpuInventory().phase);
+  readonly overviewGpuProducts = computed(() => this.overviewGpuBackends().flatMap((backend) => backend.gpus || []));
+  readonly overviewGpuProductName = computed(() => String(this.overviewGpuProducts()[0]?.['name'] || this.overviewGpuBackends()[0]?.provider || 'External GPU backend'));
   readonly gpuServiceCatalog = computed<GpuCatalogServiceItem[]>(() => {
     const alternatives = this.gpuEnablementPlan()?.alternatives || [];
     const active = this.gpuEnablementProfile();
@@ -4395,6 +5879,16 @@ export class AppComponent implements OnInit, OnDestroy {
     const lines = item.externalJobLogs?.lines || [];
     const values = lines.map((line) => typeof line === 'string' ? line : String(line?.['line'] || '')).filter(Boolean);
     return values.find((line) => /MiB\s*\/|RTX|GeForce|NVIDIA-SMI|Default/.test(line)) || values[values.length - 1] || String(item.externalJobLogs?.text || '');
+  }
+
+  workbenchRuntimeObjects(): K8sObjectSummary[] {
+    const detail = this.workbenchDetail();
+    return [detail?.deployment, detail?.service, detail?.storage].filter((item): item is K8sObjectSummary => !!item);
+  }
+
+  inferenceRuntimeObjects(): K8sObjectSummary[] {
+    const detail = this.inferenceDetail();
+    return [detail?.inferenceService, detail?.deployment, detail?.service].filter((item): item is K8sObjectSummary => !!item);
   }
 
   alertType(severity: string): string {
@@ -4558,8 +6052,13 @@ export class AppComponent implements OnInit, OnDestroy {
     return Object.entries(labels || {}).map(([key, value]) => ({ key, value }));
   }
 
-  sourceLabel(item: { source?: string; reference?: boolean }): string {
+  sourceLabel(item: { source?: string; backendMode?: string; reference?: boolean }): string {
     if (item.reference) return 'Reference';
+    const backendMode = (item.backendMode || '').toLowerCase();
+    if (backendMode === 'native') return 'Native';
+    if (backendMode === 'upstream-adapter') return 'Upstream adapter';
+    if (backendMode === 'parity') return 'Parity';
+    if (backendMode === 'external') return 'External';
     const source = (item.source || '').toLowerCase();
     if (source === 'cluster') return 'Actual';
     if (source === 'native') return 'Native';
@@ -4567,9 +6066,25 @@ export class AppComponent implements OnInit, OnDestroy {
     return item.source || 'Actual';
   }
 
-  sourceClass(item: { source?: string; reference?: boolean }): string {
+  sourceClass(item: { source?: string; backendMode?: string; reference?: boolean }): string {
     if (item.reference) return 'label label-info';
+    const backendMode = (item.backendMode || '').toLowerCase();
+    if (backendMode === 'upstream-adapter') return 'label label-warning';
+    if (backendMode === 'parity') return 'label label-success';
+    if (backendMode === 'external') return 'label label-info';
     return 'label label-success';
+  }
+
+  nativeSubscribedCount(): number {
+    return this.nativePlatform().components.filter((component) => component.subscribed).length;
+  }
+
+  nativeInstalledCount(): number {
+    return this.nativePlatform().components.filter((component) => component.installed || /installed|ready|complete/i.test(component.phase || '')).length;
+  }
+
+  nativePendingCount(): number {
+    return this.nativePlatform().components.filter((component) => !component.installed && !/installed|ready|complete/i.test(component.phase || '')).length;
   }
 
   isOpen(id: string): boolean {
@@ -4604,6 +6119,30 @@ export class AppComponent implements OnInit, OnDestroy {
       return;
     }
     this.writeRoute('cluster-settings', true, tab);
+  }
+
+  openConfigurationPage(route: string, event?: Event): void {
+    event?.preventDefault();
+    if (route === '/backbone' && typeof window !== 'undefined') {
+      window.location.href = '/backbone';
+      return;
+    }
+    const uiRoute = String(route || '')
+      .replace(/^https?:\/\/[^/]+/i, '')
+      .replace(/^\/+/, '')
+      .replace(/^ai\/?/, '');
+    const clusterBase = PAGE_ROUTE['cluster-settings'];
+    if (uiRoute === clusterBase || uiRoute.startsWith(`${clusterBase}/`)) {
+      const tabRoute = uiRoute === clusterBase ? 'setup' : uiRoute.slice(clusterBase.length + 1).split('/')[0];
+      const tab = Object.entries(CLUSTER_SETTINGS_TAB_ROUTE).find(([, value]) => value === tabRoute)?.[0] as ClusterSettingsTab | undefined;
+      this.clusterSettingsTab.set(tab || 'setup');
+      this.setActivePage('cluster-settings', true);
+      return;
+    }
+    const match = Object.entries(PAGE_ROUTE)
+      .filter(([, value]) => value && (uiRoute === value || uiRoute.startsWith(`${value}/`)))
+      .sort((a, b) => b[1].length - a[1].length)[0];
+    this.setActivePage((match?.[0] as PageId | undefined) || 'home', true);
   }
 
   private setActivePage(page: PageId, pushUrl: boolean): void {
@@ -4724,6 +6263,66 @@ export class AppComponent implements OnInit, OnDestroy {
     );
   }
 
+  async loadWorkbenchDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+      });
+      const res = await fetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Workbench detail failed with HTTP ${res.status}`);
+      this.workbenchDetail.set(data as WorkbenchDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded workbench detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async openWorkbenchProxy(): Promise<void> {
+    const detail = this.workbenchDetail();
+    const proxyUrl = detail?.runtime?.proxyUrl;
+    if (!proxyUrl) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const session = await fetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
+      const data = await session.json().catch(() => ({}));
+      if (!session.ok) throw new Error(data.error || `Workbench session failed with HTTP ${session.status}`);
+      const href = proxyUrl.startsWith('http') ? proxyUrl : `${this.apiBase}${proxyUrl}`;
+      window.open(href, '_blank', 'noopener,noreferrer');
+      this.actionMessage.set({ type: 'success', message: `Opening workbench runtime: ${detail?.runtime?.namespace}/${detail?.runtime?.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async loadDataConnectionDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+      });
+      const res = await fetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Data connection detail failed with HTTP ${res.status}`);
+      this.dataConnectionDetail.set(data as DataConnectionDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded data connection detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
   async runPipeline(item: ResourceItem): Promise<void> {
     await this.runOperation(
       `${this.apiBase}/operations/pipelines/run`,
@@ -4731,6 +6330,48 @@ export class AppComponent implements OnInit, OnDestroy {
       `Pipeline run requested: ${item.name}`,
       () => this.fetchResourcePage('pipeline-runs'),
     );
+  }
+
+  async loadPipelineDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+        kind: item.kind === 'PipelineRunClaim' ? 'PipelineRunClaim' : 'PipelineClaim',
+      });
+      const res = await fetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Pipeline detail failed with HTTP ${res.status}`);
+      this.pipelineDetail.set(data as PipelineDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded pipeline detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async loadInferenceDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+        kind: item.kind === 'InferenceService' ? 'InferenceService' : 'InferenceClaim',
+      });
+      const res = await fetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Inference detail failed with HTTP ${res.status}`);
+      this.inferenceDetail.set(data as InferenceDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded model deployment detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
   }
 
   async claimAction(item: ResourceItem, action: 'retry' | 'suspend' | 'resume' | 'approve' | 'reject'): Promise<void> {
@@ -4866,9 +6507,247 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
+  async loadSupportServices(): Promise<void> {
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Support service detection failed with HTTP ${res.status}`);
+      this.supportServices.set(data as SupportServicesResponse);
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async previewServingFoundation(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.servingFoundationPreview.set(null);
+    this.servingFoundationManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/serving/preview`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Serving foundation preview failed with HTTP ${res.status}`);
+      const result = data as ServingFoundationPreviewResponse;
+      this.servingFoundationPreview.set(result);
+      this.servingFoundationManifestPreview.set(JSON.stringify(result.installOptions || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Serving foundation preview generated: ${result.summary?.required || 0} required item(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async previewPipelinesFoundation(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.pipelinesFoundationPreview.set(null);
+    this.pipelinesFoundationManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/pipelines/preview`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Pipelines foundation preview failed with HTTP ${res.status}`);
+      const result = data as PipelinesFoundationPreviewResponse;
+      this.pipelinesFoundationPreview.set(result);
+      this.pipelinesFoundationManifestPreview.set(JSON.stringify(result.installOptions || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Pipelines foundation preview generated: ${result.summary?.required || 0} required item(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async previewModelRegistryFoundation(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.modelRegistryFoundationPreview.set(null);
+    this.modelRegistryFoundationManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/model-registry/preview`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Model Registry foundation preview failed with HTTP ${res.status}`);
+      const result = data as ModelRegistryFoundationPreviewResponse;
+      this.modelRegistryFoundationPreview.set(result);
+      this.modelRegistryFoundationManifestPreview.set(JSON.stringify(result.installOptions || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Model Registry foundation preview generated: ${result.summary?.required || 0} required item(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async previewObservabilityFoundation(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.observabilityFoundationPreview.set(null);
+    this.observabilityFoundationManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/observability/preview`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Observability foundation preview failed with HTTP ${res.status}`);
+      const result = data as ObservabilityFoundationPreviewResponse;
+      this.observabilityFoundationPreview.set(result);
+      this.observabilityFoundationManifestPreview.set(JSON.stringify(result.installOptions || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Observability foundation preview generated: ${result.summary?.required || 0} required item(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  setMetadataField<K extends keyof MetadataConfig>(field: K, value: MetadataConfig[K]): void {
+    this.metadataConfig.update((current) => ({ ...current, [field]: value }));
+  }
+
+  toggleMetadataPurpose(purpose: string, checked: boolean): void {
+    this.metadataConfig.update((current) => {
+      const values = new Set(current.purposes);
+      if (checked) values.add(purpose);
+      else values.delete(purpose);
+      return { ...current, purposes: Array.from(values) };
+    });
+  }
+
+  async previewMetadataStore(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.metadataPreview.set(null);
+    this.metadataManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/metadata/preview`, {
+        method: 'POST',
+        headers: this.actionHeaders(),
+        body: JSON.stringify(this.metadataConfig()),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Metadata preview failed with HTTP ${res.status}`);
+      const result = data as MetadataPreviewResponse;
+      this.metadataPreview.set(result);
+      this.metadataManifestPreview.set(JSON.stringify(result.manifests || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Metadata credential preview generated: ${result.summary?.manifests || 0} manifest(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async bootstrapMetadataStore(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.metadataBootstrap.set(null);
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/metadata`, {
+        method: 'POST',
+        headers: this.actionHeaders(),
+        body: JSON.stringify(this.metadataConfig()),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Metadata bootstrap failed with HTTP ${res.status}`);
+      const result = data as MetadataBootstrapResponse;
+      this.metadataBootstrap.set(result);
+      if (result.supportServices) this.supportServices.set(result.supportServices);
+      this.actionMessage.set({ type: 'success', message: 'Metadata credential Secret was configured. Review Support services status.' });
+      await this.fetchSummary();
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  setObjectStorageField<K extends keyof ObjectStorageConfig>(field: K, value: ObjectStorageConfig[K]): void {
+    this.objectStorageConfig.update((current) => ({ ...current, [field]: value }));
+  }
+
+  applyBackboneDefaults(): void {
+    const defaults = this.supportServices().backbone?.defaults;
+    if (!defaults) return;
+    if (defaults.objectStorage) {
+      this.objectStorageConfig.update((current) => ({
+        ...current,
+        ...defaults.objectStorage,
+        name: current.name || 'default-object-storage',
+        namespace: current.namespace || 'opensphere-system',
+        accessKeyId: current.accessKeyId,
+        secretAccessKey: current.secretAccessKey,
+      } as ObjectStorageConfig));
+    }
+    if (defaults.metadata) {
+      this.metadataConfig.update((current) => ({
+        ...current,
+        ...defaults.metadata,
+        name: current.name || 'oah-metadata-credentials',
+        namespace: current.namespace || 'opensphere-system',
+        password: current.password,
+        purposes: current.purposes.length ? current.purposes : ['kfp', 'model-registry', 'trustyai'],
+      } as MetadataConfig));
+    }
+    this.actionMessage.set({ type: 'info', message: 'Backbone defaults were applied to object storage and metadata forms. Add credentials before applying.' });
+  }
+
+  async previewObjectStorage(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.objectStoragePreview.set(null);
+    this.objectStorageManifestPreview.set('');
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/object-storage/preview`, {
+        method: 'POST',
+        headers: this.actionHeaders(),
+        body: JSON.stringify(this.objectStorageConfig()),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Object storage preview failed with HTTP ${res.status}`);
+      const result = data as ObjectStoragePreviewResponse;
+      this.objectStoragePreview.set(result);
+      this.objectStorageManifestPreview.set(JSON.stringify(result.manifests || [], null, 2));
+      this.actionMessage.set({ type: 'info', message: `Object storage preview generated: ${result.summary?.manifests || 0} manifest(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async bootstrapObjectStorage(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    this.objectStorageBootstrap.set(null);
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/object-storage`, {
+        method: 'POST',
+        headers: this.actionHeaders(),
+        body: JSON.stringify(this.objectStorageConfig()),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Object storage bootstrap failed with HTTP ${res.status}`);
+      const result = data as ObjectStorageBootstrapResponse;
+      this.objectStorageBootstrap.set(result);
+      if (result.supportServices) this.supportServices.set(result.supportServices);
+      this.actionMessage.set({ type: 'success', message: 'Object storage connection was configured. Review Support services status.' });
+      await this.fetchSummary();
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
   async loadComputeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/training/compute`, { headers: this.actionHeaders() });
+      const res = await fetch(`${this.apiBase}/training/compute`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute backend list failed with HTTP ${res.status}`);
       this.computeBackends.set((data.items ?? []) as ResourceItem[]);
@@ -5582,16 +7461,14 @@ export class AppComponent implements OnInit, OnDestroy {
     if (page === 'model-registry') await this.loadModelVersions();
     if (page === 'trustyai-monitoring') await this.loadTrustyMetrics(this.resourceItems()[0]);
     if (page === 'cluster-settings') {
-      await Promise.all([this.loadOdhComponents(), this.loadSetupStatus(), this.loadNativeCatalog(), this.loadNativeBackends(), this.loadComputeBackends(), this.loadComputeRouting(), this.loadControllerMetrics(), this.loadAuditLog(), this.loadFinalReadiness(), this.loadGpuInventory(), this.loadGpuEnablementPlan(), this.loadOahDemoPlan(), this.loadOahDemoRun(), this.loadOahDemoEvidence(), this.loadOahDemoSmoke(), this.loadOahDemoSmokeLogs()]);
+      await Promise.all([this.loadOdhComponents(), this.loadSetupStatus(), this.loadNativeCatalog(), this.loadNativeBackends(), this.loadSupportServices(), this.loadComputeBackends(), this.loadComputeRouting(), this.loadControllerMetrics(), this.loadAuditLog(), this.loadFinalReadiness(), this.loadGpuInventory(), this.loadGpuEnablementPlan(), this.loadOahDemoPlan(), this.loadOahDemoRun(), this.loadOahDemoEvidence(), this.loadOahDemoSmoke(), this.loadOahDemoSmokeLogs()]);
     }
   }
 
   private async loadHomeOperations(): Promise<void> {
     await Promise.all([
       this.fetchResourcePage('apps-enabled'),
-      this.loadFinalReadiness(),
-      this.loadControllerMetrics(),
-      this.loadAuditLog(),
+      this.loadComputeBackends(),
     ]);
     this.markOperationsRefreshed();
   }
@@ -5615,20 +7492,17 @@ export class AppComponent implements OnInit, OnDestroy {
     this.operationsRefreshInFlight = true;
     this.operationsRefreshStatus.set(trigger === 'auto' ? 'Auto refreshing' : 'Refreshing');
     try {
-      await Promise.all([
-        this.fetchSummary(),
-        this.loadFinalReadiness(),
-        this.loadControllerMetrics(),
-        this.loadAuditLog(),
-      ]);
-
       const page = this.activePage();
       if (page === 'home') {
-        await Promise.all([this.fetchProjects(), this.fetchResourcePage('apps-enabled')]);
+        await Promise.all([this.fetchSummary(), this.fetchProjects(), this.fetchResourcePage('apps-enabled'), this.loadComputeBackends()]);
       } else if (page === 'cluster-settings') {
-        await Promise.all([this.loadSetupStatus(), this.loadNativeCatalog(), this.loadNativeBackends(), this.loadComputeBackends(), this.loadComputeRouting(), this.loadGpuInventory(), this.loadGpuEnablementPlan(), this.loadOahDemoPlan(), this.loadOahDemoRun(), this.loadOahDemoEvidence(), this.loadOahDemoSmoke(), this.loadOahDemoSmokeLogs()]);
+        await Promise.all([this.fetchSummary(), this.loadFinalReadiness(), this.loadControllerMetrics(), this.loadAuditLog()]);
+        await Promise.all([this.loadSetupStatus(), this.loadNativeCatalog(), this.loadNativeBackends(), this.loadSupportServices(), this.loadComputeBackends(), this.loadComputeRouting(), this.loadGpuInventory(), this.loadGpuEnablementPlan(), this.loadOahDemoPlan(), this.loadOahDemoRun(), this.loadOahDemoEvidence(), this.loadOahDemoSmoke(), this.loadOahDemoSmokeLogs()]);
       } else if (page === 'trustyai-monitoring') {
+        await Promise.all([this.fetchSummary(), this.loadFinalReadiness(), this.loadControllerMetrics(), this.loadAuditLog()]);
         await this.loadTrustyMetrics(this.resourceItems()[0]);
+      } else {
+        await this.fetchSummary();
       }
       this.markOperationsRefreshed();
     } finally {
@@ -5654,8 +7528,12 @@ export class AppComponent implements OnInit, OnDestroy {
       __OSP_ID_TOKEN__?: string;
       __OPENSPHERE_ID_TOKEN__?: string;
       opensphereAuth?: { idToken?: string; token?: string };
+      __OS_AUTH__?: { token?: string | (() => string) };
     };
-    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || '';
+    const shellToken = typeof w.__OS_AUTH__?.token === 'function'
+      ? w.__OS_AUTH__.token()
+      : w.__OS_AUTH__?.token;
+    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || shellToken || '';
   }
 
   async refresh(): Promise<void> {
@@ -5675,6 +7553,10 @@ export class AppComponent implements OnInit, OnDestroy {
     if (typeof window === 'undefined') return '';
     const w = window as Window & { __OSP_AI_API_BASE__?: string; __OSP_NG_API_BASE__?: string };
     return (w.__OSP_AI_API_BASE__ || w.__OSP_NG_API_BASE__ || '').replace(/\/$/, '');
+  }
+
+  gpuProductLogoUrl(): string {
+    return `${this.apiBase || '/api/plugins/ai'}/app/assets/brand/triangles-opensphere-logo.webp`;
   }
 
   private async fetchSummary(): Promise<void> {
@@ -5731,6 +7613,9 @@ export class AppComponent implements OnInit, OnDestroy {
         actualCount: data.actualCount ?? (data.items ?? []).filter((item) => !item.reference).length,
         referenceCount: data.referenceCount ?? (data.items ?? []).filter((item) => item.reference).length,
         source: data.source || 'empty',
+        sourceBreakdown: data.sourceBreakdown,
+        backendModes: data.backendModes,
+        readinessModel: data.readinessModel,
       });
       await this.loadPageDetails(page);
     } catch {

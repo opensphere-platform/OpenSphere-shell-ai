@@ -8,9 +8,10 @@ spec:
   owner: platform-experience
   version: 0.1.0
   description: "OpenSphere AI Hub operations dashboard"
+  serviceAccountName: ai-runtime
   image:
     repository: localhost:5000/ai
-    digest: v126
+    digest: v158
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"

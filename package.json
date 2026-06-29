@@ -6,7 +6,12 @@
   "scripts": {
     "build": "ng build --configuration production",
     "start": "ng serve",
-    "serve:backend": "node server.js"
+    "serve:backend": "node server.js",
+    "test": "npm run test:contracts",
+    "test:contracts": "npm run test:rbac && npm run test:support-services",
+    "test:live-support-services": "powershell -ExecutionPolicy Bypass -File scripts/verify-live-support-services.ps1",
+    "test:rbac": "node scripts/verify-rbac.js",
+    "test:support-services": "node scripts/verify-support-services.js"
   },
   "dependencies": {
     "@angular/animations": "^22.0.0",

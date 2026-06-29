@@ -101,7 +101,109 @@ interface ResourceItem {
   maxConcurrency?: string | number;
   currentConcurrency?: string | number;
   source?: string;
+  backendMode?: string;
+  parityReady?: boolean;
   reference?: boolean;
+}
+
+interface K8sObjectSummary {
+  name: string;
+  namespace: string;
+  kind: string;
+  phase: string;
+  ready: boolean;
+  message?: string;
+}
+
+interface WorkbenchDetailResponse {
+  item: ResourceItem;
+  runtime: {
+    name: string;
+    namespace: string;
+    image: string;
+    openUrl: string;
+    proxyUrl: string;
+    backendMode: string;
+    reachability?: {
+      checked: boolean;
+      ready: boolean;
+      status: number;
+      phase: string;
+      message: string;
+    };
+  };
+  storage?: K8sObjectSummary | null;
+  deployment?: K8sObjectSummary | null;
+  service?: K8sObjectSummary | null;
+  pods: K8sObjectSummary[];
+  events: Array<{ time: string; type: string; reason: string; message: string }>;
+  logs: { pod: string; tailLines: string[] };
+}
+
+interface PipelineDetailResponse {
+  item: ResourceItem;
+  pipelineName: string;
+  backendMode: string;
+  definition: {
+    version: string;
+    source: string;
+    parameters: Record<string, unknown>;
+  };
+  runs: ResourceItem[];
+  experiments: ResourceItem[];
+  artifacts: ResourceItem[];
+  lineage: PipelineLineageItem[];
+  logs: string[];
+}
+
+interface InferenceDetailResponse {
+  item: ResourceItem;
+  runtime: {
+    name: string;
+    namespace: string;
+    image: string;
+    modelName: string;
+    runtime: string;
+    modelUri: string;
+    url: string;
+    predictUrl: string;
+    backendMode: string;
+    backendResource: string;
+    reachability?: {
+      checked: boolean;
+      ready: boolean;
+      status: number;
+      phase: string;
+      message: string;
+    };
+  };
+  deployment?: K8sObjectSummary | null;
+  service?: K8sObjectSummary | null;
+  inferenceService?: K8sObjectSummary | null;
+  pods: K8sObjectSummary[];
+  conditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
+  upstreamConditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
+  events: Array<{ time: string; type: string; reason: string; message: string }>;
+  logs: { pod: string; tailLines: string[] };
+}
+
+interface DataConnectionDetailResponse {
+  item: ResourceItem;
+  provider: string;
+  endpoint: string;
+  database: string;
+  owner: string;
+  secret: {
+    name: string;
+    namespace: string;
+    readable: boolean;
+    type: string;
+    keys: string[];
+    masked: boolean;
+    message: string;
+  };
+  usage: ResourceItem[];
+  conditions: Array<{ type: string; status: string; reason: string; message: string; lastTransitionTime: string }>;
 }
 
 interface LearningResource {
@@ -143,6 +245,9 @@ interface ResourceListResponse {
   actualCount?: number;
   referenceCount?: number;
   source?: string;
+  sourceBreakdown?: Record<string, number>;
+  backendModes?: Record<string, number>;
+  readinessModel?: ResourceReadinessModel;
 }
 
 interface ProjectListResponse {
@@ -156,6 +261,16 @@ interface ResourceMeta {
   actualCount: number;
   referenceCount: number;
   source: string;
+  sourceBreakdown?: Record<string, number>;
+  backendModes?: Record<string, number>;
+  readinessModel?: ResourceReadinessModel;
+}
+
+interface ResourceReadinessModel {
+  nativeReady: number;
+  upstreamAdapterReady: number;
+  upstreamParityReady: number;
+  reference: number;
 }
 
 interface CapabilityItem {
@@ -975,6 +1090,24 @@ interface FinalReadinessResponse {
     total: number;
   };
   checks: FinalReadinessCheck[];
+  readinessModel?: {
+    nativeReadiness: FinalReadinessStage;
+    upstreamAdapterReadiness: FinalReadinessStage;
+    parityReadiness: FinalReadinessStage;
+  };
+}
+
+interface FinalReadinessStage {
+  phase: string;
+  ready: boolean;
+  checks: number;
+  readyChecks: number;
+  warningChecks?: number;
+  failedChecks?: number;
+  notInstalledChecks?: number;
+  requiredReadyChecks?: number;
+  mode: string;
+  evidence?: string;
 }
 
 interface SetupForm {
@@ -1635,6 +1768,86 @@ function phaseClass(phase: string): string {
         }
 
         @if (activePage() === 'home') {
+          <section class="card ai-gpu-overview-card ai-clickable-card" role="button" tabindex="0" aria-label="Available GPU resources" (click)="selectClusterSettingsTab('gpu'); navigate('cluster-settings')" (keydown.enter)="selectClusterSettingsTab('gpu'); navigate('cluster-settings')">
+            <div class="card-block">
+              <div class="ai-gpu-overview-layout">
+                <div class="ai-gpu-overview-main">
+                  <p class="ai-section-kicker">AVAILABLE GPU RESOURCES</p>
+                  <div class="ai-gpu-overview-count">
+                    <strong>{{ overviewAvailableGpuCount() }}</strong>
+                    <span>GPU(s)</span>
+                  </div>
+                  <div class="ai-label-row">
+                    <span [class]="'label ' + statusClass(overviewGpuPhase())">{{ overviewGpuPhase() }}</span>
+                    <span [class]="overviewAvailableGpuCount() ? 'label label-success' : 'label label-warning'">{{ overviewAvailableGpuCount() ? 'Ready for AI workloads' : 'No GPU resource detected' }}</span>
+                    <span class="label label-info">{{ gpuInventory().summary.totalAllocatable }} Kubernetes allocatable</span>
+                    <span class="label label-info">{{ overviewExternalGpuCount() }} external bridge GPU(s)</span>
+                  </div>
+                </div>
+                <div class="ai-gpu-product">
+                  <img class="ai-gpu-product-logo" [src]="gpuProductLogoUrl()" alt="NVIDIA GeForce RTX" loading="lazy" />
+                  <span>Detected GPU product</span>
+                  <strong>{{ overviewGpuProductName() }}</strong>
+                </div>
+                <div class="ai-gpu-overview-facts">
+                  <div>
+                    <span>GPU nodes</span>
+                    <strong>{{ gpuInventory().summary.gpuNodes }}</strong>
+                  </div>
+                  <div>
+                    <span>Ready nodes</span>
+                    <strong>{{ gpuInventory().summary.readyNodes }}/{{ gpuInventory().summary.nodes }}</strong>
+                  </div>
+                  <div>
+                    <span>Backends</span>
+                    <strong>{{ overviewGpuBackends().length }}</strong>
+                  </div>
+                </div>
+              </div>
+
+              @if (overviewGpuBackends().length) {
+                <div class="ai-gpu-overview-backends" aria-label="Registered GPU compute backends">
+                  @for (backend of overviewGpuBackends(); track backend.namespace + '/' + backend.name) {
+                    <div class="ai-gpu-overview-backend">
+                      <div>
+                        <strong>{{ backend.name }}</strong>
+                        <span>{{ backend.backendType || 'external' }} · {{ backend.resourceName || 'external GPU' }}</span>
+                      </div>
+                      <div class="ai-chip-list">
+                        <span [class]="'label ' + statusClass(backend.phase)">{{ backend.phase }}</span>
+                        @if (backend.provider) {
+                          <span class="label label-info">{{ backend.provider }}</span>
+                        }
+                        @for (gpu of backend.gpus || []; track gpu['id'] || gpu['name']) {
+                          <span class="label label-success">{{ gpu['name'] || gpu['id'] }}</span>
+                        }
+                      </div>
+                    </div>
+                  }
+                </div>
+              } @else if (gpuInventory().nodes.length) {
+                <div class="ai-gpu-overview-backends" aria-label="Kubernetes GPU resources">
+                  @for (node of gpuInventory().nodes; track node.name) {
+                    @for (resource of node.gpuResources; track resource.name) {
+                      <div class="ai-gpu-overview-backend">
+                        <div>
+                          <strong>{{ resource.name }}</strong>
+                          <span>{{ node.name }}</span>
+                        </div>
+                        <div class="ai-chip-list">
+                          <span class="label label-success">{{ resource.allocatable }} allocatable</span>
+                          <span class="label label-info">{{ resource.capacity }} capacity</span>
+                        </div>
+                      </div>
+                    }
+                  }
+                </div>
+              } @else if (gpuInventory().nextSteps.length) {
+                <p class="ai-footnote">{{ gpuInventory().nextSteps[0] }}</p>
+              }
+            </div>
+          </section>
+
           <section class="ai-overview-grid" aria-label="AI overview summary">
             <div class="card ai-metric-card ai-clickable-card" role="button" tabindex="0" (click)="navigate('projects')" (keydown.enter)="navigate('projects')">
               <div class="card-block">
@@ -1848,7 +2061,6 @@ function phaseClass(phase: string): string {
               @if (!resourceItems().length) {
                 <clr-dg-placeholder>No application data loaded.</clr-dg-placeholder>
               }
-              <clr-dg-footer>{{ resourceMeta().actualCount }} actual, {{ resourceMeta().referenceCount }} reference</clr-dg-footer>
             </clr-datagrid>
           </section>
         } @else if (activePage() === 'projects') {
@@ -2460,10 +2672,14 @@ function phaseClass(phase: string): string {
                     <span class="label label-success">{{ finalReadiness().summary.nativeReady || 0 }} native ready</span>
                     <span class="label label-warning">{{ finalReadiness().summary.nativeWarning || 0 }} native warnings</span>
                     <span class="label label-danger">{{ finalReadiness().summary.nativeFail || 0 }} native failed</span>
-                    <span [class]="'label ' + statusClass(finalReadiness().upstreamPhase || 'Pending')">Upstream parity: {{ finalReadiness().upstreamPhase || 'Pending' }}</span>
+                    <span [class]="'label ' + statusClass(finalReadiness().readinessModel?.upstreamAdapterReadiness?.phase || finalReadiness().upstreamPhase || 'Pending')">Upstream adapter: {{ finalReadiness().readinessModel?.upstreamAdapterReadiness?.phase || finalReadiness().upstreamPhase || 'Pending' }}</span>
+                    <span [class]="'label ' + statusClass(finalReadiness().readinessModel?.parityReadiness?.phase || 'NotReady')">Parity: {{ finalReadiness().readinessModel?.parityReadiness?.phase || 'NotReady' }}</span>
                     <span class="label label-warning">{{ finalReadiness().summary.upstreamNotInstalled || 0 }} upstream not installed</span>
                     <span class="ai-footnote">Generated {{ finalReadiness().generatedAt || '-' }}</span>
                   </div>
+                  @if (finalReadiness().readinessModel?.parityReadiness?.evidence) {
+                    <p class="ai-footnote">{{ finalReadiness().readinessModel?.parityReadiness?.evidence }}</p>
+                  }
                   <table class="table table-compact ai-mini-table">
                     <thead>
                       <tr><th>Check</th><th>Scope</th><th>Status</th><th>Evidence</th><th>Next step</th></tr>
@@ -3709,13 +3925,19 @@ function phaseClass(phase: string): string {
                     <clr-dg-cell>{{ item.ready ? 'Ready' : 'Not ready' }}</clr-dg-cell>
                     <clr-dg-cell>
                       @if (activePage() === 'workbenches') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadWorkbenchDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="workbenchAction(item, 'start')">Start</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="workbenchAction(item, 'stop')">Stop</button>
                       }
+                      @if (activePage() === 'data-connections') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadDataConnectionDetail(item)">Details</button>
+                      }
                       @if (activePage() === 'pipelines') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="runPipeline(item)">Run</button>
                       }
                       @if (activePage() === 'pipeline-runs') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineLogs(item)">Logs</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadPipelineLineage(item)">Lineage</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="claimAction(item, 'retry')">Retry</button>
@@ -3733,6 +3955,7 @@ function phaseClass(phase: string): string {
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="claimAction(item, 'resume')">Resume</button>
                       }
                       @if (activePage() === 'inference') {
+                        <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="loadInferenceDetail(item)">Details</button>
                         <button type="button" class="btn btn-sm btn-link" [disabled]="saving()" (click)="editInferenceFrom(item)">Edit</button>
                       }
                       <button type="button" class="btn btn-sm btn-link" [disabled]="saving() || !canDelete(item)" (click)="deleteResource(item)">Delete</button>
@@ -3744,8 +3967,256 @@ function phaseClass(phase: string): string {
                   <clr-dg-placeholder>No items returned for this view.</clr-dg-placeholder>
                 }
 
-                <clr-dg-footer>{{ resourceMeta().actualCount }} actual, {{ resourceMeta().referenceCount }} reference</clr-dg-footer>
               </clr-datagrid>
+              @if (activePage() === 'data-connections' && dataConnectionDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Data connection detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ dataConnectionDetail()?.item?.namespace }}/{{ dataConnectionDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(dataConnectionDetail()?.item || {})">{{ sourceLabel(dataConnectionDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(dataConnectionDetail()?.item?.phase || '')">{{ dataConnectionDetail()?.item?.phase || '-' }}</span>
+                      <span class="label label-info">Secret masked</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Provider</span><strong>{{ dataConnectionDetail()?.provider || '-' }}</strong></div>
+                      <div><span>Endpoint</span><strong>{{ dataConnectionDetail()?.endpoint || '-' }}</strong></div>
+                      <div><span>Database/Bucket</span><strong>{{ dataConnectionDetail()?.database || '-' }}</strong></div>
+                      <div><span>Owner</span><strong>{{ dataConnectionDetail()?.owner || '-' }}</strong></div>
+                      <div><span>Secret</span><strong>{{ dataConnectionDetail()?.secret?.namespace }}/{{ dataConnectionDetail()?.secret?.name || '-' }}</strong></div>
+                      <div><span>Secret type</span><strong>{{ dataConnectionDetail()?.secret?.type || '-' }}</strong></div>
+                    </div>
+                    <p class="ai-footnote">{{ dataConnectionDetail()?.secret?.message || 'Credential values are not displayed.' }}</p>
+                    @if (dataConnectionDetail()?.secret?.keys?.length) {
+                      <div class="ai-label-row">
+                        @for (key of dataConnectionDetail()?.secret?.keys || []; track key) {
+                          <span class="label label-info">{{ key }}</span>
+                        }
+                      </div>
+                    }
+                    @if (dataConnectionDetail()?.usage?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Using resource</th><th>Kind</th><th>Phase</th><th>Ready</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (usage of dataConnectionDetail()?.usage || []; track usage.kind + ':' + usage.name) {
+                            <tr>
+                              <td>{{ usage.namespace }}/{{ usage.name }}</td>
+                              <td>{{ usage.kind }}</td>
+                              <td>{{ usage.phase || '-' }}</td>
+                              <td>{{ usage.ready ? 'Ready' : 'Not ready' }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (dataConnectionDetail()?.conditions?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Condition</th><th>Status</th><th>Reason</th><th>Message</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (condition of dataConnectionDetail()?.conditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                  </div>
+                </section>
+              }
+              @if (activePage() === 'workbenches' && workbenchDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Workbench runtime detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ workbenchDetail()?.item?.namespace }}/{{ workbenchDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(workbenchDetail()?.item || {})">{{ sourceLabel(workbenchDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(workbenchDetail()?.item?.phase || '')">{{ workbenchDetail()?.item?.phase || '-' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Runtime</span><strong>{{ workbenchDetail()?.runtime?.name || '-' }}</strong></div>
+                      <div><span>Image</span><strong>{{ workbenchDetail()?.runtime?.image || '-' }}</strong></div>
+                      <div><span>Open URL</span><strong>{{ workbenchDetail()?.runtime?.proxyUrl || workbenchDetail()?.runtime?.openUrl || '-' }}</strong></div>
+                      <div><span>Storage</span><strong>{{ workbenchDetail()?.storage?.name || '-' }}</strong></div>
+                    </div>
+                    <div class="ai-label-row">
+                      <button type="button" class="btn btn-sm btn-primary" [disabled]="saving() || !workbenchDetail()?.runtime?.proxyUrl" (click)="openWorkbenchProxy()">Open</button>
+                      <span [class]="workbenchDetail()?.runtime?.reachability?.ready ? 'label label-success' : 'label label-warning'">{{ workbenchDetail()?.runtime?.reachability?.phase || 'Unchecked' }}</span>
+                      <span class="ai-footnote">{{ workbenchDetail()?.runtime?.reachability?.message || 'Workbench reachability has not been checked.' }}</span>
+                    </div>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Object</th><th>Name</th><th>Phase</th><th>Ready</th><th>Message</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (obj of workbenchRuntimeObjects(); track obj.kind + ':' + obj.name) {
+                          <tr>
+                            <td>{{ obj.kind }}</td>
+                            <td>{{ obj.name }}</td>
+                            <td>{{ obj.phase || '-' }}</td>
+                            <td>{{ obj.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ obj.message || '-' }}</td>
+                          </tr>
+                        }
+                        @for (pod of workbenchDetail()?.pods || []; track pod.name) {
+                          <tr>
+                            <td>Pod</td>
+                            <td>{{ pod.name }}</td>
+                            <td>{{ pod.phase || '-' }}</td>
+                            <td>{{ pod.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ pod.message || '-' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                    @if (workbenchDetail()?.events?.length) {
+                      <div class="ai-log-block">
+                        @for (event of workbenchDetail()?.events || []; track event.time + event.reason) {
+                          <code>{{ event.time }} {{ event.type }} {{ event.reason }} - {{ event.message }}</code>
+                        }
+                      </div>
+                    }
+                    @if (workbenchDetail()?.logs?.tailLines?.length) {
+                      <div class="ai-log-block">
+                        @for (line of workbenchDetail()?.logs?.tailLines || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
+              @if ((activePage() === 'pipelines' || activePage() === 'pipeline-runs') && pipelineDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Pipeline detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ pipelineDetail()?.item?.namespace }}/{{ pipelineDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(pipelineDetail()?.item || {})">{{ sourceLabel(pipelineDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(pipelineDetail()?.item?.phase || '')">{{ pipelineDetail()?.item?.phase || '-' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Pipeline</span><strong>{{ pipelineDetail()?.pipelineName || '-' }}</strong></div>
+                      <div><span>Version</span><strong>{{ pipelineDetail()?.definition?.version || '-' }}</strong></div>
+                      <div><span>Backend</span><strong>{{ pipelineDetail()?.backendMode || '-' }}</strong></div>
+                      <div><span>Source</span><strong>{{ pipelineDetail()?.definition?.source || '-' }}</strong></div>
+                    </div>
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ pipelineDetail()?.runs?.length || 0 }} runs</span>
+                      <span class="label label-info">{{ pipelineDetail()?.experiments?.length || 0 }} experiments</span>
+                      <span class="label label-info">{{ pipelineDetail()?.artifacts?.length || 0 }} artifacts</span>
+                      <span class="label label-info">{{ pipelineDetail()?.lineage?.length || 0 }} lineage edges</span>
+                    </div>
+                    @if (pipelineDetail()?.lineage?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>From</th><th>To</th><th>Type</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (edge of pipelineDetail()?.lineage || []; track edge.from + edge.to + edge.type) {
+                            <tr><td>{{ edge.from }}</td><td>{{ edge.to }}</td><td>{{ edge.type }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (pipelineDetail()?.logs?.length) {
+                      <div class="ai-log-block">
+                        @for (line of pipelineDetail()?.logs || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
+              @if (activePage() === 'inference' && inferenceDetail()) {
+                <section class="card ai-action-panel">
+                  <div class="card-header">
+                    <div class="card-title">Model deployment detail</div>
+                  </div>
+                  <div class="card-block">
+                    <div class="ai-label-row">
+                      <span class="label label-info">{{ inferenceDetail()?.item?.namespace }}/{{ inferenceDetail()?.item?.name }}</span>
+                      <span [class]="sourceClass(inferenceDetail()?.item || {})">{{ sourceLabel(inferenceDetail()?.item || {}) }}</span>
+                      <span [class]="'label ' + statusClass(inferenceDetail()?.item?.phase || '')">{{ inferenceDetail()?.item?.phase || '-' }}</span>
+                      <span [class]="inferenceDetail()?.runtime?.reachability?.ready ? 'label label-success' : 'label label-warning'">{{ inferenceDetail()?.runtime?.reachability?.phase || 'Unchecked' }}</span>
+                    </div>
+                    <div class="ai-kv-grid">
+                      <div><span>Model</span><strong>{{ inferenceDetail()?.runtime?.modelName || '-' }}</strong></div>
+                      <div><span>Runtime</span><strong>{{ inferenceDetail()?.runtime?.runtime || '-' }}</strong></div>
+                      <div><span>Backend</span><strong>{{ inferenceDetail()?.runtime?.backendMode || '-' }}</strong></div>
+                      <div><span>Runtime object</span><strong>{{ inferenceDetail()?.runtime?.name || '-' }}</strong></div>
+                      <div><span>URL</span><strong>{{ inferenceDetail()?.runtime?.url || '-' }}</strong></div>
+                      <div><span>Predict URL</span><strong>{{ inferenceDetail()?.runtime?.predictUrl || '-' }}</strong></div>
+                      <div><span>Model URI</span><strong>{{ inferenceDetail()?.runtime?.modelUri || '-' }}</strong></div>
+                      <div><span>Image</span><strong>{{ inferenceDetail()?.runtime?.image || '-' }}</strong></div>
+                    </div>
+                    <p class="ai-footnote">{{ inferenceDetail()?.runtime?.reachability?.message || 'Inference reachability has not been checked.' }}</p>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Object</th><th>Name</th><th>Phase</th><th>Ready</th><th>Message</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (obj of inferenceRuntimeObjects(); track obj.kind + ':' + obj.name) {
+                          <tr>
+                            <td>{{ obj.kind }}</td>
+                            <td>{{ obj.name }}</td>
+                            <td>{{ obj.phase || '-' }}</td>
+                            <td>{{ obj.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ obj.message || '-' }}</td>
+                          </tr>
+                        }
+                        @for (pod of inferenceDetail()?.pods || []; track pod.name) {
+                          <tr>
+                            <td>Pod</td>
+                            <td>{{ pod.name }}</td>
+                            <td>{{ pod.phase || '-' }}</td>
+                            <td>{{ pod.ready ? 'Ready' : 'Not ready' }}</td>
+                            <td>{{ pod.message || '-' }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                    @if (inferenceDetail()?.conditions?.length || inferenceDetail()?.upstreamConditions?.length) {
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Condition</th><th>Status</th><th>Reason</th><th>Message</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (condition of inferenceDetail()?.conditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                          @for (condition of inferenceDetail()?.upstreamConditions || []; track condition.type + condition.reason) {
+                            <tr><td>{{ condition.type }}</td><td>{{ condition.status }}</td><td>{{ condition.reason || '-' }}</td><td>{{ condition.message || '-' }}</td></tr>
+                          }
+                        </tbody>
+                      </table>
+                    }
+                    @if (inferenceDetail()?.events?.length) {
+                      <div class="ai-log-block">
+                        @for (event of inferenceDetail()?.events || []; track event.time + event.reason) {
+                          <code>{{ event.time }} {{ event.type }} {{ event.reason }} - {{ event.message }}</code>
+                        }
+                      </div>
+                    }
+                    @if (inferenceDetail()?.logs?.tailLines?.length) {
+                      <div class="ai-log-block">
+                        @for (line of inferenceDetail()?.logs?.tailLines || []; track $index) {
+                          <code>{{ line }}</code>
+                        }
+                      </div>
+                    }
+                  </div>
+                </section>
+              }
             }
           </section>
         }
@@ -4201,6 +4672,10 @@ export class AiShellElement implements OnInit, OnDestroy {
   readonly createForm = signal<CreateForm>(defaultCreateForm(this.activePage()));
   readonly operationTitle = signal('');
   readonly operationLines = signal<string[]>([]);
+  readonly workbenchDetail = signal<WorkbenchDetailResponse | null>(null);
+  readonly pipelineDetail = signal<PipelineDetailResponse | null>(null);
+  readonly inferenceDetail = signal<InferenceDetailResponse | null>(null);
+  readonly dataConnectionDetail = signal<DataConnectionDetailResponse | null>(null);
   readonly lineageItems = signal<PipelineLineageItem[]>([]);
   readonly trustyMetrics = signal<TrustyMetricItem[]>([]);
   readonly trustyAlerts = signal<TrustyAlertItem[]>([]);
@@ -4259,6 +4734,18 @@ export class AiShellElement implements OnInit, OnDestroy {
     if (this.activePage() !== 'training-jobs') return [];
     return this.resourceItems().filter((item) => item.backendType === 'external' || !!item.externalJob);
   });
+  readonly overviewGpuBackends = computed(() => {
+    const externalTypes = new Set(['external', 'docker-bridge', 'windows-service', 'windows-supervisor', 'wsl2-bridge', 'remote', 'notebook-bridge', 'cpu']);
+    return this.computeBackends().filter((item) => {
+      const type = (item.backendType || '').toLowerCase();
+      return externalTypes.has(type) || !!item.endpoint || !!item.resourceName || !!item.gpus?.length;
+    });
+  });
+  readonly overviewExternalGpuCount = computed(() => this.overviewGpuBackends().reduce((sum, backend) => sum + (backend.gpus?.length || 0), 0));
+  readonly overviewAvailableGpuCount = computed(() => (this.gpuInventory().summary.totalAllocatable || 0) + this.overviewExternalGpuCount());
+  readonly overviewGpuPhase = computed(() => this.overviewAvailableGpuCount() > 0 ? 'Ready' : this.gpuInventory().phase);
+  readonly overviewGpuProducts = computed(() => this.overviewGpuBackends().flatMap((backend) => backend.gpus || []));
+  readonly overviewGpuProductName = computed(() => String(this.overviewGpuProducts()[0]?.['name'] || this.overviewGpuBackends()[0]?.provider || 'External GPU backend'));
   readonly gpuServiceCatalog = computed<GpuCatalogServiceItem[]>(() => {
     const alternatives = this.gpuEnablementPlan()?.alternatives || [];
     const active = this.gpuEnablementProfile();
@@ -4395,6 +4882,16 @@ export class AiShellElement implements OnInit, OnDestroy {
     const lines = item.externalJobLogs?.lines || [];
     const values = lines.map((line) => typeof line === 'string' ? line : String(line?.['line'] || '')).filter(Boolean);
     return values.find((line) => /MiB\s*\/|RTX|GeForce|NVIDIA-SMI|Default/.test(line)) || values[values.length - 1] || String(item.externalJobLogs?.text || '');
+  }
+
+  workbenchRuntimeObjects(): K8sObjectSummary[] {
+    const detail = this.workbenchDetail();
+    return [detail?.deployment, detail?.service, detail?.storage].filter((item): item is K8sObjectSummary => !!item);
+  }
+
+  inferenceRuntimeObjects(): K8sObjectSummary[] {
+    const detail = this.inferenceDetail();
+    return [detail?.inferenceService, detail?.deployment, detail?.service].filter((item): item is K8sObjectSummary => !!item);
   }
 
   alertType(severity: string): string {
@@ -4558,8 +5055,13 @@ export class AiShellElement implements OnInit, OnDestroy {
     return Object.entries(labels || {}).map(([key, value]) => ({ key, value }));
   }
 
-  sourceLabel(item: { source?: string; reference?: boolean }): string {
+  sourceLabel(item: { source?: string; backendMode?: string; reference?: boolean }): string {
     if (item.reference) return 'Reference';
+    const backendMode = (item.backendMode || '').toLowerCase();
+    if (backendMode === 'native') return 'Native';
+    if (backendMode === 'upstream-adapter') return 'Upstream adapter';
+    if (backendMode === 'parity') return 'Parity';
+    if (backendMode === 'external') return 'External';
     const source = (item.source || '').toLowerCase();
     if (source === 'cluster') return 'Actual';
     if (source === 'native') return 'Native';
@@ -4567,8 +5069,12 @@ export class AiShellElement implements OnInit, OnDestroy {
     return item.source || 'Actual';
   }
 
-  sourceClass(item: { source?: string; reference?: boolean }): string {
+  sourceClass(item: { source?: string; backendMode?: string; reference?: boolean }): string {
     if (item.reference) return 'label label-info';
+    const backendMode = (item.backendMode || '').toLowerCase();
+    if (backendMode === 'upstream-adapter') return 'label label-warning';
+    if (backendMode === 'parity') return 'label label-success';
+    if (backendMode === 'external') return 'label label-info';
     return 'label label-success';
   }
 
@@ -4724,6 +5230,66 @@ export class AiShellElement implements OnInit, OnDestroy {
     );
   }
 
+  async loadWorkbenchDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+      });
+      const res = await fetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Workbench detail failed with HTTP ${res.status}`);
+      this.workbenchDetail.set(data as WorkbenchDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded workbench detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async openWorkbenchProxy(): Promise<void> {
+    const detail = this.workbenchDetail();
+    const proxyUrl = detail?.runtime?.proxyUrl;
+    if (!proxyUrl) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const session = await fetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
+      const data = await session.json().catch(() => ({}));
+      if (!session.ok) throw new Error(data.error || `Workbench session failed with HTTP ${session.status}`);
+      const href = proxyUrl.startsWith('http') ? proxyUrl : `${this.apiBase}${proxyUrl}`;
+      window.open(href, '_blank', 'noopener,noreferrer');
+      this.actionMessage.set({ type: 'success', message: `Opening workbench runtime: ${detail?.runtime?.namespace}/${detail?.runtime?.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async loadDataConnectionDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+      });
+      const res = await fetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Data connection detail failed with HTTP ${res.status}`);
+      this.dataConnectionDetail.set(data as DataConnectionDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded data connection detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
   async runPipeline(item: ResourceItem): Promise<void> {
     await this.runOperation(
       `${this.apiBase}/operations/pipelines/run`,
@@ -4731,6 +5297,48 @@ export class AiShellElement implements OnInit, OnDestroy {
       `Pipeline run requested: ${item.name}`,
       () => this.fetchResourcePage('pipeline-runs'),
     );
+  }
+
+  async loadPipelineDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+        kind: item.kind === 'PipelineRunClaim' ? 'PipelineRunClaim' : 'PipelineClaim',
+      });
+      const res = await fetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Pipeline detail failed with HTTP ${res.status}`);
+      this.pipelineDetail.set(data as PipelineDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded pipeline detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async loadInferenceDetail(item: ResourceItem): Promise<void> {
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const params = new URLSearchParams({
+        name: item.name,
+        namespace: item.namespace || this.createForm().namespace,
+        kind: item.kind === 'InferenceService' ? 'InferenceService' : 'InferenceClaim',
+      });
+      const res = await fetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Inference detail failed with HTTP ${res.status}`);
+      this.inferenceDetail.set(data as InferenceDetailResponse);
+      this.actionMessage.set({ type: 'success', message: `Loaded model deployment detail: ${item.namespace || this.createForm().namespace}/${item.name}.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
   }
 
   async claimAction(item: ResourceItem, action: 'retry' | 'suspend' | 'resume' | 'approve' | 'reject'): Promise<void> {
@@ -4868,7 +5476,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadComputeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/training/compute`, { headers: this.actionHeaders() });
+      const res = await fetch(`${this.apiBase}/training/compute`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute backend list failed with HTTP ${res.status}`);
       this.computeBackends.set((data.items ?? []) as ResourceItem[]);
@@ -5589,9 +6197,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   private async loadHomeOperations(): Promise<void> {
     await Promise.all([
       this.fetchResourcePage('apps-enabled'),
-      this.loadFinalReadiness(),
-      this.loadControllerMetrics(),
-      this.loadAuditLog(),
+      this.loadComputeBackends(),
     ]);
     this.markOperationsRefreshed();
   }
@@ -5615,20 +6221,17 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.operationsRefreshInFlight = true;
     this.operationsRefreshStatus.set(trigger === 'auto' ? 'Auto refreshing' : 'Refreshing');
     try {
-      await Promise.all([
-        this.fetchSummary(),
-        this.loadFinalReadiness(),
-        this.loadControllerMetrics(),
-        this.loadAuditLog(),
-      ]);
-
       const page = this.activePage();
       if (page === 'home') {
-        await Promise.all([this.fetchProjects(), this.fetchResourcePage('apps-enabled')]);
+        await Promise.all([this.fetchSummary(), this.fetchProjects(), this.fetchResourcePage('apps-enabled'), this.loadComputeBackends()]);
       } else if (page === 'cluster-settings') {
+        await Promise.all([this.fetchSummary(), this.loadFinalReadiness(), this.loadControllerMetrics(), this.loadAuditLog()]);
         await Promise.all([this.loadSetupStatus(), this.loadNativeCatalog(), this.loadNativeBackends(), this.loadComputeBackends(), this.loadComputeRouting(), this.loadGpuInventory(), this.loadGpuEnablementPlan(), this.loadOahDemoPlan(), this.loadOahDemoRun(), this.loadOahDemoEvidence(), this.loadOahDemoSmoke(), this.loadOahDemoSmokeLogs()]);
       } else if (page === 'trustyai-monitoring') {
+        await Promise.all([this.fetchSummary(), this.loadFinalReadiness(), this.loadControllerMetrics(), this.loadAuditLog()]);
         await this.loadTrustyMetrics(this.resourceItems()[0]);
+      } else {
+        await this.fetchSummary();
       }
       this.markOperationsRefreshed();
     } finally {
@@ -5654,8 +6257,12 @@ export class AiShellElement implements OnInit, OnDestroy {
       __OSP_ID_TOKEN__?: string;
       __OPENSPHERE_ID_TOKEN__?: string;
       opensphereAuth?: { idToken?: string; token?: string };
+      __OS_AUTH__?: { token?: string | (() => string) };
     };
-    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || '';
+    const shellToken = typeof w.__OS_AUTH__?.token === 'function'
+      ? w.__OS_AUTH__.token()
+      : w.__OS_AUTH__?.token;
+    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || shellToken || '';
   }
 
   async refresh(): Promise<void> {
@@ -5675,6 +6282,10 @@ export class AiShellElement implements OnInit, OnDestroy {
     if (typeof window === 'undefined') return '';
     const w = window as Window & { __OSP_AI_API_BASE__?: string; __OSP_NG_API_BASE__?: string };
     return (w.__OSP_AI_API_BASE__ || w.__OSP_NG_API_BASE__ || '').replace(/\/$/, '');
+  }
+
+  gpuProductLogoUrl(): string {
+    return `${this.apiBase || '/api/plugins/ai'}/app/assets/brand/triangles-opensphere-logo.webp`;
   }
 
   private async fetchSummary(): Promise<void> {
@@ -5731,6 +6342,9 @@ export class AiShellElement implements OnInit, OnDestroy {
         actualCount: data.actualCount ?? (data.items ?? []).filter((item) => !item.reference).length,
         referenceCount: data.referenceCount ?? (data.items ?? []).filter((item) => item.reference).length,
         source: data.source || 'empty',
+        sourceBreakdown: data.sourceBreakdown,
+        backendModes: data.backendModes,
+        readinessModel: data.readinessModel,
       });
       await this.loadPageDetails(page);
     } catch {

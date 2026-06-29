@@ -1,72 +1,277 @@
-# Perspective 2 K8s Cluster — 구 k8s-console-ng RBAC 전체 흡수(누락 없이): 광범위 read-only(인벤토리 28종) + impersonate.
-# secrets는 의도적으로 제외(보안 기조 + 프록시도 차단). 쓰기는 검증된 사용자 임퍼소네이션(SA 자체 write 없음).
+# AI Hub RBAC is split by responsibility.
+# - ai-reader is read-only and safe for normal API projection.
+# - ai-controller can reconcile OpenSphere-native resources.
+# - ai-installer is intentionally unbound by default; bind only for setup/upgrade windows.
+# - ai-admin is intentionally unbound by default; bind only for explicit break-glass operations.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-runtime
+  namespace: opensphere-system
+  labels:
+    app.kubernetes.io/name: ai
+    app.kubernetes.io/part-of: opensphere-ai
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: { name: cluster-reader }
+metadata:
+  name: ai-reader
 rules:
   - apiGroups: [""]
-    resources: ["nodes","namespaces","pods","pods/log","services","configmaps","endpoints","limitranges","resourcequotas","serviceaccounts","events","persistentvolumeclaims","persistentvolumes","replicationcontrollers"]
-    verbs: ["get","list","watch"]
+    resources: ["nodes", "namespaces", "pods", "pods/log", "services", "configmaps", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["apps"]
-    resources: ["deployments","replicasets","statefulsets","daemonsets","controllerrevisions"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["batch"]
-    resources: ["jobs","cronjobs"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses","networkpolicies","ingressclasses"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["autoscaling"]
-    resources: ["horizontalpodautoscalers"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["autoscaling.k8s.io"]
-    resources: ["verticalpodautoscalers"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["policy"]
-    resources: ["poddisruptionbudgets"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["scheduling.k8s.io"]
-    resources: ["priorityclasses"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["node.k8s.io"]
-    resources: ["runtimeclasses"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles","rolebindings","clusterroles","clusterrolebindings"]
-    verbs: ["get","list","watch"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews"]
+    verbs: ["create"]
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["jobset.x-k8s.io"]
-    resources: ["jobsets"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["nodes","pods"]
-    verbs: ["get","list"]
-  # fleet/OCM read(P1과 공유 — cluster 트리 상단 컨텍스트)
-  - apiGroups: ["fleet.opensphere.io"]
-    resources: ["opensphereclusters"]
-    verbs: ["get","list","watch"]
-  - apiGroups: ["cluster.open-cluster-management.io"]
-    resources: ["managedclusters"]
-    verbs: ["get","list","watch"]
-  # 쓰기 인가: 검증된 사용자로 임퍼소네이션(쓰기는 K8s가 사용자 본인 RBAC로 인가).
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["operatorgroups", "subscriptions", "installplans", "clusterserviceversions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["orchestrator.ai.opensphere.io"]
+    resources: ["aiagents", "promptlibraries", "toolclaims", "agenttracepolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.foundation.opensphere.io"]
+    resources: ["llmrouteclaims", "vectorretrievalclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["notebooks"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["servingruntimes", "clusterservingruntimes", "inferenceservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["modelregistry.opendatahub.io"]
+    resources: ["modelregistries"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["trustyai.opendatahub.io"]
+    resources: ["trustyaiservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads", "clusterqueues", "localqueues", "resourceflavors"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs", "rayservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelines", "pipelineruns"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["datasciencecluster.opendatahub.io"]
+    resources: ["datascienceclusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.opensphere.io"]
+    resources:
+      - "aitrainingstacks"
+      - "workbenchclaims"
+      - "dataconnectionclaims"
+      - "computebackendclaims"
+      - "datasetclaims"
+      - "trainingjobclaims"
+      - "modelpromotionclaims"
+      - "inferenceclaims"
+      - "pipelineclaims"
+      - "pipelinerunclaims"
+      - "experimentclaims"
+      - "executionclaims"
+      - "artifactclaims"
+      - "monitoringtargets"
+      - "distributedworkloadclaims"
+      - "openspherecomponentcatalogs"
+      - "openspherecomponentversions"
+      - "openspheresubscriptions"
+      - "opensphereinstallplans"
+      - "openspheredatascienceclusters"
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["eval.ai.opensphere.io"]
+    resources: ["evaluationpolicies", "evaluationjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-controller
+rules:
   - apiGroups: [""]
-    resources: ["users","groups"]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["kubeflow.org"]
+    resources: ["notebooks"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["orchestrator.ai.opensphere.io"]
+    resources: ["aiagents", "promptlibraries", "toolclaims", "agenttracepolicies"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["orchestrator.ai.opensphere.io"]
+    resources: ["aiagents/status", "promptlibraries/status", "toolclaims/status", "agenttracepolicies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["ai.foundation.opensphere.io"]
+    resources: ["llmrouteclaims", "vectorretrievalclaims"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["ai.foundation.opensphere.io"]
+    resources: ["llmrouteclaims/status", "vectorretrievalclaims/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["ai.opensphere.io"]
+    resources:
+      - "aitrainingstacks"
+      - "workbenchclaims"
+      - "dataconnectionclaims"
+      - "computebackendclaims"
+      - "datasetclaims"
+      - "trainingjobclaims"
+      - "modelpromotionclaims"
+      - "inferenceclaims"
+      - "pipelineclaims"
+      - "pipelinerunclaims"
+      - "experimentclaims"
+      - "executionclaims"
+      - "artifactclaims"
+      - "monitoringtargets"
+      - "distributedworkloadclaims"
+      - "openspheresubscriptions"
+      - "opensphereinstallplans"
+      - "openspheredatascienceclusters"
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["ai.opensphere.io"]
+    resources:
+      - "workbenchclaims/status"
+      - "dataconnectionclaims/status"
+      - "computebackendclaims/status"
+      - "datasetclaims/status"
+      - "trainingjobclaims/status"
+      - "pipelineclaims/status"
+      - "pipelinerunclaims/status"
+      - "experimentclaims/status"
+      - "executionclaims/status"
+      - "artifactclaims/status"
+      - "inferenceclaims/status"
+      - "modelpromotionclaims/status"
+      - "monitoringtargets/status"
+      - "distributedworkloadclaims/status"
+      - "openspheresubscriptions/status"
+      - "opensphereinstallplans/status"
+      - "openspheredatascienceclusters/status"
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["eval.ai.opensphere.io"]
+    resources: ["evaluationpolicies", "evaluationjobs"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["eval.ai.opensphere.io"]
+    resources: ["evaluationpolicies/status", "evaluationjobs/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-installer
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["operatorgroups", "subscriptions"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["datasciencecluster.opendatahub.io"]
+    resources: ["datascienceclusters"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["ai.opensphere.io"]
+    resources:
+      - "openspherecomponentcatalogs"
+      - "openspherecomponentversions"
+      - "openspheresubscriptions"
+      - "opensphereinstallplans"
+      - "openspheredatascienceclusters"
+    verbs: ["create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ai-admin
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups"]
     verbs: ["impersonate"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-credential-reader
+  namespace: opensphere-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["oah-external-gpu-credentials"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
-metadata: { name: cluster-reader-system }
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-reader }
+metadata:
+  name: ai-reader-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ai-reader
 subjects:
-  - { kind: ServiceAccount, name: default, namespace: opensphere-system }
+  - kind: ServiceAccount
+    name: ai-runtime
+    namespace: opensphere-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ai-controller-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ai-controller
+subjects:
+  - kind: ServiceAccount
+    name: ai-runtime
+    namespace: opensphere-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-credential-reader-system
+  namespace: opensphere-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-credential-reader
+subjects:
+  - kind: ServiceAccount
+    name: ai-runtime
+    namespace: opensphere-system

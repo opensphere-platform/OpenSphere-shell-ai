@@ -27,6 +27,10 @@ const INFERENCE_RUNTIME_IMAGE = process.env.INFERENCE_RUNTIME_IMAGE || WORKBENCH
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
 const APISERVER = 'https://kubernetes.default.svc';
 const tok = () => fs.readFileSync(`${SA}/token`, 'utf8').trim();
+const serviceAccountNamespace = () => {
+  try { return fs.readFileSync(`${SA}/namespace`, 'utf8').trim() || 'opensphere-system'; } catch { return 'opensphere-system'; }
+};
+const internalK8sActor = () => `system:serviceaccount:${serviceAccountNamespace()}:${process.env.SERVICE_ACCOUNT_NAME || 'ai-runtime'}`;
 const AI_CLAIM_FINALIZER = 'ai.opensphere.io/finalizer';
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
@@ -39,8 +43,16 @@ const ADMIN_GROUPS = (process.env.OSP_ADMIN_GROUPS || 'opensphere-admins,system:
 // Kanidm 콘솔 id_token(ES256) 전용 — cutover 완료, 레거시 Keycloak RS256 dual-accept 경로는 제거됨.
 const { createHash, createPublicKey, verify: cryptoVerify } = require('crypto');
 // Kanidm 콘솔 IdP — split-horizon: 토큰 iss는 브라우저값(localhost:8444), JWKS는 in-cluster svc.
-const KANIDM_ISS = process.env.KANIDM_ISS || 'https://localhost:8444/oauth2/openid/opensphere-console';
-const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
+const DEFAULT_KANIDM_ISSUERS = [
+  'https://localhost:8444/oauth2/openid/opensphere-console',
+  'https://auth.console.opensphere.dev/oauth2/openid/opensphere-console',
+];
+const KANIDM_ISSUERS = (process.env.KANIDM_ISS || DEFAULT_KANIDM_ISSUERS.join(','))
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
+const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://kanidm-core.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
+const KANIDM_TLS_SERVERNAME = process.env.KANIDM_TLS_SERVERNAME || 'kanidm.opensphere-console-auth.svc';
 const KANIDM_AZP = process.env.KANIDM_AZP || 'opensphere-console';
 const KANIDM_CA_PATH = process.env.KANIDM_CA_PATH || '/etc/kanidm-ca/ca.crt';
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -51,7 +63,7 @@ function _kanidmGetJwks(force) {
   return new Promise((resolve, reject) => {
     if (!force && _kjwks && (Date.now() - _kjwksAt) < KJWKS_TTL) return resolve(_kjwks);
     const u = new URL(KANIDM_JWKS_URL);
-    const opts = { hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET' };
+    const opts = { hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET', servername: KANIDM_TLS_SERVERNAME };
     try { opts.ca = fs.readFileSync(KANIDM_CA_PATH); } catch (e) { console.error('[auth] kanidm CA read failed: ' + e); }
     const rq = https.request(opts, (resp) => {
       const ch = []; resp.on('data', (c) => ch.push(c));
@@ -72,13 +84,14 @@ async function verifyToken(idToken) {
   let jwk = (await _kanidmGetJwks()).find((k) => k.kid === header.kid);
   if (!jwk) jwk = (await _kanidmGetJwks(true)).find((k) => k.kid === header.kid); // 키 롤오버 재시도
   if (!jwk) throw { code: 401, msg: 'unknown kid (kanidm)' };
+  if (!jwk) throw { code: 401, msg: 'unknown kid (kanidm)' };
   const pub = createPublicKey({ key: jwk, format: 'jwk' });
   // ECDSA P-256: JWS 서명은 raw r||s(IEEE-P1363)이며 DER이 아님 → dsaEncoding 명시 필수.
   const ok = cryptoVerify('SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), { key: pub, dsaEncoding: 'ieee-p1363' }, sig);
   if (!ok) throw { code: 401, msg: 'bad signature' };
   const c = b64urlJson(parts[1]); // 검증된 클레임
   // split-horizon: 토큰 iss는 브라우저값(localhost:8444) — 정확히 일치해야 함(JWKS는 in-cluster svc에서 받음).
-  if (c.iss !== KANIDM_ISS) throw { code: 401, msg: 'bad iss' };
+  if (!KANIDM_ISSUERS.includes(c.iss)) throw { code: 401, msg: 'bad iss' };
   const aud = Array.isArray(c.aud) ? c.aud : c.aud ? [c.aud] : [];
   if (c.azp !== KANIDM_AZP && !aud.includes(KANIDM_AZP)) throw { code: 401, msg: 'bad azp/aud' };
   // ── 공통 꼬리: 시간 검증 + 클레임 추출 ──
@@ -99,12 +112,16 @@ const readBody = (req) => {
     req.on('error', reject);
   });
 };
+const httpStatus = (err, fallback = 500) => {
+  const code = Number(err && err.code);
+  return Number.isInteger(code) && code >= 400 && code <= 599 ? code : fallback;
+};
 const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
 
 const MIME = {
   '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
   '.html': 'text/html; charset=utf-8', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf', '.map': 'application/json', '.ico': 'image/x-icon',
+  '.ttf': 'font/ttf', '.map': 'application/json', '.ico': 'image/x-icon', '.webp': 'image/webp',
 };
 
 const COMPUTE_ROUTING_CONFIGMAP = 'oah-compute-routing';
@@ -650,7 +667,14 @@ function buildSpec(page, body, namespace) {
     case 'data-connections':
       return {
         connectionType: body.sourceType || 'bucket',
-        sourceRef: optionalString(body.sourceRef),
+        sourceType: body.sourceType || 'bucket',
+        provider: body.provider || body.sourceType || 's3',
+        endpoint: optionalString(body.endpoint),
+        bucket: optionalString(body.bucket || body.sourceRef),
+        region: optionalString(body.region),
+        sourceRef: optionalString(body.sourceRef || (body.bucket ? `s3://${body.bucket}` : '')),
+        secretRef: optionalString(body.secretName) ? { name: requireDnsName(body.secretName, 'secretName') } : undefined,
+        credentialSecretRef: optionalString(body.secretName),
         purpose: body.purpose || 'workspace',
       };
     case 'agents': {
@@ -805,7 +829,7 @@ async function capabilityStatus() {
 
 async function writeK8s(apiPath, method, body, req) {
   const headers = { Authorization: `Bearer ${tok()}`, Accept: 'application/json', 'Content-Type': req?.contentType || 'application/json' };
-  let actor = 'system:serviceaccount:opensphere-system:default';
+  let actor = internalK8sActor();
   if (req && !req._internal && !req.headers?.['x-os-id-token']) {
     throw { code: 401, msg: 'Authentication required for Kubernetes write action.' };
   }
@@ -1000,6 +1024,16 @@ function workbenchImageFor(spec) {
   const image = optionalString(spec?.image || spec?.notebookImage || spec?.runtimeImage);
   if (!image || image === 'standard-data-science' || image === 'pytorch-gpu' || image === 'tensorflow-gpu') return WORKBENCH_IMAGE;
   return image;
+}
+
+function workbenchComputeMeta(spec, namespace) {
+  const backendRef = spec?.computeBackendRef || spec?.computeBackend || {};
+  const name = optionalString(backendRef.name || spec?.computeBackendName || spec?.computeBackendRefName);
+  const backendNamespace = optionalString(backendRef.namespace || spec?.computeBackendNamespace || namespace) || namespace;
+  const gpuClass = optionalString(spec?.resources?.gpuClass || spec?.gpuClass || spec?.acceleratorProfile);
+  const gpuCount = Math.max(0, Number(spec?.resources?.gpuCount || spec?.gpuCount || (gpuClass ? 1 : 0)) || 0);
+  const k8sGpuResource = gpuClass && gpuClass.includes('/') && !gpuClass.startsWith('external.') ? gpuClass : '';
+  return { name, namespace: backendNamespace, gpuClass, gpuCount, k8sGpuResource };
 }
 
 function ownerRefFor(obj) {
@@ -1997,6 +2031,16 @@ function workbenchResources(claim) {
   };
   const storage = optionalString(spec.storage || spec.storageSize || '10Gi') || '10Gi';
   const image = workbenchImageFor(spec);
+  const containerPort = Number(spec.port || spec.containerPort || 8080) || 8080;
+  const readinessPath = optionalString(spec.readinessPath || spec.healthPath || '/healthz') || '/healthz';
+  const command = Array.isArray(spec.command) ? spec.command.map(optionalString).filter(Boolean) : [];
+  const args = Array.isArray(spec.args) ? spec.args.map(optionalString).filter(Boolean) : [];
+  const compute = workbenchComputeMeta(spec, namespace);
+  const extraEnv = Array.isArray(spec.env)
+    ? spec.env
+        .filter((item) => item && optionalString(item.name))
+        .map((item) => ({ name: optionalString(item.name), value: optionalString(item.value) }))
+    : Object.entries(spec.env || {}).map(([key, value]) => ({ name: key, value: optionalString(value) }));
   const stopped = spec.suspended === true || spec.stopped === true;
   const ownerReferences = ownerRefFor(claim);
   const pvc = {
@@ -2022,13 +2066,26 @@ function workbenchResources(claim) {
             name: 'workbench',
             image,
             imagePullPolicy: image.includes('localhost:5000/') ? 'IfNotPresent' : 'IfNotPresent',
-            ports: [{ name: 'http', containerPort: 8080 }],
+            ...(command.length ? { command } : {}),
+            ...(args.length ? { args } : {}),
+            ports: [{ name: 'http', containerPort }],
             env: [
               { name: 'OPENSPHERE_WORKBENCH_CLAIM', value: claim.metadata?.name || '' },
               { name: 'OPENSPHERE_WORKSPACE_PATH', value: '/workspace' },
+              { name: 'OPENSPHERE_COMPUTE_BACKEND_NAME', value: compute.name },
+              { name: 'OPENSPHERE_COMPUTE_BACKEND_NAMESPACE', value: compute.namespace },
+              { name: 'OPENSPHERE_GPU_CLASS', value: compute.gpuClass },
+              { name: 'OPENSPHERE_GPU_COUNT', value: String(compute.gpuCount || '') },
+              ...extraEnv,
             ],
+            ...(compute.k8sGpuResource && compute.gpuCount > 0 ? {
+              resources: {
+                requests: { [compute.k8sGpuResource]: compute.gpuCount },
+                limits: { [compute.k8sGpuResource]: compute.gpuCount },
+              },
+            } : {}),
             volumeMounts: [{ name: 'workspace', mountPath: '/workspace' }],
-            readinessProbe: { httpGet: { path: '/healthz', port: 'http' }, initialDelaySeconds: 5, periodSeconds: 10 },
+            readinessProbe: { httpGet: { path: readinessPath, port: 'http' }, initialDelaySeconds: 5, periodSeconds: 10 },
           }],
           volumes: [{ name: 'workspace', persistentVolumeClaim: { claimName: `${name}-workspace` } }],
         },
@@ -2044,7 +2101,7 @@ function workbenchResources(claim) {
       ports: [{ name: 'http', port: 80, targetPort: 'http' }],
     },
   };
-  return { name, namespace, labels, image, stopped, pvc, deployment, service };
+  return { name, namespace, labels, image, stopped, compute, pvc, deployment, service };
 }
 
 async function cleanupWorkbenchResources(claim) {
@@ -2086,7 +2143,7 @@ async function patchWorkbenchStatus(claim, status) {
 
 async function reconcileWorkbenchClaim(claim) {
   const resources = workbenchResources(claim);
-  const { name, namespace, pvc, deployment, service, image, stopped } = resources;
+  const { name, namespace, pvc, deployment, service, image, stopped, compute } = resources;
   const cleanup = await cleanupClaimResources(claim, 'workbenchclaims', cleanupWorkbenchResources);
   if (cleanup) return cleanup;
   await ensureClaimFinalizer(claim, 'workbenchclaims');
@@ -2134,6 +2191,9 @@ async function reconcileWorkbenchClaim(claim) {
     await patchWorkbenchStatus(claim, resetRetryFields({
       ...baseStatus,
       backendResource: `apps/v1/Deployment/${namespace}/${name}`,
+      computeBackendRef: compute.name ? `${compute.namespace}/${compute.name}` : '',
+      gpuClass: compute.gpuClass,
+      gpuCount: compute.gpuCount,
       ...normalized,
     }));
     return { name: claim.metadata?.name, namespace, runtimeName: name, phase: normalized.phase };
@@ -2894,6 +2954,170 @@ async function workbenchOperation(req) {
   }
 }
 
+async function requireWorkbenchReadAccess(req, namespace, name, action = '/workbenches') {
+  await requestActor(req);
+  const canReadNative = await selfCan(req, 'get', 'ai.opensphere.io', 'workbenchclaims', namespace, name);
+  const canReadNotebook = await selfCan(req, 'get', 'kubeflow.org', 'notebooks', namespace, name);
+  if (!canReadNative && !canReadNotebook) {
+    await appendSecurityAudit(req, false, action, { verb: 'get', group: 'ai.opensphere.io', resource: 'workbenchclaims', namespace, kind: 'WorkbenchClaim', name }, 'requires get on WorkbenchClaim or Kubeflow Notebook');
+    throw { code: 403, msg: `Forbidden: requires get on WorkbenchClaim or Kubeflow Notebook in ${namespace}` };
+  }
+  await appendSecurityAudit(req, true, action, { verb: 'get', group: canReadNative ? 'ai.opensphere.io' : 'kubeflow.org', resource: canReadNative ? 'workbenchclaims' : 'notebooks', namespace, kind: canReadNative ? 'WorkbenchClaim' : 'Notebook', name }, 'RBAC check passed');
+  return { canReadNative, canReadNotebook };
+}
+
+function workbenchRuntimeNameFrom(name, raw) {
+  return raw?.status?.runtimeName || raw?.status?.serviceName || runtimeNameForClaim({ metadata: { name } });
+}
+
+function inferenceRuntimeNameFrom(name, raw) {
+  return raw?.status?.runtimeName || raw?.status?.serviceName || inferenceRuntimeNameForClaim({ metadata: { name } });
+}
+
+function compactK8sObject(obj, fallbackKind) {
+  if (!obj) return null;
+  return {
+    name: obj.metadata?.name || '',
+    namespace: obj.metadata?.namespace || '',
+    kind: obj.kind || fallbackKind,
+    phase: obj.status?.phase || obj.status?.conditions?.find((c) => c.type === 'Ready')?.reason || '',
+    ready: obj.status?.readyReplicas > 0 || obj.status?.availableReplicas > 0 || obj.status?.phase === 'Running' || obj.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') || false,
+    message: obj.status?.conditions?.find((c) => c.message)?.message || '',
+  };
+}
+
+async function workbenchDetail(req) {
+  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const name = requireDnsName(params.get('name') || '', 'workbench name');
+  const namespace = requireDnsName(params.get('namespace') || 'default', 'namespace');
+  await requireWorkbenchReadAccess(req, namespace, name, '/workbenches/detail');
+
+  let raw = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/workbenchclaims/${name}`);
+  let item = raw ? itemFromK8s(raw, 'WorkbenchClaim') : null;
+  let backendMode = raw ? backendModeForItem(item) : 'upstream-adapter';
+  if (!raw) {
+    for (const path of [
+      `/apis/kubeflow.org/v1/namespaces/${namespace}/notebooks/${name}`,
+      `/apis/kubeflow.org/v1beta1/namespaces/${namespace}/notebooks/${name}`,
+    ]) {
+      raw = await k8sJson(path);
+      if (raw) {
+        item = itemFromK8s(raw, 'Notebook');
+        break;
+      }
+    }
+  }
+  if (!raw || !item) throw { code: 404, msg: `Workbench ${namespace}/${name} was not found.` };
+
+  const runtimeName = workbenchRuntimeNameFrom(name, raw);
+  const [deployment, service, pvc, pods, events] = await Promise.all([
+    k8sJson(`/apis/apps/v1/namespaces/${namespace}/deployments/${runtimeName}`),
+    k8sJson(`/api/v1/namespaces/${namespace}/services/${runtimeName}`),
+    k8sJson(`/api/v1/namespaces/${namespace}/persistentvolumeclaims/${runtimeName}-workspace`),
+    k8sJson(`/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${runtimeName}`)}`),
+    k8sJson(`/api/v1/namespaces/${namespace}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${runtimeName}`)}`),
+  ]);
+  const podItems = pods?.items || [];
+  const firstPod = podItems[0]?.metadata?.name || '';
+  const logsText = firstPod ? await k8sText(`/api/v1/namespaces/${namespace}/pods/${firstPod}/log?tailLines=100`).catch(() => '') : '';
+  const servicePort = service?.spec?.ports?.[0]?.port || 80;
+  const clusterUrl = raw.status?.url || (service ? `http://${runtimeName}.${namespace}.svc.cluster.local${servicePort === 80 ? '' : `:${servicePort}`}` : '');
+  const proxyUrl = service ? `/workbenches/proxy/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/` : '';
+  const reachability = await workbenchReachability(runtimeName, namespace, servicePort, service);
+  const compute = workbenchComputeMeta(raw.spec || {}, namespace);
+  return {
+    item: withBackendMetadata({ ...item, backendMode }),
+    runtime: {
+      name: runtimeName,
+      namespace,
+      image: raw.status?.image || raw.spec?.image || '',
+      openUrl: clusterUrl,
+      proxyUrl,
+      backendMode,
+      computeBackendRef: raw.status?.computeBackendRef || (compute.name ? `${compute.namespace}/${compute.name}` : ''),
+      gpuClass: raw.status?.gpuClass || compute.gpuClass,
+      reachability,
+    },
+    storage: pvc ? compactK8sObject(pvc, 'PersistentVolumeClaim') : null,
+    deployment: deployment ? compactK8sObject(deployment, 'Deployment') : null,
+    service: service ? compactK8sObject(service, 'Service') : null,
+    pods: podItems.map((pod) => compactK8sObject(pod, 'Pod')),
+    events: (events?.items || []).slice(-20).map((event) => ({
+      time: event.lastTimestamp || event.eventTime || event.metadata?.creationTimestamp || '',
+      type: event.type || '',
+      reason: event.reason || '',
+      message: event.message || '',
+    })),
+    logs: {
+      pod: firstPod,
+      tailLines: logsText ? logsText.split(/\r?\n/).filter(Boolean) : [],
+    },
+  };
+}
+
+async function workbenchReachability(runtimeName, namespace, servicePort, service) {
+  if (!service) return { checked: true, ready: false, status: 0, phase: 'ServiceMissing', message: 'Service is not available.' };
+  const target = `http://${runtimeName}.${namespace}.svc.cluster.local${servicePort === 80 ? '' : `:${servicePort}`}/healthz`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const r = await fetch(target, { method: 'GET', signal: controller.signal });
+    return { checked: true, ready: r.ok, status: r.status, phase: r.ok ? 'Reachable' : 'HttpError', message: r.ok ? 'Workbench health endpoint is reachable.' : `Workbench health endpoint returned HTTP ${r.status}.` };
+  } catch (e) {
+    return { checked: true, ready: false, status: 0, phase: 'Unreachable', message: e.name === 'AbortError' ? 'Workbench health check timed out.' : `Workbench health check failed: ${e.message || e}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function workbenchProxy(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const namespace = requireDnsName(parts[2] || '', 'namespace');
+  const name = requireDnsName(parts[3] || '', 'workbench name');
+  const cookieToken = tokenFromCookie(req.headers.cookie);
+  if (!req.headers['x-os-id-token'] && cookieToken) req.headers['x-os-id-token'] = cookieToken;
+  await requireWorkbenchReadAccess(req, namespace, name, '/workbenches/proxy');
+
+  let raw = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/workbenchclaims/${name}`);
+  if (!raw) {
+    raw = await k8sJson(`/apis/kubeflow.org/v1/namespaces/${namespace}/notebooks/${name}`)
+      || await k8sJson(`/apis/kubeflow.org/v1beta1/namespaces/${namespace}/notebooks/${name}`);
+  }
+  if (!raw) return jsonRes(res, 404, { error: `Workbench ${namespace}/${name} was not found.` });
+  const runtimeName = workbenchRuntimeNameFrom(name, raw);
+  const service = await k8sJson(`/api/v1/namespaces/${namespace}/services/${runtimeName}`);
+  if (!service) return jsonRes(res, 404, { error: `Workbench service ${namespace}/${runtimeName} was not found.` });
+  const servicePort = service.spec?.ports?.[0]?.port || 80;
+  const suffix = '/' + parts.slice(4).join('/');
+  const target = `http://${runtimeName}.${namespace}.svc.cluster.local${servicePort === 80 ? '' : `:${servicePort}`}${suffix}${url.search}`;
+  const headers = {};
+  for (const key of ['accept', 'accept-language', 'content-type']) {
+    if (req.headers[key]) headers[key] = req.headers[key];
+  }
+  const body = ['GET', 'HEAD'].includes(req.method) ? undefined : await readBody(req);
+  const upstream = await fetch(target, { method: req.method, headers, body, redirect: 'manual' });
+  const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+  const responseHeaders = {
+    'content-type': contentType,
+    'cache-control': 'no-store',
+  };
+  const location = upstream.headers.get('location');
+  if (location && location.startsWith('/')) responseHeaders.location = `./${location.replace(/^\/+/, '')}`;
+  res.writeHead(upstream.status, responseHeaders);
+  if (req.method === 'HEAD') return res.end();
+  const buffer = Buffer.from(await upstream.arrayBuffer());
+  if (/text\/html|text\/css|application\/javascript/i.test(contentType)) {
+    const proxyBase = `/workbenches/proxy/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/`;
+    const text = buffer.toString('utf8')
+      .replace(/(<base\s+href=["'])\/(["'])/gi, `$1${proxyBase}$2`)
+      .replace(/\b(href|src|action)=["']\/(?!\/)([^"']*)["']/gi, (_m, attr, value) => `${attr}="${proxyBase}${value}"`)
+      .replace(/url\(\s*(['"]?)\/(?!\/)([^)'"]+)\1\s*\)/gi, (_m, quote, value) => `url(${quote}${proxyBase}${value}${quote})`);
+    return res.end(text);
+  }
+  return res.end(buffer);
+}
+
 async function inferenceUpdate(req) {
   const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
   const name = requireDnsName(body.name, 'deployment name');
@@ -2915,6 +3139,221 @@ async function inferenceUpdate(req) {
     return { item: itemFromK8s(raw, 'InferenceClaim'), edited: patch.spec };
   }
   return { item: { name, namespace, kind: 'InferenceClaim', phase: 'Edited', ready: true }, edited: patch.spec, reference: true };
+}
+
+async function requireInferenceReadAccess(req, namespace, name, action = '/inference/detail') {
+  await requestActor(req);
+  const canReadNative = await selfCan(req, 'get', 'ai.opensphere.io', 'inferenceclaims', namespace, name);
+  const canReadKServe = await selfCan(req, 'get', 'serving.kserve.io', 'inferenceservices', namespace, name);
+  if (!canReadNative && !canReadKServe) {
+    await appendSecurityAudit(req, false, action, { verb: 'get', group: 'ai.opensphere.io', resource: 'inferenceclaims', namespace, kind: 'InferenceClaim', name }, 'requires get on InferenceClaim or KServe InferenceService');
+    throw { code: 403, msg: `Forbidden: requires get on InferenceClaim or KServe InferenceService in ${namespace}` };
+  }
+  await appendSecurityAudit(req, true, action, { verb: 'get', group: canReadNative ? 'ai.opensphere.io' : 'serving.kserve.io', resource: canReadNative ? 'inferenceclaims' : 'inferenceservices', namespace, kind: canReadNative ? 'InferenceClaim' : 'InferenceService', name }, 'RBAC check passed');
+  return { canReadNative, canReadKServe };
+}
+
+async function inferenceReachability(runtimeName, namespace, servicePort, service, explicitUrl) {
+  if (!service) {
+    return explicitUrl
+      ? { checked: true, ready: true, status: 0, phase: 'UrlReported', message: 'Serving backend reported an endpoint URL; in-cluster Service health was not checked.' }
+      : { checked: true, ready: false, status: 0, phase: 'ServiceMissing', message: 'Service is not available.' };
+  }
+  const target = `http://${runtimeName}.${namespace}.svc.cluster.local${servicePort === 80 ? '' : `:${servicePort}`}/healthz`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  try {
+    const r = await fetch(target, { method: 'GET', signal: controller.signal });
+    return { checked: true, ready: r.ok, status: r.status, phase: r.ok ? 'Reachable' : 'HttpError', message: r.ok ? 'Inference health endpoint is reachable.' : `Inference health endpoint returned HTTP ${r.status}.` };
+  } catch (e) {
+    return { checked: true, ready: false, status: 0, phase: 'Unreachable', message: e.name === 'AbortError' ? 'Inference health check timed out.' : `Inference health check failed: ${e.message || e}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function inferenceDetail(req) {
+  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const namespace = requireDnsName(params.get('namespace') || 'default', 'namespace');
+  const name = requireDnsName(params.get('name') || '', 'inference name');
+  const requestedKind = optionalString(params.get('kind') || 'InferenceClaim') || 'InferenceClaim';
+  await requireInferenceReadAccess(req, namespace, name, '/inference/detail');
+
+  let raw = requestedKind === 'InferenceService' ? null : await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/inferenceclaims/${name}`);
+  let kind = 'InferenceClaim';
+  let backendMode = raw ? backendModeForItem(itemFromK8s(raw, 'InferenceClaim')) : 'upstream-adapter';
+  if (!raw) {
+    raw = await k8sJson(`/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices/${name}`)
+      || await k8sJson(`/apis/serving.kserve.io/v1alpha1/namespaces/${namespace}/inferenceservices/${name}`);
+    kind = 'InferenceService';
+    backendMode = 'upstream-adapter';
+  }
+  if (!raw) throw { code: 404, msg: `Inference endpoint ${namespace}/${name} was not found.` };
+
+  const item = withBackendMetadata({ ...itemFromK8s(raw, kind), backendMode });
+  const runtimeName = kind === 'InferenceClaim' ? inferenceRuntimeNameFrom(name, raw) : name;
+  const modelSpec = kind === 'InferenceService' ? raw.spec?.predictor?.model || {} : raw.spec || {};
+  const modelName = raw.status?.modelName
+    || raw.spec?.modelRef?.name
+    || raw.spec?.model
+    || modelSpec.name
+    || name;
+  const runtime = raw.status?.runtime
+    || raw.spec?.runtime
+    || raw.spec?.servingRuntime
+    || modelSpec.runtime
+    || modelSpec.modelFormat?.name
+    || '';
+  const modelUri = raw.spec?.modelUri
+    || raw.spec?.storageUri
+    || raw.spec?.artifactUri
+    || raw.spec?.sourceRef
+    || modelSpec.storageUri
+    || '';
+  const [deployment, service, inferenceService, pods, events] = await Promise.all([
+    k8sJson(`/apis/apps/v1/namespaces/${namespace}/deployments/${runtimeName}`),
+    k8sJson(`/api/v1/namespaces/${namespace}/services/${runtimeName}`),
+    kind === 'InferenceService'
+      ? Promise.resolve(raw)
+      : (async () => (await k8sJson(`/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices/${runtimeName}`))
+        || (await k8sJson(`/apis/serving.kserve.io/v1alpha1/namespaces/${namespace}/inferenceservices/${runtimeName}`)))(),
+    k8sJson(`/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${runtimeName}`)}`),
+    k8sJson(`/api/v1/namespaces/${namespace}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${runtimeName}`)}`),
+  ]);
+  let podItems = pods?.items || [];
+  if (!podItems.length && kind === 'InferenceService') {
+    const kservePods = await k8sJson(`/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`serving.kserve.io/inferenceservice=${runtimeName}`)}`);
+    podItems = kservePods?.items || [];
+  }
+  const firstPod = podItems[0]?.metadata?.name || '';
+  const logsText = firstPod ? await k8sText(`/api/v1/namespaces/${namespace}/pods/${firstPod}/log?tailLines=120`).catch(() => '') : '';
+  const servicePort = service?.spec?.ports?.[0]?.port || 80;
+  const url = raw.status?.url || raw.status?.address?.url || raw.status?.predictUrl || (service ? `http://${runtimeName}.${namespace}.svc.cluster.local${servicePort === 80 ? '' : `:${servicePort}`}` : '');
+  const predictUrl = raw.status?.predictUrl || (url ? `${String(url).replace(/\/$/, '')}/v1/models/${modelName}/predict` : '');
+  return {
+    item,
+    runtime: {
+      name: runtimeName,
+      namespace,
+      image: raw.status?.image || raw.spec?.runtimeImage || raw.spec?.servingImage || raw.spec?.image || '',
+      modelName,
+      runtime,
+      modelUri,
+      url,
+      predictUrl,
+      backendMode,
+      backendResource: raw.status?.backendResource || (kind === 'InferenceService' ? `serving.kserve.io/InferenceService/${namespace}/${name}` : ''),
+      reachability: await inferenceReachability(runtimeName, namespace, servicePort, service, url),
+    },
+    deployment: deployment ? compactK8sObject(deployment, 'Deployment') : null,
+    service: service ? compactK8sObject(service, 'Service') : null,
+    inferenceService: inferenceService ? compactK8sObject(inferenceService, 'InferenceService') : null,
+    pods: podItems.map((pod) => compactK8sObject(pod, 'Pod')),
+    conditions: compactConditions(raw.status?.conditions || []),
+    upstreamConditions: compactConditions(raw.status?.upstreamConditions || []),
+    events: (events?.items || []).slice(-20).map((event) => ({
+      time: event.lastTimestamp || event.eventTime || event.metadata?.creationTimestamp || '',
+      type: event.type || '',
+      reason: event.reason || '',
+      message: event.message || '',
+    })),
+    logs: {
+      pod: firstPod,
+      tailLines: logsText ? logsText.split(/\r?\n/).filter(Boolean) : [],
+    },
+  };
+}
+
+async function requireDataConnectionReadAccess(req, namespace, name, action = '/data-connections/detail') {
+  await requestActor(req);
+  const allowed = await selfCan(req, 'get', 'ai.opensphere.io', 'dataconnectionclaims', namespace, name);
+  if (!allowed) {
+    await appendSecurityAudit(req, false, action, { verb: 'get', group: 'ai.opensphere.io', resource: 'dataconnectionclaims', namespace, kind: 'DataConnectionClaim', name }, 'requires get on DataConnectionClaim');
+    throw { code: 403, msg: `Forbidden: requires get on DataConnectionClaim in ${namespace}` };
+  }
+  await appendSecurityAudit(req, true, action, { verb: 'get', group: 'ai.opensphere.io', resource: 'dataconnectionclaims', namespace, kind: 'DataConnectionClaim', name }, 'RBAC check passed');
+}
+
+function dataConnectionSecretName(raw, name) {
+  return optionalString(
+    raw?.spec?.secretRef?.name
+    || raw?.spec?.secretName
+    || raw?.spec?.credentialsSecret
+    || raw?.spec?.credentialSecretRef
+    || raw?.status?.secretName
+    || `${name}-credentials`,
+  );
+}
+
+function referencesDataConnection(raw, name) {
+  const spec = raw?.spec || {};
+  const refs = [
+    spec.dataConnectionRef?.name,
+    spec.dataConnectionRef,
+    spec.dataConnection,
+    spec.connectionRef?.name,
+    spec.connectionRef,
+    spec.credentialsRef?.name,
+    spec.credentialsRef,
+  ].map((value) => typeof value === 'string' ? value : value?.name).filter(Boolean);
+  if (refs.includes(name)) return true;
+  const text = JSON.stringify(spec);
+  return text.includes(`"dataConnection"`) && text.includes(name);
+}
+
+async function dataConnectionUsage(namespace, name) {
+  const sources = [
+    { path: `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/workbenchclaims`, kind: 'WorkbenchClaim' },
+    { path: `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelineclaims`, kind: 'PipelineClaim' },
+    { path: `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/trainingjobclaims`, kind: 'TrainingJobClaim' },
+    { path: `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/inferenceclaims`, kind: 'InferenceClaim' },
+  ];
+  const groups = await Promise.all(sources.map(async (source) => {
+    const list = await k8sJson(source.path);
+    return (list?.items || [])
+      .filter((item) => referencesDataConnection(item, name))
+      .map((item) => withBackendMetadata(itemFromK8s(item, source.kind)));
+  }));
+  return groups.flat();
+}
+
+async function dataConnectionDetail(req) {
+  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const namespace = requireDnsName(params.get('namespace') || 'default', 'namespace');
+  const name = requireDnsName(params.get('name') || '', 'data connection name');
+  await requireDataConnectionReadAccess(req, namespace, name, '/data-connections/detail');
+
+  const raw = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/dataconnectionclaims/${name}`);
+  if (!raw) throw { code: 404, msg: `DataConnectionClaim ${namespace}/${name} was not found.` };
+  const item = withBackendMetadata(itemFromK8s(raw, 'DataConnectionClaim'));
+  const secretName = dataConnectionSecretName(raw, name);
+  const canReadSecret = secretName ? await selfCan(req, 'get', '', 'secrets', namespace, secretName) : false;
+  const secret = secretName && canReadSecret
+    ? await k8sJson(`/api/v1/namespaces/${namespace}/secrets/${secretName}`)
+    : null;
+  const usage = await dataConnectionUsage(namespace, name);
+  return {
+    item,
+    provider: raw.spec?.provider || raw.spec?.type || raw.status?.provider || '',
+    endpoint: raw.spec?.endpoint || raw.spec?.url || raw.status?.endpoint || '',
+    database: raw.spec?.database || raw.spec?.bucket || raw.spec?.schema || '',
+    owner: raw.metadata?.annotations?.['opensphere.io/owner'] || raw.spec?.owner || '',
+    secret: {
+      name: secretName,
+      namespace,
+      readable: !!secret,
+      type: secret?.type || '',
+      keys: Object.keys(secret?.data || {}).sort(),
+      masked: true,
+      message: secretName
+        ? secret
+          ? `${Object.keys(secret.data || {}).length} credential key(s) available; values are intentionally hidden.`
+          : 'Secret values are hidden or not readable by this user.'
+        : 'No credential Secret reference is configured.',
+    },
+    usage,
+    conditions: compactConditions(raw.status?.conditions || []),
+  };
 }
 
 async function pipelineLogs(reqUrl) {
@@ -2982,6 +3421,78 @@ async function pipelineLineage(reqUrl) {
     };
   }
   return { name, items: FALLBACK_DETAILS.lineage };
+}
+
+async function requirePipelineReadAccess(req, namespace, name, kind = 'PipelineClaim', action = '/pipelines/detail') {
+  await requestActor(req);
+  const target = kind === 'PipelineRunClaim'
+    ? { group: 'ai.opensphere.io', resource: 'pipelinerunclaims' }
+    : { group: 'ai.opensphere.io', resource: 'pipelineclaims' };
+  const allowed = await selfCan(req, 'get', target.group, target.resource, namespace, name);
+  if (!allowed) {
+    await appendSecurityAudit(req, false, action, { verb: 'get', group: target.group, resource: target.resource, namespace, kind, name }, `requires get on ${kind}`);
+    throw { code: 403, msg: `Forbidden: requires get on ${kind} in ${namespace}` };
+  }
+  await appendSecurityAudit(req, true, action, { verb: 'get', group: target.group, resource: target.resource, namespace, kind, name }, 'RBAC check passed');
+}
+
+async function pipelineDetail(req) {
+  const params = new URL(req.url, `http://${req.headers.host}`).searchParams;
+  const namespace = requireDnsName(params.get('namespace') || 'default', 'namespace');
+  const name = requireDnsName(params.get('name') || '', 'pipeline name');
+  const requestedKind = optionalString(params.get('kind') || 'PipelineClaim') || 'PipelineClaim';
+  const kind = requestedKind === 'PipelineRunClaim' ? 'PipelineRunClaim' : 'PipelineClaim';
+  await requirePipelineReadAccess(req, namespace, name, kind, '/pipelines/detail');
+
+  const raw = kind === 'PipelineRunClaim'
+    ? await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelinerunclaims/${name}`)
+    : await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelineclaims/${name}`);
+  if (!raw) throw { code: 404, msg: `${kind} ${namespace}/${name} was not found.` };
+  const item = withBackendMetadata(itemFromK8s(raw, kind));
+  const pipelineName = kind === 'PipelineRunClaim'
+    ? optionalString(raw.spec?.pipelineRef?.name || raw.status?.pipelineName || raw.spec?.pipeline || name)
+    : name;
+  const [runs, experiments, artifacts, lineage, logs] = await Promise.all([
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelinerunclaims`),
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/experimentclaims`),
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/artifactclaims`),
+    kind === 'PipelineRunClaim' ? pipelineLineage(`/pipeline/runs/lineage?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`) : Promise.resolve({ name, items: [] }),
+    kind === 'PipelineRunClaim' ? pipelineLogs(`/pipeline/runs/logs?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`) : Promise.resolve({ name, namespace, lines: [] }),
+  ]);
+  const runItems = (runs?.items || [])
+    .filter((run) => {
+      const refName = run.spec?.pipelineRef?.name || run.status?.pipelineName || run.spec?.pipeline || '';
+      return kind === 'PipelineRunClaim' ? run.metadata?.name === name : refName === pipelineName || run.metadata?.labels?.['ai.opensphere.io/pipeline'] === pipelineName;
+    })
+    .map((run) => withBackendMetadata(itemFromK8s(run, 'PipelineRunClaim')));
+  const experimentItems = (experiments?.items || [])
+    .filter((experiment) => kind === 'PipelineRunClaim'
+      ? experiment.metadata?.name === raw.spec?.experimentRef?.name
+      : true)
+    .slice(0, 20)
+    .map((experiment) => withBackendMetadata(itemFromK8s(experiment, 'ExperimentClaim')));
+  const artifactItems = (artifacts?.items || [])
+    .filter((artifact) => {
+      const sourceRef = optionalString(artifact.spec?.sourceRef || artifact.spec?.pipelineRunRef?.name || artifact.status?.sourceRef || '');
+      return kind === 'PipelineRunClaim' ? sourceRef === name || artifact.metadata?.labels?.['ai.opensphere.io/pipeline-run'] === name : true;
+    })
+    .slice(0, 50)
+    .map((artifact) => withBackendMetadata(itemFromK8s(artifact, 'ArtifactClaim')));
+  return {
+    item,
+    pipelineName,
+    backendMode: backendModeForItem(item),
+    definition: {
+      version: raw.spec?.version || raw.status?.version || 'latest',
+      source: raw.spec?.source || raw.spec?.sourceRef || raw.status?.source || '',
+      parameters: raw.spec?.parameters || {},
+    },
+    runs: runItems,
+    experiments: experimentItems,
+    artifacts: artifactItems,
+    lineage: lineage.items || [],
+    logs: logs.lines || [],
+  };
 }
 
 async function runPipeline(req) {
@@ -5356,12 +5867,15 @@ function minimalCrd(def) {
   };
 }
 
-async function selfCan(req, verb, group, resource, namespace) {
+async function selfCan(req, verb, group, resource, namespace, name = '') {
   if (!req?.headers?.['x-os-id-token']) return false;
+  const resourceAttributes = { verb, group, resource };
+  if (namespace) resourceAttributes.namespace = namespace;
+  if (name) resourceAttributes.name = name;
   const body = {
     apiVersion: 'authorization.k8s.io/v1',
     kind: 'SelfSubjectAccessReview',
-    spec: { resourceAttributes: { verb, group, resource, namespace } },
+    spec: { resourceAttributes },
   };
   try {
     const raw = await writeK8s('/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', 'POST', body, req);
@@ -5420,8 +5934,66 @@ function operationTarget(pathname, body) {
   throw { code: 400, msg: 'unsupported operation target' };
 }
 
+const ADMIN_READ_PATHS = new Set([
+  '/admin/odh-components',
+  '/admin/native/catalog',
+  '/admin/native/backends',
+  '/admin/native/support-services',
+  '/admin/native/support-services/serving/preview',
+  '/admin/native/support-services/pipelines/preview',
+  '/admin/native/support-services/model-registry/preview',
+  '/admin/native/support-services/observability/preview',
+  '/admin/native/support-services/metadata/preview',
+  '/admin/native/controller-metrics',
+  '/admin/native/audit-log',
+  '/admin/native/final-readiness',
+  '/admin/native/gpu-inventory',
+  '/admin/native/gpu-enablement-plan',
+  '/admin/native/compute-routing',
+  '/admin/native/demo-plan',
+  '/admin/native/demo-run',
+  '/admin/native/demo-run/evidence',
+  '/admin/native/demo-run/preview',
+  '/admin/native/demo-smoke',
+  '/admin/native/demo-smoke/logs',
+  '/admin/native/demo-smoke/preview',
+  '/admin/setup/status',
+  '/admin/setup/plan',
+]);
+
+async function requireOperationalReadAccess(req, action) {
+  const actor = await requestActor(req);
+  if (actorIsAdmin(actor)) {
+    await appendSecurityAudit(req, true, action, { verb: 'get', kind: 'OperationalRead', resource: 'admin-read' }, `admin group matched: ${ADMIN_GROUPS.join(', ')}`);
+    return;
+  }
+  const checks = await Promise.all([
+    selfCan(req, 'get', '', 'configmaps', 'opensphere-system'),
+    selfCan(req, 'list', 'ai.opensphere.io', 'workbenchclaims'),
+    selfCan(req, 'list', 'eval.ai.opensphere.io', 'evaluationjobs'),
+    selfCan(req, 'list', '', 'nodes'),
+  ]);
+  if (checks.some(Boolean)) {
+    await appendSecurityAudit(req, true, action, { verb: 'get', kind: 'OperationalRead', resource: 'admin-read' }, 'read RBAC check passed');
+    return;
+  }
+  const reason = 'requires OpenSphere admin group or read access to OpenSphere operational resources';
+  await appendSecurityAudit(req, false, action, { verb: 'get', kind: 'OperationalRead', resource: 'admin-read' }, reason);
+  throw { code: 403, msg: `Forbidden: ${reason}` };
+}
+
+async function authorizeAiReadRequest(req, pathname) {
+  if (req.method !== 'GET') return;
+  if (ADMIN_READ_PATHS.has(pathname)) {
+    await requireOperationalReadAccess(req, pathname);
+  }
+}
+
 async function authorizeAiRequest(req, pathname) {
-  if (!WRITE_METHODS.has(req.method)) return;
+  if (!WRITE_METHODS.has(req.method)) {
+    await authorizeAiReadRequest(req, pathname);
+    return;
+  }
   if (pathname === '/admin/setup/plan') return;
 
   const adminPaths = new Set([
@@ -5435,6 +6007,10 @@ async function authorizeAiRequest(req, pathname) {
     '/admin/native/demo-run',
     '/admin/native/demo-run/reset',
     '/admin/native/demo-smoke',
+    '/admin/native/support-services/object-storage/preview',
+    '/admin/native/support-services/object-storage',
+    '/admin/native/support-services/metadata/preview',
+    '/admin/native/support-services/metadata',
     '/admin/setup/install',
   ]);
   if (pathname.startsWith('/admin/native/reconcile/')) {
@@ -5536,6 +6112,1362 @@ async function setupStatus(req) {
     namespaces: (namespacesJson?.items || []).map((item) => item.metadata?.name || '').filter(Boolean).sort(),
     dataScienceClusters: (dsc?.items || []).map((item) => itemFromK8s(item, 'DataScienceCluster')),
     nativePlatform: native,
+  };
+}
+
+function supportPhase(ready, partial = false) {
+  if (ready) return 'Ready';
+  if (partial) return 'Configured';
+  return 'Missing';
+}
+
+function supportReady(phase) {
+  return phase === 'Ready' || phase === 'Configured';
+}
+
+function supportStepStatus(item) {
+  if (!item) return 'Missing';
+  if (item.phase === 'Ready') return 'Ready';
+  if (item.phase === 'Configured') return 'Configured';
+  return item.required ? 'Required' : 'Optional';
+}
+
+function resourceRefFor(obj, fallbackKind = '') {
+  return {
+    kind: obj?.kind || fallbackKind,
+    namespace: obj?.metadata?.namespace || '',
+    name: obj?.metadata?.name || '',
+    phase: obj?.status?.phase || obj?.status?.conditions?.find((c) => c.type === 'Ready')?.reason || '',
+  };
+}
+
+const BACKBONE_NAMESPACE = 'opensphere-backbone';
+const BACKBONE_COMPONENTS = [
+  {
+    id: 'postgres',
+    label: 'PostgreSQL',
+    kind: 'Deployment',
+    name: 'backbone-postgres',
+    service: 'backbone-postgres',
+    role: 'Shared metadata database substrate',
+    endpoint: `backbone-postgres.${BACKBONE_NAMESPACE}.svc.cluster.local:5432`,
+  },
+  {
+    id: 'rustfs',
+    label: 'RustFS',
+    kind: 'StatefulSet',
+    name: 'backbone-rustfs',
+    service: 'backbone-rustfs',
+    role: 'S3-compatible object storage substrate',
+    endpoint: `http://backbone-rustfs.${BACKBONE_NAMESPACE}.svc.cluster.local:9000`,
+    consoleEndpoint: `http://backbone-rustfs.${BACKBONE_NAMESPACE}.svc.cluster.local:9001`,
+  },
+  {
+    id: 'gitea',
+    label: 'Gitea',
+    kind: 'Deployment',
+    name: 'backbone-gitea',
+    service: 'backbone-gitea',
+    role: 'Config-as-code and GitOps substrate',
+    endpoint: `http://backbone-gitea.${BACKBONE_NAMESPACE}.svc.cluster.local:3000`,
+  },
+];
+
+function workloadPath(component) {
+  if (component.kind === 'StatefulSet') return `/apis/apps/v1/namespaces/${BACKBONE_NAMESPACE}/statefulsets/${component.name}`;
+  return `/apis/apps/v1/namespaces/${BACKBONE_NAMESPACE}/deployments/${component.name}`;
+}
+
+function workloadReady(workload) {
+  const desired = workload?.spec?.replicas ?? 1;
+  const ready = workload?.status?.readyReplicas ?? workload?.status?.availableReplicas ?? 0;
+  return ready >= desired && desired > 0;
+}
+
+function workloadDetail(workload) {
+  if (!workload) return 'workload not found';
+  const desired = workload.spec?.replicas ?? 1;
+  const ready = workload.status?.readyReplicas ?? workload.status?.availableReplicas ?? 0;
+  const image = workload.spec?.template?.spec?.containers?.[0]?.image || 'unknown image';
+  return `${ready}/${desired} ready, ${image}`;
+}
+
+async function backboneInventory() {
+  const namespace = await k8sJson(`/api/v1/namespaces/${BACKBONE_NAMESPACE}`);
+  if (!namespace) {
+    return {
+      namespace: BACKBONE_NAMESPACE,
+      phase: 'Missing',
+      ready: false,
+      installed: false,
+      components: BACKBONE_COMPONENTS.map((component) => ({
+        ...component,
+        phase: 'Missing',
+        ready: false,
+        installed: false,
+        detail: 'namespace not found',
+      })),
+    };
+  }
+  const components = await Promise.all(BACKBONE_COMPONENTS.map(async (component) => {
+    const [workload, service] = await Promise.all([
+      k8sJson(workloadPath(component)),
+      k8sJson(`/api/v1/namespaces/${BACKBONE_NAMESPACE}/services/${component.service}`),
+    ]);
+    const ready = workloadReady(workload) && !!service;
+    return {
+      ...component,
+      phase: ready ? 'Ready' : workload || service ? 'Configured' : 'Missing',
+      ready,
+      installed: !!(workload || service),
+      detail: service ? `${workloadDetail(workload)}, service ${component.service}` : workloadDetail(workload),
+      resources: [
+        workload ? resourceRefFor(workload, component.kind) : { kind: component.kind, namespace: BACKBONE_NAMESPACE, name: component.name, phase: 'Missing' },
+        service ? resourceRefFor(service, 'Service') : { kind: 'Service', namespace: BACKBONE_NAMESPACE, name: component.service, phase: 'Missing' },
+      ],
+    };
+  }));
+  const ready = components.every((component) => component.ready);
+  const installed = components.some((component) => component.installed);
+  return {
+    namespace: BACKBONE_NAMESPACE,
+    phase: ready ? 'Ready' : installed ? 'Configured' : 'Missing',
+    ready,
+    installed,
+    components,
+    defaults: {
+      objectStorage: {
+        provider: 's3',
+        endpoint: `http://backbone-rustfs.${BACKBONE_NAMESPACE}.svc.cluster.local:9000`,
+        bucket: 'oah-artifacts',
+        region: 'us-east-1',
+        secretName: 'oah-backbone-rustfs-credentials',
+        useTls: false,
+        insecureSkipTlsVerify: false,
+      },
+      metadata: {
+        provider: 'postgres',
+        host: `backbone-postgres.${BACKBONE_NAMESPACE}.svc.cluster.local`,
+        port: '5432',
+        database: 'opensphere_metadata',
+        username: 'console',
+        sslMode: 'prefer',
+      },
+    },
+  };
+}
+
+function dataConnectionIsObjectStorage(item) {
+  const spec = item?.spec || {};
+  const text = JSON.stringify(spec).toLowerCase();
+  return ['bucket', 's3', 'object', 'minio', 'ceph', 'rgw'].some((token) => text.includes(token));
+}
+
+function requireBucketName(value) {
+  const bucket = String(value || '').trim();
+  if (!bucket || bucket.length < 3 || bucket.length > 63 || !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(bucket) || bucket.includes('..')) {
+    throw { code: 400, msg: 'bucket must be a valid S3-compatible bucket name.' };
+  }
+  return bucket;
+}
+
+async function supportObjectStorageService(req) {
+  const [crd, claims, services, pods] = await Promise.all([
+    crdInstalled('dataconnectionclaims.ai.opensphere.io'),
+    k8sJson('/apis/ai.opensphere.io/v1alpha1/dataconnectionclaims'),
+    k8sJson('/api/v1/services'),
+    k8sJson('/api/v1/pods'),
+  ]);
+  const objectClaims = (claims?.items || []).filter(dataConnectionIsObjectStorage);
+  const serviceHits = (services?.items || []).filter((svc) => /minio|ceph|rgw|rook|s3|rustfs/i.test(`${svc.metadata?.namespace || ''}/${svc.metadata?.name || ''}`));
+  const podHits = (pods?.items || []).filter((pod) => /minio|ceph|rgw|rook|s3|rustfs/i.test(`${pod.metadata?.namespace || ''}/${pod.metadata?.name || ''}`));
+  const secretChecks = await Promise.all(objectClaims.map(async (claim) => {
+    const secretName = dataConnectionSecretName(claim, claim.metadata?.name || '');
+    const secret = secretName ? await k8sJsonForRequest(`/api/v1/namespaces/${claim.metadata?.namespace || 'default'}/secrets/${secretName}`, req) : null;
+    return { claim, secretName, secret };
+  }));
+  const readyClaims = secretChecks.filter((item) => item.secret);
+  const phase = supportPhase(readyClaims.length > 0, crd && (objectClaims.length > 0 || serviceHits.length > 0 || podHits.length > 0));
+  return {
+    id: 'object-storage',
+    label: 'Object storage',
+    category: 'Storage',
+    required: true,
+    requiredFor: ['KServe model storageUri', 'KFP artifacts', 'Model artifacts', 'Data connections'],
+    phase,
+    ready: supportReady(phase),
+    installed: serviceHits.length > 0 || podHits.length > 0,
+    configured: objectClaims.length > 0,
+    evidence: readyClaims.length
+      ? `${readyClaims.length} object storage DataConnectionClaim(s) with readable Secret.`
+      : objectClaims.length
+        ? `${objectClaims.length} object storage DataConnectionClaim(s), credential Secret not readable or missing.`
+        : serviceHits.length || podHits.length
+          ? `${serviceHits.length} service(s), ${podHits.length} pod(s) look like S3/object storage.`
+          : crd
+            ? 'No S3-compatible object storage connection was found.'
+            : 'DataConnectionClaim CRD is not installed.',
+    nextStep: readyClaims.length
+      ? 'Use this DataConnection as KServe storageUri and KFP artifact store input.'
+      : 'Create or verify a DataConnectionClaim with bucket, endpoint, region/TLS, and credential Secret.',
+    resources: [
+      ...objectClaims.map((item) => resourceRefFor(item, 'DataConnectionClaim')),
+      ...(crd ? [{ kind: 'CRD', namespace: '', name: 'dataconnectionclaims.ai.opensphere.io', phase: 'Installed' }] : []),
+      ...serviceHits.slice(0, 5).map((item) => resourceRefFor(item, 'Service')),
+      ...podHits.slice(0, 5).map((item) => resourceRefFor(item, 'Pod')),
+    ],
+  };
+}
+
+function objectStoragePayload(body, options = {}) {
+  const requireCredentials = options.requireCredentials !== false;
+  const name = requireDnsName(String(body.name || 'default-object-storage').trim(), 'name');
+  const namespace = requireDnsName(String(body.namespace || 'opensphere-system').trim(), 'namespace');
+  const provider = String(body.provider || 's3').trim().toLowerCase();
+  if (!['s3', 'minio', 'ceph-rgw', 'rgw'].includes(provider)) throw { code: 400, msg: 'Provider must be s3, minio, ceph-rgw, or rgw.' };
+  const endpoint = String(body.endpoint || '').trim();
+  if (!validHttpEndpoint(endpoint)) throw { code: 400, msg: 'Object storage endpoint must be an http:// or https:// URL.' };
+  const bucket = requireBucketName(body.bucket);
+  const region = String(body.region || 'us-east-1').trim() || 'us-east-1';
+  const secretName = requireDnsName(String(body.secretName || `${name}-credentials`).trim(), 'secretName');
+  const accessKeyId = String(body.accessKeyId || '').trim();
+  const secretAccessKey = String(body.secretAccessKey || '').trim();
+  if (requireCredentials && (!accessKeyId || !secretAccessKey)) throw { code: 400, msg: 'Object storage access key and secret key are required.' };
+  const useTls = body.useTls !== false;
+  const insecureSkipTlsVerify = body.insecureSkipTlsVerify === true;
+  return { name, namespace, provider, endpoint, bucket, region, secretName, accessKeyId, secretAccessKey, useTls, insecureSkipTlsVerify };
+}
+
+function objectStorageSecretManifest(config, redact = false) {
+  const accessKeyId = redact ? (config.accessKeyId ? '<redacted-access-key-id>' : '<access-key-id>') : config.accessKeyId;
+  const secretAccessKey = redact ? (config.secretAccessKey ? '<redacted-secret-access-key>' : '<secret-access-key>') : config.secretAccessKey;
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: config.secretName,
+      namespace: config.namespace,
+      labels: { 'app.kubernetes.io/part-of': 'opensphere-ai', 'opensphere.io/support-service': 'object-storage' },
+    },
+    type: 'Opaque',
+    stringData: {
+      AWS_ACCESS_KEY_ID: accessKeyId,
+      AWS_SECRET_ACCESS_KEY: secretAccessKey,
+      access_key_id: accessKeyId,
+      secret_access_key: secretAccessKey,
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      region: config.region,
+    },
+  };
+}
+
+function objectStorageClaimManifest(config) {
+  return {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'DataConnectionClaim',
+    metadata: {
+      name: config.name,
+      namespace: config.namespace,
+      labels: { 'app.kubernetes.io/part-of': 'opensphere-ai', 'opensphere.io/support-service': 'object-storage' },
+      annotations: { 'opensphere.io/description': 'OAH S3-compatible object storage connection for KServe, KFP, and model artifacts.' },
+    },
+    spec: {
+      connectionType: 'bucket',
+      sourceType: 's3',
+      provider: config.provider,
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      region: config.region,
+      sourceRef: `s3://${config.bucket}`,
+      purpose: 'object-storage',
+      secretRef: { name: config.secretName },
+      credentialSecretRef: config.secretName,
+      tls: {
+        enabled: config.useTls,
+        insecureSkipVerify: config.insecureSkipTlsVerify,
+      },
+    },
+  };
+}
+
+async function objectStoragePreview(req) {
+  const config = objectStoragePayload(await jsonBody(req), { requireCredentials: false });
+  const crdInstalledNow = await crdInstalled('dataconnectionclaims.ai.opensphere.io');
+  const namespaceExists = !!(await k8sJson(`/api/v1/namespaces/${config.namespace}`));
+  const manifests = [];
+  if (!crdInstalledNow) {
+    const def = FOUNDATION_CRDS.find((item) => item.name === 'dataconnectionclaims.ai.opensphere.io');
+    if (def) manifests.push(minimalCrd(def));
+  }
+  if (!namespaceExists) {
+    manifests.push({
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: config.namespace,
+        labels: { 'opensphere.io/support-services': 'true' },
+      },
+    });
+  }
+  manifests.push(objectStorageSecretManifest(config, true), objectStorageClaimManifest(config));
+  return {
+    phase: crdInstalledNow && namespaceExists ? 'ReadyToApply' : 'RequiresBootstrap',
+    summary: {
+      manifests: manifests.length,
+      crdInstalled: crdInstalledNow,
+      namespaceExists,
+      credentialsProvided: !!(config.accessKeyId && config.secretAccessKey),
+    },
+    target: {
+      namespace: config.namespace,
+      dataConnection: config.name,
+      secret: config.secretName,
+      endpoint: config.endpoint,
+      bucket: config.bucket,
+      provider: config.provider,
+    },
+    manifests,
+  };
+}
+
+async function ensureDataConnectionClaimCrd(req) {
+  if (await crdInstalled('dataconnectionclaims.ai.opensphere.io')) return { phase: 'Existing', name: 'dataconnectionclaims.ai.opensphere.io' };
+  const def = FOUNDATION_CRDS.find((item) => item.name === 'dataconnectionclaims.ai.opensphere.io');
+  if (!def) throw { code: 500, msg: 'DataConnectionClaim CRD definition is not registered.' };
+  const created = await writeK8s('/apis/apiextensions.k8s.io/v1/customresourcedefinitions', 'POST', minimalCrd(def), req);
+  return { phase: 'Created', name: created.metadata?.name || def.name };
+}
+
+async function ensureSupportNamespace(namespace, req) {
+  if (await k8sJson(`/api/v1/namespaces/${namespace}`)) return { phase: 'Existing', name: namespace };
+  const created = await writeK8s('/api/v1/namespaces', 'POST', {
+    apiVersion: 'v1',
+    kind: 'Namespace',
+    metadata: {
+      name: namespace,
+      labels: { 'opensphere.io/support-services': 'true' },
+    },
+  }, req);
+  return { phase: 'Created', name: created.metadata?.name || namespace };
+}
+
+async function objectStorageBootstrap(req) {
+  const config = objectStoragePayload(await jsonBody(req));
+  const crd = await ensureDataConnectionClaimCrd(req);
+  const namespace = await ensureSupportNamespace(config.namespace, req);
+  const secret = objectStorageSecretManifest(config);
+  const secretPath = `/api/v1/namespaces/${config.namespace}/secrets/${config.secretName}`;
+  const secretResult = await upsertK8s(`/api/v1/namespaces/${config.namespace}/secrets`, secretPath, secret, {
+    metadata: { labels: secret.metadata.labels },
+    type: 'Opaque',
+    stringData: secret.stringData,
+  }, req);
+  const claim = objectStorageClaimManifest(config);
+  const claimPath = `/apis/ai.opensphere.io/v1alpha1/namespaces/${config.namespace}/dataconnectionclaims/${config.name}`;
+  const claimResult = await upsertK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${config.namespace}/dataconnectionclaims`, claimPath, claim, {
+    metadata: { labels: claim.metadata.labels, annotations: claim.metadata.annotations },
+    spec: claim.spec,
+  }, req);
+  return {
+    phase: 'Configured',
+    crd,
+    namespace,
+    secret: { namespace: config.namespace, name: secretResult.metadata?.name || config.secretName },
+    dataConnection: itemFromK8s(claimResult, 'DataConnectionClaim'),
+    supportServices: await supportServices(req),
+  };
+}
+
+function metadataPayload(body, options = {}) {
+  const requirePassword = options.requirePassword !== false;
+  const name = requireDnsName(String(body.name || 'oah-metadata-credentials').trim(), 'name');
+  const namespace = requireDnsName(String(body.namespace || 'opensphere-system').trim(), 'namespace');
+  const provider = String(body.provider || 'postgres').trim().toLowerCase();
+  if (!['postgres', 'postgresql', 'mysql', 'mariadb'].includes(provider)) throw { code: 400, msg: 'Provider must be postgres, postgresql, mysql, or mariadb.' };
+  const host = String(body.host || '').trim();
+  if (!host) throw { code: 400, msg: 'Metadata database host is required.' };
+  const port = String(body.port || (provider.includes('mysql') || provider === 'mariadb' ? '3306' : '5432')).trim();
+  const database = requireDnsName(String(body.database || 'opensphere_metadata').replace(/_/g, '-'), 'database').replace(/-/g, '_');
+  const username = String(body.username || '').trim();
+  const password = String(body.password || '').trim();
+  if (!username) throw { code: 400, msg: 'Metadata database username is required.' };
+  if (requirePassword && !password) throw { code: 400, msg: 'Metadata database password is required.' };
+  const sslMode = String(body.sslMode || 'prefer').trim();
+  const purposes = Array.isArray(body.purposes) && body.purposes.length
+    ? body.purposes.map((item) => String(item || '').trim()).filter(Boolean)
+    : ['kfp', 'model-registry', 'trustyai'];
+  return { name, namespace, provider, host, port, database, username, password, sslMode, purposes };
+}
+
+function metadataJdbcUrl(config) {
+  if (config.provider === 'mysql' || config.provider === 'mariadb') {
+    return `jdbc:mysql://${config.host}:${config.port}/${config.database}`;
+  }
+  return `jdbc:postgresql://${config.host}:${config.port}/${config.database}?sslmode=${encodeURIComponent(config.sslMode)}`;
+}
+
+function metadataSecretManifest(config, redact = false) {
+  const password = redact ? (config.password ? '<redacted-password>' : '<password>') : config.password;
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: config.name,
+      namespace: config.namespace,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'metadata-store',
+      },
+      annotations: {
+        'opensphere.io/metadata-purposes': config.purposes.join(','),
+      },
+    },
+    type: 'Opaque',
+    stringData: {
+      provider: config.provider,
+      host: config.host,
+      port: config.port,
+      database: config.database,
+      username: config.username,
+      password,
+      sslmode: config.sslMode,
+      jdbcUrl: metadataJdbcUrl(config),
+      purposes: config.purposes.join(','),
+    },
+  };
+}
+
+async function metadataPreview(req) {
+  const config = metadataPayload(await jsonBody(req), { requirePassword: false });
+  const namespaceExists = !!(await k8sJson(`/api/v1/namespaces/${config.namespace}`));
+  const manifests = [];
+  if (!namespaceExists) {
+    manifests.push({
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: config.namespace,
+        labels: { 'opensphere.io/support-services': 'true' },
+      },
+    });
+  }
+  manifests.push(metadataSecretManifest(config, true));
+  return {
+    phase: namespaceExists ? 'ReadyToApply' : 'RequiresNamespace',
+    summary: {
+      manifests: manifests.length,
+      namespaceExists,
+      passwordProvided: !!config.password,
+      purposes: config.purposes.length,
+    },
+    target: {
+      namespace: config.namespace,
+      secret: config.name,
+      provider: config.provider,
+      host: config.host,
+      database: config.database,
+      purposes: config.purposes,
+    },
+    manifests,
+  };
+}
+
+async function metadataBootstrap(req) {
+  const config = metadataPayload(await jsonBody(req));
+  const namespace = await ensureSupportNamespace(config.namespace, req);
+  const secret = metadataSecretManifest(config);
+  const secretPath = `/api/v1/namespaces/${config.namespace}/secrets/${config.name}`;
+  const secretResult = await upsertK8s(`/api/v1/namespaces/${config.namespace}/secrets`, secretPath, secret, {
+    metadata: { labels: secret.metadata.labels, annotations: secret.metadata.annotations },
+    type: 'Opaque',
+    stringData: secret.stringData,
+  }, req);
+  return {
+    phase: 'Configured',
+    namespace,
+    secret: { namespace: config.namespace, name: secretResult.metadata?.name || config.name },
+    supportServices: await supportServices(req),
+  };
+}
+
+function servingPreviewStatus(ready, required = true, partial = false) {
+  if (ready) return 'Ready';
+  if (partial) return 'Configured';
+  return required ? 'Required' : 'Optional';
+}
+
+async function servingFoundationPreview(req) {
+  const [support, backends, setup, nativeCatalogResult] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    nativeCatalog(),
+  ]);
+  const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const serving = backendById['model-serving'] || {};
+  const objectStorage = supportById['object-storage'] || {};
+  const compute = supportById['compute-foundation'] || {};
+  const storage = supportById['storage-class'] || {};
+  const kserveCrds = [
+    { name: 'servingruntimes.serving.kserve.io', label: 'KServe ServingRuntime', installed: await crdInstalled('servingruntimes.serving.kserve.io') },
+    { name: 'inferenceservices.serving.kserve.io', label: 'KServe InferenceService', installed: await crdInstalled('inferenceservices.serving.kserve.io') },
+    { name: 'services.serving.knative.dev', label: 'Knative Service', installed: await crdInstalled('services.serving.knative.dev') },
+    { name: 'revisions.serving.knative.dev', label: 'Knative Revision', installed: await crdInstalled('revisions.serving.knative.dev') },
+    { name: 'routes.serving.knative.dev', label: 'Knative Route', installed: await crdInstalled('routes.serving.knative.dev') },
+  ];
+  const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'model-serving' || item.name === 'kserve');
+  const nativeDsc = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        'model-serving': { managementState: 'Managed' },
+        kserve: { managementState: 'Managed' },
+      },
+    },
+  };
+  const upstreamPlan = setupPlanFrom({
+    provider: 'opendatahub',
+    namespace: 'opendatahub',
+    operatorPackage: 'opendatahub-operator',
+    channel: 'fast',
+    source: 'community-operators',
+    sourceNamespace: 'openshift-marketplace',
+    dataScienceClusterName: 'default-dsc',
+    components: ['kserve'],
+  });
+  const upstreamManifests = setupManifests(upstreamPlan).filter((item) => ['Namespace', 'OperatorGroup', 'Subscription', 'DataScienceCluster'].includes(item.kind));
+  const checks = [
+    {
+      id: 'object-storage',
+      label: 'Object storage DataConnection',
+      status: servingPreviewStatus(objectStorage.ready, true, objectStorage.configured),
+      evidence: objectStorage.evidence || 'Object storage inventory is unavailable.',
+      nextStep: objectStorage.ready ? 'Use the DataConnection bucket as model artifact storage.' : 'Configure object storage before KServe storageUri e2e.',
+    },
+    {
+      id: 'compute',
+      label: 'Compute/GPU backend',
+      status: servingPreviewStatus(compute.ready, true, compute.configured),
+      evidence: compute.evidence || 'Compute backend inventory is unavailable.',
+      nextStep: compute.ready ? 'Route inference workloads to a serving backend.' : 'Register ComputeBackendClaim or expose Kubernetes GPU resources.',
+    },
+    {
+      id: 'storage-class',
+      label: 'Default StorageClass',
+      status: servingPreviewStatus(storage.ready, true, storage.configured),
+      evidence: storage.evidence || 'StorageClass inventory is unavailable.',
+      nextStep: storage.ready ? 'PVC-backed workloads can be scheduled.' : 'Configure a default StorageClass.',
+    },
+    {
+      id: 'kserve-crds',
+      label: 'KServe/Knative CRDs',
+      status: servingPreviewStatus(kserveCrds.every((item) => item.installed), false, kserveCrds.some((item) => item.installed)),
+      evidence: `${kserveCrds.filter((item) => item.installed).length}/${kserveCrds.length} serving CRD(s) detected.`,
+      nextStep: kserveCrds.every((item) => item.installed) ? 'Run InferenceService e2e.' : 'Install Knative Serving and KServe through ODH/RHOAI or an equivalent serving stack.',
+      resources: kserveCrds,
+    },
+    {
+      id: 'operator-path',
+      label: 'ODH/RHOAI Operator path',
+      status: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+      evidence: setup.operators?.olmAvailable ? 'OLM API is available.' : 'OLM API is not available on this cluster.',
+      nextStep: setup.operators?.olmAvailable ? 'Use Setup wizard to create OperatorGroup, Subscription, and DataScienceCluster.' : 'Use OpenSphere-native serving fallback, or prepare OKD/OpenShift/OLM for upstream parity.',
+    },
+    {
+      id: 'native-path',
+      label: 'OpenSphere-native serving path',
+      status: servingPreviewStatus(serving.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
+      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (serving.message || 'OpenSphere-native serving component is not cataloged yet.'),
+      nextStep: serving.fallbackReady ? 'Use InferenceClaim fallback runtime while upstream KServe is absent.' : 'Seed native catalog and create native DataScienceCluster.',
+    },
+  ];
+  return {
+    phase: serving.upstreamReady ? 'UpstreamReady' : serving.fallbackReady ? 'NativeFallbackReady' : 'NeedsServingFoundation',
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ready: checks.filter((item) => item.status === 'Ready').length,
+      configured: checks.filter((item) => item.status === 'Configured').length,
+      required: checks.filter((item) => item.status === 'Required').length,
+      total: checks.length,
+    },
+    checks,
+    installOptions: [
+      {
+        id: 'native',
+        label: 'OpenSphere-native serving fallback',
+        recommended: !serving.upstreamReady,
+        phase: serving.fallbackReady ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Seed native catalog, subscribe model-serving, and create OpenSphereDataScienceCluster.',
+        manifests: [nativeDsc],
+      },
+      {
+        id: 'upstream-odh',
+        label: 'ODH/RHOAI KServe/Knative upstream',
+        recommended: false,
+        phase: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+        action: 'Use Setup wizard when OKD/OpenShift OLM and ODH/RHOAI operator path are available.',
+        manifests: upstreamManifests,
+      },
+    ],
+  };
+}
+
+async function pipelinesFoundationPreview(req) {
+  const [support, backends, setup, nativeCatalogResult] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    nativeCatalog(),
+  ]);
+  const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const pipelines = backendById.pipelines || {};
+  const objectStorage = supportById['object-storage'] || {};
+  const metadata = supportById['metadata-store'] || {};
+  const storage = supportById['storage-class'] || {};
+  const compute = supportById['compute-foundation'] || {};
+  const pipelineCrds = [
+    { name: 'pipelineruns.tekton.dev', label: 'Tekton PipelineRun', installed: await crdInstalled('pipelineruns.tekton.dev') },
+    { name: 'pipelines.tekton.dev', label: 'Tekton Pipeline', installed: await crdInstalled('pipelines.tekton.dev') },
+    { name: 'datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io', label: 'ODH DataSciencePipelinesApplication', installed: await crdInstalled('datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io') },
+    { name: 'pipelines.pipelines.kubeflow.org', label: 'Kubeflow Pipeline', installed: await crdInstalled('pipelines.pipelines.kubeflow.org') },
+    { name: 'experiments.pipelines.kubeflow.org', label: 'Kubeflow Experiment', installed: await crdInstalled('experiments.pipelines.kubeflow.org') },
+    { name: 'runs.pipelines.kubeflow.org', label: 'Kubeflow Run', installed: await crdInstalled('runs.pipelines.kubeflow.org') },
+  ];
+  const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'pipelines' || item.name === 'datasciencepipelines');
+  const nativeDsc = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        pipelines: { managementState: 'Managed' },
+        datasciencepipelines: { managementState: 'Managed' },
+      },
+    },
+  };
+  const upstreamPlan = setupPlanFrom({
+    provider: 'opendatahub',
+    namespace: 'opendatahub',
+    operatorPackage: 'opendatahub-operator',
+    channel: 'fast',
+    source: 'community-operators',
+    sourceNamespace: 'openshift-marketplace',
+    dataScienceClusterName: 'default-dsc',
+    components: ['datasciencepipelines'],
+  });
+  const upstreamManifests = setupManifests(upstreamPlan).filter((item) => ['Namespace', 'OperatorGroup', 'Subscription', 'DataScienceCluster'].includes(item.kind));
+  const pipelineReady = pipelineCrds.some((item) => item.installed);
+  const checks = [
+    {
+      id: 'object-storage',
+      label: 'Artifact object storage',
+      status: servingPreviewStatus(objectStorage.ready, true, objectStorage.configured),
+      evidence: objectStorage.evidence || 'Object storage inventory is unavailable.',
+      nextStep: objectStorage.ready ? 'Use the DataConnection bucket for pipeline artifacts.' : 'Configure object storage before KFP/DSPA artifact validation.',
+    },
+    {
+      id: 'metadata-store',
+      label: 'Metadata DB/credential Secret',
+      status: servingPreviewStatus(metadata.ready, true, metadata.configured),
+      evidence: metadata.evidence || 'Metadata credential inventory is unavailable.',
+      nextStep: metadata.ready || metadata.configured ? 'Bind KFP, Model Registry, and TrustyAI to separate database/schema credentials.' : 'Prepare metadata DB credentials before upstream KFP/DSPA install.',
+    },
+    {
+      id: 'storage-class',
+      label: 'Default StorageClass',
+      status: servingPreviewStatus(storage.ready, true, storage.configured),
+      evidence: storage.evidence || 'StorageClass inventory is unavailable.',
+      nextStep: storage.ready ? 'Pipeline temporary volumes can use the default StorageClass.' : 'Configure a default StorageClass.',
+    },
+    {
+      id: 'compute',
+      label: 'Compute/GPU backend',
+      status: servingPreviewStatus(compute.ready, true, compute.configured),
+      evidence: compute.evidence || 'Compute backend inventory is unavailable.',
+      nextStep: compute.ready ? 'Route pipeline/training workloads to a compute backend.' : 'Register ComputeBackendClaim or expose Kubernetes GPU resources.',
+    },
+    {
+      id: 'pipeline-crds',
+      label: 'Tekton/KFP/DSPA CRDs',
+      status: servingPreviewStatus(pipelineReady, false, pipelineCrds.some((item) => item.installed)),
+      evidence: `${pipelineCrds.filter((item) => item.installed).length}/${pipelineCrds.length} pipeline CRD(s) detected.`,
+      nextStep: pipelineReady ? 'Run PipelineRun upstream e2e with artifact store.' : 'Install Data Science Pipelines/KFP or Tekton if upstream pipeline runtime is required.',
+      resources: pipelineCrds,
+    },
+    {
+      id: 'operator-path',
+      label: 'ODH/RHOAI Operator path',
+      status: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+      evidence: setup.operators?.olmAvailable ? 'OLM API is available.' : 'OLM API is not available on this cluster.',
+      nextStep: setup.operators?.olmAvailable ? 'Use Setup wizard to create OperatorGroup, Subscription, and DataScienceCluster.' : 'Use OpenSphere-native pipeline fallback, or prepare OKD/OpenShift/OLM for upstream parity.',
+    },
+    {
+      id: 'native-path',
+      label: 'OpenSphere-native pipeline path',
+      status: servingPreviewStatus(pipelines.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
+      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (pipelines.message || 'OpenSphere-native pipeline component is not cataloged yet.'),
+      nextStep: pipelines.fallbackReady ? 'Use PipelineRunClaim fallback runtime while upstream KFP/Tekton is absent.' : 'Seed native catalog and create native DataScienceCluster.',
+    },
+  ];
+  return {
+    phase: pipelines.upstreamReady ? 'UpstreamReady' : pipelines.fallbackReady ? 'NativeFallbackReady' : 'NeedsPipelineFoundation',
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ready: checks.filter((item) => item.status === 'Ready').length,
+      configured: checks.filter((item) => item.status === 'Configured').length,
+      required: checks.filter((item) => item.status === 'Required').length,
+      total: checks.length,
+    },
+    checks,
+    installOptions: [
+      {
+        id: 'native',
+        label: 'OpenSphere-native pipeline fallback',
+        recommended: !pipelines.upstreamReady,
+        phase: pipelines.fallbackReady ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Seed native catalog, subscribe pipelines, and create OpenSphereDataScienceCluster.',
+        manifests: [nativeDsc],
+      },
+      {
+        id: 'upstream-odh',
+        label: 'ODH/RHOAI Data Science Pipelines upstream',
+        recommended: false,
+        phase: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+        action: 'Use Setup wizard when OKD/OpenShift OLM and ODH/RHOAI operator path are available.',
+        manifests: upstreamManifests,
+      },
+    ],
+  };
+}
+
+async function modelRegistryFoundationPreview(req) {
+  const [support, backends, setup, nativeCatalogResult, registryStatus] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    nativeCatalog(),
+    modelRegistryUpstream('/?backend=modelregistry').catch((e) => ({ error: e.msg || String(e), summary: { ready: false } })),
+  ]);
+  const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const registry = backendById['model-registry'] || {};
+  const metadata = supportById['metadata-store'] || {};
+  const objectStorage = supportById['object-storage'] || {};
+  const serving = supportById['serving-foundation'] || {};
+  const registryCrds = [
+    { name: 'modelregistries.modelregistry.opendatahub.io', label: 'ODH ModelRegistry', installed: await crdInstalled('modelregistries.modelregistry.opendatahub.io') },
+  ];
+  const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'model-registry' || item.name === 'modelregistry');
+  const fallbackConfigMap = await k8sJson('/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions');
+  const fallbackManifest = {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: 'ai-model-registry-versions',
+      namespace: 'opensphere-system',
+      labels: { 'app.kubernetes.io/part-of': 'opensphere-ai', 'opensphere.io/support-service': 'model-registry' },
+    },
+    data: {
+      versions: fallbackConfigMap?.data?.versions || '[]',
+    },
+  };
+  const nativeDsc = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        'model-registry': { managementState: 'Managed' },
+        modelregistry: { managementState: 'Managed' },
+      },
+    },
+  };
+  const upstreamPlan = setupPlanFrom({
+    provider: 'opendatahub',
+    namespace: 'opendatahub',
+    operatorPackage: 'opendatahub-operator',
+    channel: 'fast',
+    source: 'community-operators',
+    sourceNamespace: 'openshift-marketplace',
+    dataScienceClusterName: 'default-dsc',
+    components: ['modelregistry'],
+  });
+  const upstreamManifests = setupManifests(upstreamPlan).filter((item) => ['Namespace', 'OperatorGroup', 'Subscription', 'DataScienceCluster'].includes(item.kind));
+  const checks = [
+    {
+      id: 'metadata-store',
+      label: 'Metadata DB/credential Secret',
+      status: servingPreviewStatus(metadata.ready, true, metadata.configured),
+      evidence: metadata.evidence || 'Metadata credential inventory is unavailable.',
+      nextStep: metadata.ready || metadata.configured ? 'Bind Model Registry to a dedicated database/schema credential.' : 'Configure metadata credentials before upstream Model Registry install.',
+    },
+    {
+      id: 'object-storage',
+      label: 'Model artifact object storage',
+      status: servingPreviewStatus(objectStorage.ready, true, objectStorage.configured),
+      evidence: objectStorage.evidence || 'Object storage inventory is unavailable.',
+      nextStep: objectStorage.ready ? 'Use DataConnection artifact URIs in model versions.' : 'Configure object storage for model artifacts and serving handoff.',
+    },
+    {
+      id: 'serving-handoff',
+      label: 'Serving handoff',
+      status: servingPreviewStatus(serving.ready, false, serving.configured),
+      evidence: serving.evidence || 'Serving foundation inventory is unavailable.',
+      nextStep: serving.ready || serving.configured ? 'Model versions can be promoted toward serving workflows.' : 'Prepare serving foundation before production promotion handoff.',
+    },
+    {
+      id: 'model-registry-crds',
+      label: 'ODH Model Registry CRD',
+      status: servingPreviewStatus(registryCrds.every((item) => item.installed), false, registryCrds.some((item) => item.installed)),
+      evidence: `${registryCrds.filter((item) => item.installed).length}/${registryCrds.length} registry CRD(s) detected.`,
+      nextStep: registryCrds.every((item) => item.installed) ? 'Run upstream Model Registry read/write self-test.' : 'Install ODH Model Registry only when upstream parity is required.',
+      resources: registryCrds,
+    },
+    {
+      id: 'upstream-rest',
+      label: 'Upstream REST API',
+      status: registryStatus.summary?.ready ? 'Ready' : 'Optional',
+      evidence: registryStatus.summary?.ready ? `${registryStatus.summary.resourcesReady || 0}/${registryStatus.summary.resourcesTotal || 0} Model Registry REST resource(s) responded.` : (registryStatus.backend?.message || registryStatus.error || 'No upstream Model Registry endpoint is available.'),
+      nextStep: registryStatus.summary?.ready ? 'Run upstream write self-test from Models / Registry.' : 'Use OpenSphere-native registry until an upstream endpoint is available.',
+    },
+    {
+      id: 'native-path',
+      label: 'OpenSphere-native registry path',
+      status: servingPreviewStatus(registry.fallbackReady || nativeComponent?.ready || !!fallbackConfigMap, true, !!nativeComponent),
+      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : fallbackConfigMap ? 'OpenSphere registry ConfigMap exists.' : (registry.message || 'OpenSphere-native registry component is not cataloged yet.'),
+      nextStep: registry.fallbackReady || fallbackConfigMap ? 'Use ConfigMap-backed registry for model versions and promotion audit.' : 'Seed native catalog and create native DataScienceCluster.',
+    },
+  ];
+  return {
+    phase: registry.upstreamReady ? 'UpstreamReady' : registry.fallbackReady || fallbackConfigMap ? 'NativeFallbackReady' : 'NeedsModelRegistryFoundation',
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ready: checks.filter((item) => item.status === 'Ready').length,
+      configured: checks.filter((item) => item.status === 'Configured').length,
+      required: checks.filter((item) => item.status === 'Required').length,
+      total: checks.length,
+    },
+    checks,
+    installOptions: [
+      {
+        id: 'native',
+        label: 'OpenSphere-native model registry',
+        recommended: !registry.upstreamReady,
+        phase: registry.fallbackReady || fallbackConfigMap ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Seed native catalog, subscribe model-registry, and keep ConfigMap-backed registry storage available.',
+        manifests: [fallbackManifest, nativeDsc],
+      },
+      {
+        id: 'upstream-odh',
+        label: 'ODH/RHOAI Model Registry upstream',
+        recommended: false,
+        phase: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+        action: 'Use Setup wizard when OKD/OpenShift OLM and ODH/RHOAI operator path are available, then run upstream write self-test.',
+        manifests: upstreamManifests,
+      },
+    ],
+  };
+}
+
+async function observabilityFoundationPreview(req) {
+  const [support, backends, setup, nativeCatalogResult, metricsResult] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    nativeCatalog(),
+    trustyaiMetrics('/monitoring/trustyai/metrics').catch((e) => ({ error: e.msg || String(e), items: [], alerts: [], history: [] })),
+  ]);
+  const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const monitoring = backendById.monitoring || {};
+  const metadata = supportById['metadata-store'] || {};
+  const serving = supportById['serving-foundation'] || {};
+  const registry = supportById['model-registry'] || {};
+  const observabilityCrds = [
+    { name: 'trustyaiservices.trustyai.opendatahub.io', label: 'TrustyAIService', installed: await crdInstalled('trustyaiservices.trustyai.opendatahub.io') },
+    { name: 'servicemonitors.monitoring.coreos.com', label: 'ServiceMonitor', installed: await crdInstalled('servicemonitors.monitoring.coreos.com') },
+    { name: 'prometheusrules.monitoring.coreos.com', label: 'PrometheusRule', installed: await crdInstalled('prometheusrules.monitoring.coreos.com') },
+  ];
+  const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'monitoring' || item.name === 'trustyai');
+  const nativeDsc = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        monitoring: { managementState: 'Managed' },
+        trustyai: { managementState: 'Managed' },
+      },
+    },
+  };
+  const sampleTarget = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'MonitoringTarget',
+    metadata: {
+      name: 'sample-model-monitoring',
+      namespace: 'default',
+      labels: { 'app.kubernetes.io/part-of': 'opensphere-ai' },
+    },
+    spec: {
+      backend: 'auto',
+      targetRef: {
+        apiVersion: 'ai.opensphere.io/v1alpha1',
+        kind: 'InferenceClaim',
+        name: 'model-deployment',
+      },
+      metrics: ['drift', 'bias', 'explainability'],
+      threshold: 0.8,
+      enforcement: 'audit',
+    },
+  };
+  const upstreamPlan = setupPlanFrom({
+    provider: 'opendatahub',
+    namespace: 'opendatahub',
+    operatorPackage: 'opendatahub-operator',
+    channel: 'fast',
+    source: 'community-operators',
+    sourceNamespace: 'openshift-marketplace',
+    dataScienceClusterName: 'default-dsc',
+    components: ['trustyai'],
+  });
+  const upstreamManifests = setupManifests(upstreamPlan).filter((item) => ['Namespace', 'OperatorGroup', 'Subscription', 'DataScienceCluster'].includes(item.kind));
+  const metricCount = (metricsResult.items || []).length;
+  const alertCount = (metricsResult.alerts || []).length;
+  const checks = [
+    {
+      id: 'metadata-store',
+      label: 'Metadata DB/credential Secret',
+      status: servingPreviewStatus(metadata.ready, true, metadata.configured),
+      evidence: metadata.evidence || 'Metadata credential inventory is unavailable.',
+      nextStep: metadata.ready || metadata.configured ? 'Bind TrustyAI to a durable metadata store when using upstream services.' : 'Configure metadata credentials before upstream TrustyAI install.',
+    },
+    {
+      id: 'serving-foundation',
+      label: 'Serving target source',
+      status: servingPreviewStatus(serving.ready, true, serving.configured),
+      evidence: serving.evidence || 'Serving foundation inventory is unavailable.',
+      nextStep: serving.ready || serving.configured ? 'Attach MonitoringTarget to served model resources.' : 'Prepare serving foundation before production monitoring.',
+    },
+    {
+      id: 'registry-link',
+      label: 'Model Registry link',
+      status: servingPreviewStatus(registry.ready, false, registry.configured),
+      evidence: registry.evidence || 'Model Registry inventory is unavailable.',
+      nextStep: registry.ready || registry.configured ? 'Use model version and promotion metadata as monitoring evidence.' : 'Model Registry is optional but improves monitoring lineage.',
+    },
+    {
+      id: 'observability-crds',
+      label: 'TrustyAI/Prometheus CRDs',
+      status: servingPreviewStatus(observabilityCrds.some((item) => item.installed), false, observabilityCrds.some((item) => item.installed)),
+      evidence: `${observabilityCrds.filter((item) => item.installed).length}/${observabilityCrds.length} observability CRD(s) detected.`,
+      nextStep: observabilityCrds.some((item) => item.installed) ? 'Connect monitoring targets to upstream services.' : 'Install TrustyAI/Prometheus only when upstream monitoring parity is required.',
+      resources: observabilityCrds,
+    },
+    {
+      id: 'metric-evidence',
+      label: 'OpenSphere monitoring evidence',
+      status: metricCount || alertCount ? 'Ready' : monitoring.fallbackReady ? 'Configured' : 'Required',
+      evidence: `${metricCount} metric row(s), ${alertCount} alert row(s) visible from MonitoringTarget fallback.`,
+      nextStep: metricCount || alertCount ? 'Review metrics and retained audit events in Monitoring.' : 'Create or reconcile MonitoringTarget resources.',
+    },
+    {
+      id: 'native-path',
+      label: 'OpenSphere-native monitoring path',
+      status: servingPreviewStatus(monitoring.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
+      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (monitoring.message || 'OpenSphere-native monitoring component is not cataloged yet.'),
+      nextStep: monitoring.fallbackReady ? 'Use MonitoringTarget fallback metrics while upstream TrustyAI is absent.' : 'Seed native catalog and create native DataScienceCluster.',
+    },
+  ];
+  return {
+    phase: monitoring.upstreamReady ? 'UpstreamReady' : monitoring.fallbackReady ? 'NativeFallbackReady' : 'NeedsObservabilityFoundation',
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ready: checks.filter((item) => item.status === 'Ready').length,
+      configured: checks.filter((item) => item.status === 'Configured').length,
+      required: checks.filter((item) => item.status === 'Required').length,
+      total: checks.length,
+    },
+    checks,
+    installOptions: [
+      {
+        id: 'native',
+        label: 'OpenSphere-native monitoring fallback',
+        recommended: !monitoring.upstreamReady,
+        phase: monitoring.fallbackReady ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Seed native catalog, subscribe monitoring, and reconcile MonitoringTarget resources.',
+        manifests: [nativeDsc, sampleTarget],
+      },
+      {
+        id: 'upstream-odh',
+        label: 'ODH/RHOAI TrustyAI upstream',
+        recommended: false,
+        phase: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+        action: 'Use Setup wizard when OKD/OpenShift OLM and ODH/RHOAI operator path are available, then connect TrustyAIService to served models.',
+        manifests: upstreamManifests,
+      },
+    ],
+  };
+}
+
+async function supportServices(req) {
+  const [objectStorage, backends, compute, gpu, setup, storageClasses, secrets, backbone] = await Promise.all([
+    supportObjectStorageService(req),
+    nativeBackends(),
+    computeBackendResources(),
+    gpuInventory(),
+    setupStatus(req),
+    k8sJson('/apis/storage.k8s.io/v1/storageclasses'),
+    k8sJsonForRequest('/api/v1/namespaces/opensphere-system/secrets', req),
+    backboneInventory(),
+  ]);
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const hasDefaultStorageClass = (storageClasses?.items || []).some((sc) => sc.metadata?.annotations?.['storageclass.kubernetes.io/is-default-class'] === 'true');
+  const credentialSecrets = (secrets?.items || []).filter((secret) => {
+    const labels = secret.metadata?.labels || {};
+    const annotations = secret.metadata?.annotations || {};
+    const name = secret.metadata?.name || '';
+    return labels['opensphere.io/support-service'] === 'metadata-store'
+      || annotations['opensphere.io/metadata-purposes']
+      || /metadata|database|db|postgres|mysql|kfp|registry|trustyai/i.test(name);
+  });
+  const service = (id, label, category, required, requiredFor, phase, evidence, nextStep, resources = []) => ({
+    id,
+    label,
+    category,
+    required,
+    requiredFor,
+    phase,
+    ready: supportReady(phase),
+    installed: phase === 'Ready',
+    configured: phase === 'Ready' || phase === 'Configured',
+    evidence,
+    nextStep,
+    resources,
+  });
+  const serving = backendById['model-serving'];
+  const pipelines = backendById.pipelines;
+  const registry = backendById['model-registry'];
+  const monitoring = backendById.monitoring;
+  const distributed = backendById['distributed-workloads'];
+  const backboneById = Object.fromEntries((backbone.components || []).map((item) => [item.id, item]));
+  const computeReady = (compute || []).some((item) => item.ready);
+  const gpuReady = gpu.ready || (compute || []).some((item) => item.gpus?.length);
+  const items = [
+    service(
+      'console-backbone',
+      'Console Backbone / PG + RustFS + Gitea',
+      'Control plane',
+      false,
+      ['Portable OAH metadata', 'S3 artifact storage', 'config-as-code expansion'],
+      backbone.phase,
+      backbone.ready
+        ? `Backbone namespace ${backbone.namespace} is ready with PostgreSQL, RustFS, and Gitea.`
+        : backbone.installed
+          ? `Backbone namespace ${backbone.namespace} is installed but not fully ready.`
+          : `Backbone namespace ${backbone.namespace} was not detected.`,
+      backbone.ready
+        ? 'Use Backbone defaults for object storage and metadata bootstrapping when dedicated external services are not supplied.'
+        : 'Open Console / Backbone and apply or repair PostgreSQL, RustFS, and Gitea.',
+      (backbone.components || []).flatMap((component) => component.resources || []),
+    ),
+    objectStorage,
+    service(
+      'storage-class',
+      'Default StorageClass / PVC',
+      'Storage',
+      true,
+      ['Workbench workspace PVC', 'Pipeline temporary volumes'],
+      supportPhase(hasDefaultStorageClass),
+      hasDefaultStorageClass ? 'A default StorageClass is available.' : 'No default StorageClass annotation was detected.',
+      hasDefaultStorageClass ? 'Use PVC-backed workbench storage normally.' : 'Configure a default StorageClass before workspace-heavy workloads.',
+      (storageClasses?.items || []).map((item) => resourceRefFor(item, 'StorageClass')),
+    ),
+    service(
+      'metadata-store',
+      'Metadata database / Secret',
+      'Metadata',
+      true,
+      ['KFP metadata', 'Model Registry', 'TrustyAI storage'],
+      supportPhase(credentialSecrets.length > 0, backboneById.postgres?.ready || registry?.ready || pipelines?.ready || monitoring?.ready),
+      credentialSecrets.length
+        ? `${credentialSecrets.length} candidate credential Secret(s) exist in opensphere-system.`
+        : backboneById.postgres?.ready
+          ? 'Backbone PostgreSQL is ready; OAH metadata credentials still need an explicit Secret binding.'
+          : 'No shared metadata/storage credential Secret candidate was found.',
+      credentialSecrets.length
+        ? 'Bind each upstream component to its own DB/schema Secret before installation.'
+        : backboneById.postgres?.ready
+          ? 'Use Backbone metadata defaults or create a dedicated database/schema Secret for KFP, Model Registry, and TrustyAI.'
+          : 'Prepare DB credentials for KFP, Model Registry, and TrustyAI before upstream install.',
+      [
+        ...credentialSecrets.map((item) => resourceRefFor(item, 'Secret')),
+        ...(backboneById.postgres?.resources || []),
+      ],
+    ),
+    service(
+      'serving-foundation',
+      'Knative Serving / KServe',
+      'Serving',
+      true,
+      ['InferenceService', 'ServingRuntime', 'Route/Revision/Traffic'],
+      serving?.upstreamReady ? 'Ready' : serving?.fallbackReady ? 'Configured' : 'Missing',
+      serving?.message || 'KServe/Knative APIs are not detected.',
+      serving?.upstreamReady ? 'Run KServe InferenceService e2e with object storage model URI.' : 'Install Knative Serving and KServe after object storage is configured.',
+      (serving?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+    ),
+    service(
+      'pipeline-foundation',
+      'Data Science Pipelines / KFP',
+      'Pipelines',
+      true,
+      ['PipelineRun', 'Experiments', 'Artifacts', 'Lineage'],
+      pipelines?.upstreamReady ? 'Ready' : pipelines?.fallbackReady ? 'Configured' : 'Missing',
+      pipelines?.message || 'KFP/DSPA APIs are not detected.',
+      pipelines?.upstreamReady ? 'Run PipelineRun upstream e2e with artifact store.' : 'Install DSPA/KFP and bind it to object storage artifact store.',
+      (pipelines?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+    ),
+    service(
+      'compute-foundation',
+      'Compute / GPU backends',
+      'Compute',
+      true,
+      ['Workbenches', 'Training jobs', 'Inference', 'Distributed workloads'],
+      supportPhase(computeReady || gpuReady, (compute || []).length > 0),
+      computeReady || gpuReady ? `${(compute || []).length} ComputeBackendClaim(s); GPU phase ${gpu.phase}.` : 'No ready compute backend or GPU inventory was detected.',
+      computeReady || gpuReady ? 'Use workload routing to map notebook/training/serving to a backend.' : 'Register a ComputeBackendClaim or expose Kubernetes GPU resources.',
+      (compute || []).map((item) => ({ kind: item.kind, namespace: item.namespace, name: item.name, phase: item.phase })),
+    ),
+    service(
+      'model-registry',
+      'Model Registry',
+      'Metadata',
+      false,
+      ['Model versions', 'Promotion', 'Serving handoff'],
+      registry?.upstreamReady ? 'Ready' : registry?.fallbackReady ? 'Configured' : 'Missing',
+      registry?.message || 'Model Registry API is not detected.',
+      registry?.upstreamReady ? 'Use upstream registry write/read e2e.' : 'Install Model Registry after metadata DB credentials are prepared.',
+      (registry?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+    ),
+    service(
+      'observability-trustyai',
+      'TrustyAI / Monitoring',
+      'Observability',
+      false,
+      ['Evaluation metrics', 'Drift/fairness monitoring', 'Audit evidence'],
+      monitoring?.upstreamReady ? 'Ready' : monitoring?.fallbackReady ? 'Configured' : 'Missing',
+      monitoring?.message || 'TrustyAI APIs are not detected.',
+      monitoring?.upstreamReady ? 'Connect monitoring targets to served models.' : 'Install TrustyAI/monitoring after serving and metadata storage are ready.',
+      (monitoring?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+    ),
+    service(
+      'distributed-queue',
+      'Kueue / Ray',
+      'Compute',
+      false,
+      ['Distributed training', 'Fair-share GPU scheduling'],
+      distributed?.upstreamReady ? 'Ready' : distributed?.fallbackReady ? 'Configured' : 'Missing',
+      distributed?.message || 'Kueue/Ray APIs are not detected.',
+      distributed?.upstreamReady ? 'Run queue-aware distributed workload e2e.' : 'Install Kueue/Ray when distributed workloads are required.',
+      (distributed?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+    ),
+  ];
+  const summary = {
+    total: items.length,
+    ready: items.filter((item) => item.phase === 'Ready').length,
+    configured: items.filter((item) => item.phase === 'Configured').length,
+    missing: items.filter((item) => item.phase === 'Missing').length,
+    requiredMissing: items.filter((item) => item.required && item.phase === 'Missing').length,
+  };
+  const byId = Object.fromEntries(items.map((item) => [item.id, item]));
+  const installPlan = [
+    {
+      order: 1,
+      id: 'backbone',
+      title: 'Confirm Console Backbone provider',
+      menu: 'Console / Backbone',
+      status: supportStepStatus(byId['console-backbone']),
+      action: 'Use Backbone PostgreSQL, RustFS, and Gitea as the default OAH support substrate when no external provider is supplied.',
+      blocks: ['Portable metadata defaults', 'portable object storage defaults', 'config-as-code expansion'],
+    },
+    {
+      order: 2,
+      id: 'foundation',
+      title: 'Install OpenSphere foundation CRDs',
+      menu: 'Cluster settings / Setup',
+      status: setup.crds?.filter((crd) => crd.name?.endsWith('opensphere.io')).every((crd) => crd.installed) ? 'Ready' : 'Required',
+      action: 'Enable "Install OpenSphere foundation CRDs" and run the setup wizard.',
+      blocks: ['Native fallback claims', 'DataConnectionClaim', 'Workbench/Training/Inference claims'],
+    },
+    {
+      order: 3,
+      id: 'object-storage',
+      title: 'Configure S3-compatible object storage',
+      menu: 'Cluster settings / Support services',
+      status: supportStepStatus(byId['object-storage']),
+      action: backboneById.rustfs?.ready ? 'Use Backbone RustFS defaults, then create the credential Secret and DataConnectionClaim.' : 'Use Object storage bootstrap to create the credential Secret and DataConnectionClaim.',
+      blocks: ['KServe storageUri', 'KFP artifact store', 'Model artifacts', 'Data connections'],
+    },
+    {
+      order: 4,
+      id: 'storage-class',
+      title: 'Confirm default StorageClass',
+      menu: 'Cluster storage administration',
+      status: supportStepStatus(byId['storage-class']),
+      action: 'Mark one StorageClass as storageclass.kubernetes.io/is-default-class=true.',
+      blocks: ['Workbench PVCs', 'Pipeline temporary volumes'],
+    },
+    {
+      order: 5,
+      id: 'compute-foundation',
+      title: 'Register compute and GPU backends',
+      menu: 'Cluster settings / GPU and Compute routing',
+      status: supportStepStatus(byId['compute-foundation']),
+      action: 'Expose Kubernetes GPUs or register an external ComputeBackendClaim, then map workload routing.',
+      blocks: ['Workbenches', 'Training jobs', 'Inference', 'Distributed workloads'],
+    },
+    {
+      order: 6,
+      id: 'operator-dsc',
+      title: 'Install ODH/RHOAI operator and DataScienceCluster',
+      menu: 'Cluster settings / Setup',
+      status: setup.operators?.csvs?.length || setup.dataScienceClusters?.length ? 'Configured' : 'Optional',
+      action: 'Choose Open Data Hub or Red Hat OpenShift AI provider and run operator/DataScienceCluster setup when upstream parity is required.',
+      blocks: ['Upstream Dashboard', 'Workbench controller', 'DSPA/KFP', 'KServe', 'Model Registry', 'TrustyAI'],
+    },
+    {
+      order: 7,
+      id: 'serving-foundation',
+      title: 'Install Knative Serving and KServe',
+      menu: 'Cluster settings / Setup',
+      status: supportStepStatus(byId['serving-foundation']),
+      action: 'Install KServe/Knative after object storage and compute routing are configured.',
+      blocks: ['InferenceService', 'ServingRuntime', 'Route/Revision/Traffic'],
+    },
+    {
+      order: 8,
+      id: 'pipeline-foundation',
+      title: 'Install Data Science Pipelines / KFP',
+      menu: 'Cluster settings / Setup',
+      status: supportStepStatus(byId['pipeline-foundation']),
+      action: 'Install DSPA/KFP and bind it to object storage and metadata credentials.',
+      blocks: ['PipelineRun', 'Experiments', 'Artifacts', 'Lineage'],
+    },
+    {
+      order: 9,
+      id: 'optional-services',
+      title: 'Enable optional upstream services',
+      menu: 'Cluster settings / Setup and Support services',
+      status: ['model-registry', 'observability-trustyai', 'distributed-queue'].some((id) => supportReady(byId[id]?.phase)) ? 'Configured' : 'Optional',
+      action: 'Enable Model Registry, TrustyAI/Monitoring, Kueue, and Ray as workload requirements demand.',
+      blocks: ['Promotion governance', 'model monitoring', 'distributed GPU scheduling'],
+    },
+  ];
+  const configurationPages = [
+    {
+      id: 'backbone',
+      service: 'Console Backbone provider',
+      page: 'Console / Backbone',
+      route: '/backbone',
+      action: 'Verify or apply PostgreSQL, RustFS, and Gitea before using Backbone defaults in OAH.',
+      mode: backbone.ready ? 'Ready' : 'Apply in Console',
+      requiredBefore: ['OAH portable support defaults', 'config-as-code expansion', 'shared artifact storage'],
+    },
+    {
+      id: 'setup-foundation',
+      service: 'OpenSphere foundation CRDs',
+      page: 'Cluster settings / Setup',
+      route: '/ai/cluster-settings',
+      action: 'Run install with "Install OpenSphere foundation CRDs" enabled.',
+      mode: 'Apply',
+      requiredBefore: ['All OpenSphere native fallback claims', 'Support service bootstrap resources'],
+    },
+    {
+      id: 'object-storage',
+      service: 'S3-compatible object storage',
+      page: 'Cluster settings / Support services / Object storage bootstrap',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview manifests, then configure Secret and DataConnectionClaim.',
+      mode: 'Apply',
+      requiredBefore: ['KServe storageUri', 'KFP artifact store', 'model artifact imports', 'data connections'],
+    },
+    {
+      id: 'metadata-store',
+      service: 'Metadata database credentials',
+      page: 'Cluster settings / Support services / Metadata credential bootstrap',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview metadata Secret, then configure the Secret for KFP, Model Registry, and TrustyAI.',
+      mode: 'Apply',
+      requiredBefore: ['KFP metadata', 'Model Registry', 'TrustyAI storage'],
+    },
+    {
+      id: 'compute-gpu',
+      service: 'Compute and GPU backends',
+      page: 'Cluster settings / GPU',
+      route: '/ai/cluster-settings/gpu',
+      action: 'Expose Kubernetes GPU resources or register an external ComputeBackendClaim.',
+      mode: 'Apply',
+      requiredBefore: ['Workbench scheduling', 'training jobs', 'inference workloads', 'distributed workloads'],
+    },
+    {
+      id: 'odh-rhoai',
+      service: 'ODH/RHOAI Operator and DataScienceCluster',
+      page: 'Cluster settings / Setup',
+      route: '/ai/cluster-settings',
+      action: 'Select Open Data Hub or Red Hat OpenShift AI provider, choose components, then run install.',
+      mode: 'Apply when OLM is available',
+      requiredBefore: ['Upstream Workbenches', 'DSPA/KFP', 'KServe', 'Model Registry', 'TrustyAI'],
+    },
+    {
+      id: 'serving',
+      service: 'Knative Serving and KServe',
+      page: 'Cluster settings / Support services / Serving foundation preview',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview readiness and install path; apply upstream components through Setup/DataScienceCluster.',
+      mode: 'Preview + Setup apply',
+      requiredBefore: ['InferenceService', 'ServingRuntime', 'Route/Revision/Traffic validation'],
+    },
+    {
+      id: 'pipelines',
+      service: 'Data Science Pipelines / KFP',
+      page: 'Cluster settings / Support services / Pipelines foundation preview',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview artifact/metadata prerequisites; apply upstream components through Setup/DataScienceCluster.',
+      mode: 'Preview + Setup apply',
+      requiredBefore: ['PipelineRun', 'experiments', 'artifacts', 'lineage'],
+    },
+    {
+      id: 'registry',
+      service: 'Model Registry',
+      page: 'Cluster settings / Support services / Model Registry foundation preview',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview registry readiness and choose native fallback or upstream registry path.',
+      mode: 'Preview + Setup apply',
+      requiredBefore: ['Model versions', 'promotion governance', 'serving handoff'],
+    },
+    {
+      id: 'observability',
+      service: 'TrustyAI / Prometheus monitoring',
+      page: 'Cluster settings / Support services / Observability foundation preview',
+      route: '/ai/cluster-settings/support-services',
+      action: 'Preview TrustyAI/Prometheus readiness and MonitoringTarget fallback before model monitoring e2e.',
+      mode: 'Preview + Setup apply',
+      requiredBefore: ['Drift/fairness metrics', 'runtime monitoring', 'audit evidence'],
+    },
+  ];
+  return {
+    generatedAt: new Date().toISOString(),
+    phase: summary.requiredMissing ? 'NeedsSupportServices' : summary.missing ? 'ReadyWithOptionalGaps' : 'Ready',
+    summary,
+    items,
+    installPlan,
+    configurationPages,
+    backbone,
+    setupPrerequisites: setup.prerequisites,
   };
 }
 
@@ -5695,7 +7627,50 @@ async function finalReadiness(req) {
     upstreamTotal: upstreamChecks.length,
     total: checks.length,
   };
-  return { phase: nativePhase, nativePhase, upstreamPhase, generatedAt: new Date().toISOString(), version: VERSION, summary, checks };
+  const nativeReadiness = {
+    phase: nativePhase,
+    ready: !nativeChecks.some((item) => item.status === 'Failed'),
+    checks: nativeChecks.length,
+    readyChecks: summary.nativeReady,
+    warningChecks: summary.nativeWarning,
+    failedChecks: summary.nativeFail,
+    mode: 'native',
+  };
+  const upstreamAdapterReadiness = {
+    phase: upstreamPhase,
+    ready: upstreamChecks.some((item) => item.status === 'Ready'),
+    checks: upstreamChecks.length,
+    readyChecks: summary.upstreamReady,
+    warningChecks: summary.upstreamWarning,
+    notInstalledChecks: summary.upstreamNotInstalled,
+    mode: 'upstream-adapter',
+  };
+  const parityReady = upstreamChecks.length > 0 && upstreamChecks.every((item) => item.status === 'Ready');
+  const parityReadiness = {
+    phase: parityReady ? 'Ready' : 'NotReady',
+    ready: parityReady,
+    checks: upstreamChecks.length,
+    readyChecks: summary.upstreamReady,
+    requiredReadyChecks: upstreamChecks.length,
+    mode: 'parity',
+    evidence: parityReady
+      ? 'All upstream checks are ready. Run e2e parity tests before exposing parity badges.'
+      : 'Upstream parity is not proven. Keep native and upstream-adapter badges separate until e2e parity evidence exists.',
+  };
+  return {
+    phase: nativePhase,
+    nativePhase,
+    upstreamPhase,
+    generatedAt: new Date().toISOString(),
+    version: VERSION,
+    summary,
+    checks,
+    readinessModel: {
+      nativeReadiness,
+      upstreamAdapterReadiness,
+      parityReadiness,
+    },
+  };
 }
 
 function setupPlanFrom(body) {
@@ -5834,6 +7809,7 @@ function itemFromK8s(obj, fallbackKind) {
   const ready = obj.status?.ready ?? conditionReady ?? annotatedReady ?? false;
   const phase = obj.status?.phase || annotatedPhase || obj.spec?.phase || (obj.status?.passed === true ? 'Passed' : '') || (ready ? 'Ready' : 'Pending');
   const finalizing = !!obj.metadata?.deletionTimestamp;
+  const backendType = obj.spec?.backendType || obj.spec?.backend || obj.status?.backendType || obj.status?.backendMode || '';
   return {
     name: obj.metadata?.name || '',
     kind: obj.kind || fallbackKind,
@@ -5852,7 +7828,8 @@ function itemFromK8s(obj, fallbackKind) {
     computeRoutingWorkload: annotations['opensphere.io/compute-routing-workload'] || '',
     computeRoutingBackend: annotations['opensphere.io/compute-routing-backend'] || '',
     computeRoutingAppliedAt: annotations['opensphere.io/compute-routing-applied-at'] || '',
-    backendType: obj.spec?.backendType || obj.spec?.backend || obj.status?.backendType || obj.status?.backendMode || '',
+    backendType,
+    backendMode: normalizeBackendMode(backendType || obj.status?.backendMode || obj.status?.backend || ''),
     provider: obj.spec?.provider || obj.status?.provider || obj.metadata?.labels?.['opensphere.io/provider'] || '',
     endpoint: obj.spec?.endpoint || obj.status?.endpoint || obj.metadata?.annotations?.['opensphere.io/external-endpoint'] || '',
     resourceName: obj.spec?.resourceName || obj.status?.resourceName || '',
@@ -5863,15 +7840,104 @@ function itemFromK8s(obj, fallbackKind) {
     externalJobLogSummary: obj.status?.externalJobLogSummary || null,
     maxConcurrency: obj.spec?.maxConcurrency || obj.status?.maxConcurrency || '',
     currentConcurrency: obj.status?.currentConcurrency || '',
-    source: 'cluster',
+    source: inferK8sSource(obj, fallbackKind),
     reference: false,
   };
+}
+
+function inferK8sSource(obj, fallbackKind) {
+  const apiVersion = `${obj.apiVersion || ''}`;
+  const kind = `${obj.kind || fallbackKind || ''}`;
+  if (apiVersion.includes('opensphere.io') || kind.startsWith('OpenSphere')) return 'native';
+  if (apiVersion.includes('opendatahub.io') || apiVersion.includes('kserve.io') || apiVersion.includes('kubeflow.org') || apiVersion.includes('kueue.x-k8s.io') || apiVersion.includes('ray.io') || apiVersion.includes('tekton.dev')) return 'upstream';
+  return 'cluster';
+}
+
+function normalizeBackendMode(value, source = '') {
+  const raw = optionalString(value || source || '').toLowerCase();
+  if (raw === 'reference') return 'reference';
+  if (raw === 'native') return 'native';
+  if (raw === 'opensphere' || raw === 'fallback' || raw === 'kubernetes' || raw === 'internal') return 'native';
+  if (raw === 'external') return 'external';
+  if (raw === 'cluster') return 'cluster';
+  if (raw === 'upstream-adapter') return 'upstream-adapter';
+  if (raw === 'parity') return 'parity';
+  if (['upstream', 'kserve', 'kueue', 'ray', 'tekton', 'kubeflow', 'kfp', 'kubeflow-pipelines', 'trustyai', 'prometheus', 'modelregistry', 'model-registry', 'registry', 'odh-model-registry'].includes(raw)) return 'upstream-adapter';
+  return '';
+}
+
+function backendModeForItem(item) {
+  if (item?.reference === true) return 'reference';
+  const explicit = normalizeBackendMode(item?.backendMode || item?.backendType || item?.backend || item?.runtime || '');
+  if (explicit) return explicit;
+  const sourceMode = normalizeBackendMode('', item?.source || '');
+  if (sourceMode) return sourceMode;
+  if (`${item?.kind || ''}`.startsWith('OpenSphere') || `${item?.apiVersion || ''}`.includes('opensphere.io')) return 'native';
+  return 'cluster';
+}
+
+function withBackendMetadata(item) {
+  const source = item?.source || (item?.reference === true ? 'reference' : 'cluster');
+  const backendMode = backendModeForItem({ ...item, source });
+  return {
+    ...item,
+    source,
+    backendMode,
+    parityReady: backendMode === 'parity',
+  };
+}
+
+const RESOURCE_ACCESS = {
+  AIAgent: { group: 'orchestrator.ai.opensphere.io', resource: 'aiagents' },
+  Artifact: { group: 'ai.opensphere.io', resource: 'artifactclaims' },
+  ArtifactClaim: { group: 'ai.opensphere.io', resource: 'artifactclaims' },
+  ComputeBackendClaim: { group: 'ai.opensphere.io', resource: 'computebackendclaims' },
+  DataConnectionClaim: { group: 'ai.opensphere.io', resource: 'dataconnectionclaims' },
+  DatasetClaim: { group: 'ai.opensphere.io', resource: 'datasetclaims' },
+  DistributedWorkloadClaim: { group: 'ai.opensphere.io', resource: 'distributedworkloadclaims' },
+  EvaluationJob: { group: 'eval.ai.opensphere.io', resource: 'evaluationjobs' },
+  EvaluationPolicy: { group: 'eval.ai.opensphere.io', resource: 'evaluationpolicies' },
+  Execution: { group: 'ai.opensphere.io', resource: 'executionclaims' },
+  ExecutionClaim: { group: 'ai.opensphere.io', resource: 'executionclaims' },
+  ExperimentClaim: { group: 'ai.opensphere.io', resource: 'experimentclaims' },
+  InferenceClaim: { group: 'ai.opensphere.io', resource: 'inferenceclaims' },
+  InferenceService: { group: 'serving.kserve.io', resource: 'inferenceservices' },
+  LLMRouteClaim: { group: 'ai.foundation.opensphere.io', resource: 'llmrouteclaims' },
+  ModelPromotionClaim: { group: 'ai.opensphere.io', resource: 'modelpromotionclaims' },
+  MonitoringTarget: { group: 'ai.opensphere.io', resource: 'monitoringtargets' },
+  Notebook: { group: 'kubeflow.org', resource: 'notebooks' },
+  OpenSphereDataScienceCluster: { group: 'ai.opensphere.io', resource: 'openspheredatascienceclusters' },
+  OpenSphereModelRegistry: { group: '', resource: 'configmaps' },
+  PipelineClaim: { group: 'ai.opensphere.io', resource: 'pipelineclaims' },
+  PipelineRun: { group: 'tekton.dev', resource: 'pipelineruns' },
+  PipelineRunClaim: { group: 'ai.opensphere.io', resource: 'pipelinerunclaims' },
+  RayCluster: { group: 'ray.io', resource: 'rayclusters' },
+  ServingRuntime: { group: 'serving.kserve.io', resource: 'servingruntimes' },
+  TrainingJobClaim: { group: 'ai.opensphere.io', resource: 'trainingjobclaims' },
+  TrustyAIService: { group: 'trustyai.opendatahub.io', resource: 'trustyaiservices' },
+  VectorRetrievalClaim: { group: 'ai.foundation.opensphere.io', resource: 'vectorretrievalclaims' },
+  WorkbenchClaim: { group: 'ai.opensphere.io', resource: 'workbenchclaims' },
+};
+
+async function filterReadableItems(req, items) {
+  if (!req?.headers?.['x-os-id-token']) return items || [];
+  const filtered = await Promise.all((items || []).map(async (item) => {
+    if (item.reference === true) return item;
+    const namespace = optionalString(item.namespace || '');
+    if (!namespace) return item;
+    const target = RESOURCE_ACCESS[item.kind || ''];
+    if (!target) return { ...item, accessChecked: false };
+    const allowed = await selfCan(req, 'get', target.group, target.resource, namespace, item.name || '');
+    return allowed ? { ...item, accessChecked: true } : null;
+  }));
+  return filtered.filter(Boolean);
 }
 
 function referenceItems(items, source = 'reference') {
   return (items || []).map((item) => ({
     ...item,
     source,
+    backendMode: 'reference',
     reference: true,
     ready: item.ready === true,
   }));
@@ -5886,22 +7952,53 @@ function referenceCount(items) {
 }
 
 function listPayload(items) {
+  const normalizedItems = (items || []).map(withBackendMetadata);
   const actual = actualCount(items);
   const reference = referenceCount(items);
-  const actualSources = Array.from(new Set((items || [])
+  const actualSources = Array.from(new Set(normalizedItems
     .filter((item) => item.reference !== true)
     .map((item) => item.source || 'cluster')));
+  const sourceBreakdown = Object.fromEntries(Array.from(new Set(normalizedItems.map((item) => item.source || 'cluster')))
+    .sort()
+    .map((source) => [source, normalizedItems.filter((item) => (item.source || 'cluster') === source).length]));
+  const backendModes = Object.fromEntries(Array.from(new Set(normalizedItems.map((item) => backendModeForItem(item))))
+    .sort()
+    .map((mode) => [mode, normalizedItems.filter((item) => backendModeForItem(item) === mode).length]));
   return {
-    items,
+    items: normalizedItems,
     actualCount: actual,
     referenceCount: reference,
     source: actual && reference ? 'mixed' : actual ? (actualSources.length === 1 ? actualSources[0] : 'cluster') : reference ? 'reference' : 'empty',
+    sourceBreakdown,
+    backendModes,
+    readinessModel: {
+      nativeReady: (backendModes.native || 0) + (backendModes.external || 0) + (backendModes.cluster || 0),
+      upstreamAdapterReady: backendModes['upstream-adapter'] || 0,
+      upstreamParityReady: backendModes.parity || 0,
+      reference: backendModes.reference || 0,
+    },
   };
 }
 
 async function k8sJson(apiPath) {
   try {
     const r = await fetch(`${APISERVER}${apiPath}`, { headers: { Authorization: `Bearer ${tok()}`, Accept: 'application/json' } });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+async function k8sJsonForRequest(apiPath, req) {
+  try {
+    const headers = { Authorization: `Bearer ${tok()}`, Accept: 'application/json' };
+    if (req?.headers?.['x-os-id-token']) {
+      const verified = req._actor || await verifyToken(req.headers['x-os-id-token']);
+      req._actor = verified;
+      headers['Impersonate-User'] = verified.username;
+    }
+    const r = await fetch(`${APISERVER}${apiPath}`, { headers });
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -8319,6 +10416,37 @@ async function listK8s(apiPath, kind, fallbackItems) {
   return json.items.map((item) => itemFromK8s(item, kind));
 }
 
+async function computeBackendResources() {
+  const json = await k8sJson('/apis/ai.opensphere.io/v1alpha1/computebackendclaims');
+  if (!json?.items) return referenceItems(FALLBACK_RESOURCES.compute);
+  return Promise.all((json.items || []).map(async (backend) => {
+    const item = itemFromK8s(backend, 'ComputeBackendClaim');
+    const endpoint = optionalString(backend.spec?.endpoint || backend.status?.endpoint || item.endpoint);
+    if (!endpoint || !validHttpEndpoint(endpoint) || !isExternalComputeBackend(backend)) return item;
+    try {
+      const namespace = backend.metadata?.namespace || item.namespace || 'opensphere-system';
+      const credentialSecret = optionalString(backend.spec?.credentialSecretRef || backend.spec?.credentialSecret || 'oah-external-gpu-credentials');
+      const token = await readGpuBridgeToken(namespace, credentialSecret);
+      const capabilities = await fetchGpuBridge(endpoint, '/capabilities', { headers: gpuBridgeAuthHeaders(token) });
+      return {
+        ...item,
+        ready: item.ready || capabilities.ready === true,
+        provider: item.provider || capabilities.provider || '',
+        gpus: capabilities.gpus || item.gpus || [],
+        supportedJobTypes: capabilities.supportedJobTypes || item.supportedJobTypes || [],
+        maxConcurrency: capabilities.maxConcurrency ?? item.maxConcurrency,
+        currentConcurrency: capabilities.currentConcurrency ?? item.currentConcurrency,
+        message: item.message || `${capabilities.provider || 'External GPU bridge'} exposes ${(capabilities.gpus || []).length} GPU(s).`,
+      };
+    } catch (e) {
+      return {
+        ...item,
+        message: item.message || `Bridge capabilities unavailable: ${e.msg || e.message || 'unknown error'}`,
+      };
+    }
+  }));
+}
+
 async function listAnyK8s(sources, fallbackItems) {
   let discovered = false;
   const groups = await Promise.all(sources.map(async (source) => {
@@ -8511,7 +10639,7 @@ async function aiResources(kind) {
     case 'pipelineRuns':
       return listK8s('/apis/ai.opensphere.io/v1alpha1/pipelinerunclaims', 'PipelineRunClaim', FALLBACK_RESOURCES.pipelineRuns);
     case 'compute':
-      return listK8s('/apis/ai.opensphere.io/v1alpha1/computebackendclaims', 'ComputeBackendClaim', FALLBACK_RESOURCES.compute);
+      return computeBackendResources();
     case 'datasets':
       return listK8s('/apis/ai.opensphere.io/v1alpha1/datasetclaims', 'DatasetClaim', FALLBACK_RESOURCES.datasets);
     case 'trainingJobs':
@@ -8529,7 +10657,11 @@ async function aiResources(kind) {
     case 'artifacts':
       return listK8s('/apis/ai.opensphere.io/v1alpha1/artifactclaims', 'ArtifactClaim', FALLBACK_RESOURCES.artifacts);
     case 'inference':
-      return listK8s('/apis/ai.opensphere.io/v1alpha1/inferenceclaims', 'InferenceClaim', FALLBACK_RESOURCES.inference);
+      return listAnyK8s([
+        { path: '/apis/ai.opensphere.io/v1alpha1/inferenceclaims', kind: 'InferenceClaim' },
+        { path: '/apis/serving.kserve.io/v1beta1/inferenceservices', kind: 'InferenceService' },
+        { path: '/apis/serving.kserve.io/v1alpha1/inferenceservices', kind: 'InferenceService' },
+      ], FALLBACK_RESOURCES.inference);
     case 'trustyaiMonitoring':
       return listAnyK8s([
         { path: '/apis/ai.opensphere.io/v1alpha1/monitoringtargets', kind: 'MonitoringTarget' },
@@ -8559,15 +10691,26 @@ async function aiResources(kind) {
   }
 }
 
-async function resourcePayload(kind) {
-  return listPayload(await aiResources(kind));
+async function resourcePayload(kind, req) {
+  return listPayload(await filterReadableItems(req, await aiResources(kind)));
 }
 
-async function projectsPayload() {
-  return listPayload(await projects());
+async function filterReadableProjects(req, items) {
+  if (!req?.headers?.['x-os-id-token']) return items || [];
+  const filtered = await Promise.all(items.map(async (item) => {
+    if (item.reference === true) return item;
+    const allowed = await selfCan(req, 'get', '', 'namespaces', '', item.name || '');
+    return allowed ? { ...item, accessChecked: true } : null;
+  }));
+  return filtered.filter(Boolean);
 }
 
-async function summary() {
+async function projectsPayload(req) {
+  const items = await projects();
+  return listPayload(await filterReadableProjects(req, items));
+}
+
+async function summary(req) {
   const [
     projectItems,
     workbenches,
@@ -8603,43 +10746,78 @@ async function summary() {
     aiResources('enabledApplications'),
     nativeLearningResourceRecords(),
   ]);
+  const visibleProjectItems = await filterReadableProjects(req, projectItems);
+  const visibleWorkbenches = await filterReadableItems(req, workbenches);
+  const visibleRoutes = await filterReadableItems(req, routes);
+  const visibleAgents = await filterReadableItems(req, agents);
+  const visibleModelRegistry = await filterReadableItems(req, modelRegistry);
+  const visibleServingRuntimes = await filterReadableItems(req, servingRuntimes);
+  const visiblePipelines = await filterReadableItems(req, pipelines);
+  const visiblePipelineRuns = await filterReadableItems(req, pipelineRuns);
+  const visibleTrainingJobs = await filterReadableItems(req, trainingJobs);
+  const visibleExperiments = await filterReadableItems(req, experiments);
+  const visibleEvalJobs = await filterReadableItems(req, evalJobs);
+  const visibleInference = await filterReadableItems(req, inference);
+  const visibleMonitoringTargets = await filterReadableItems(req, monitoringTargets);
+  const visibleDistributedWorkloads = await filterReadableItems(req, distributedWorkloads);
+  const visibleEnabledApps = await filterReadableItems(req, enabledApps);
+  const allVisible = [
+    ...visibleProjectItems,
+    ...visibleWorkbenches,
+    ...visibleRoutes,
+    ...visibleAgents,
+    ...visibleModelRegistry,
+    ...visibleServingRuntimes,
+    ...visiblePipelines,
+    ...visiblePipelineRuns,
+    ...visibleTrainingJobs,
+    ...visibleExperiments,
+    ...visibleEvalJobs,
+    ...visibleInference,
+    ...visibleMonitoringTargets,
+    ...visibleDistributedWorkloads,
+    ...visibleEnabledApps,
+  ].map(withBackendMetadata);
   return {
     phase: 'Ready',
-    projects: projectItems.slice(0, 2),
+    projects: visibleProjectItems.slice(0, 2),
     counts: {
-      projects: actualCount(projectItems),
-      workbenches: actualCount(workbenches),
-      llmRoutes: actualCount(routes),
-      agents: actualCount(agents),
-      modelRegistry: actualCount(modelRegistry),
-      servingRuntimes: actualCount(servingRuntimes),
-      pipelines: actualCount(pipelines),
-      pipelineRuns: actualCount(pipelineRuns),
-      trainingJobs: actualCount(trainingJobs),
-      experiments: actualCount(experiments),
-      evaluationJobs: actualCount(evalJobs),
-      inferenceEndpoints: actualCount(inference),
-      monitoringTargets: actualCount(monitoringTargets),
-      distributedWorkloads: actualCount(distributedWorkloads),
-      enabledApplications: actualCount(enabledApps),
+      projects: actualCount(visibleProjectItems),
+      workbenches: actualCount(visibleWorkbenches),
+      llmRoutes: actualCount(visibleRoutes),
+      agents: actualCount(visibleAgents),
+      modelRegistry: actualCount(visibleModelRegistry),
+      servingRuntimes: actualCount(visibleServingRuntimes),
+      pipelines: actualCount(visiblePipelines),
+      pipelineRuns: actualCount(visiblePipelineRuns),
+      trainingJobs: actualCount(visibleTrainingJobs),
+      experiments: actualCount(visibleExperiments),
+      evaluationJobs: actualCount(visibleEvalJobs),
+      inferenceEndpoints: actualCount(visibleInference),
+      monitoringTargets: actualCount(visibleMonitoringTargets),
+      distributedWorkloads: actualCount(visibleDistributedWorkloads),
+      enabledApplications: actualCount(visibleEnabledApps),
     },
     referenceCounts: {
-      projects: referenceCount(projectItems),
-      workbenches: referenceCount(workbenches),
-      llmRoutes: referenceCount(routes),
-      agents: referenceCount(agents),
-      modelRegistry: referenceCount(modelRegistry),
-      servingRuntimes: referenceCount(servingRuntimes),
-      pipelines: referenceCount(pipelines),
-      pipelineRuns: referenceCount(pipelineRuns),
-      trainingJobs: referenceCount(trainingJobs),
-      experiments: referenceCount(experiments),
-      evaluationJobs: referenceCount(evalJobs),
-      inferenceEndpoints: referenceCount(inference),
-      monitoringTargets: referenceCount(monitoringTargets),
-      distributedWorkloads: referenceCount(distributedWorkloads),
-      enabledApplications: referenceCount(enabledApps),
+      projects: referenceCount(visibleProjectItems),
+      workbenches: referenceCount(visibleWorkbenches),
+      llmRoutes: referenceCount(visibleRoutes),
+      agents: referenceCount(visibleAgents),
+      modelRegistry: referenceCount(visibleModelRegistry),
+      servingRuntimes: referenceCount(visibleServingRuntimes),
+      pipelines: referenceCount(visiblePipelines),
+      pipelineRuns: referenceCount(visiblePipelineRuns),
+      trainingJobs: referenceCount(visibleTrainingJobs),
+      experiments: referenceCount(visibleExperiments),
+      evaluationJobs: referenceCount(visibleEvalJobs),
+      inferenceEndpoints: referenceCount(visibleInference),
+      monitoringTargets: referenceCount(visibleMonitoringTargets),
+      distributedWorkloads: referenceCount(visibleDistributedWorkloads),
+      enabledApplications: referenceCount(visibleEnabledApps),
     },
+    backendModes: Object.fromEntries(Array.from(new Set(allVisible.map((item) => backendModeForItem(item))))
+      .sort()
+      .map((mode) => [mode, allVisible.filter((item) => backendModeForItem(item) === mode).length])),
     alerts: [{ severity: 'info', message: 'Overview counts show actual cluster resources. Reference examples are labeled separately and excluded from operational totals.' }],
     learningResources: learningResources.length ? learningResources : LEARNING_RESOURCES,
   };
@@ -8742,12 +10920,17 @@ const server = http.createServer(async (req, res) => {
     if (p === '/capabilities') return jsonRes(res, 200, await capabilityStatus());
     if (p === '/actions/create' && req.method === 'POST') return jsonRes(res, 201, await createAction(req));
     if (p === '/actions/delete' && req.method === 'DELETE') return jsonRes(res, 200, await deleteAction(req));
+    if (p.startsWith('/workbenches/proxy/')) return workbenchProxy(req, res);
+    if (p === '/workbenches/detail' && req.method === 'GET') return jsonRes(res, 200, await workbenchDetail(req));
+    if (p === '/data-connections/detail' && req.method === 'GET') return jsonRes(res, 200, await dataConnectionDetail(req));
     if (p === '/operations/workbenches' && req.method === 'POST') return jsonRes(res, 200, await workbenchOperation(req));
     if (p === '/operations/inference' && req.method === 'POST') return jsonRes(res, 200, await inferenceUpdate(req));
+    if (p === '/inference/detail' && req.method === 'GET') return jsonRes(res, 200, await inferenceDetail(req));
     if (p === '/operations/pipelines/run' && req.method === 'POST') return jsonRes(res, 200, await runPipeline(req));
     if (p === '/operations/claims' && req.method === 'POST') return jsonRes(res, 200, await patchClaimOperation(req));
     if (p === '/pipeline/runs/logs') return jsonRes(res, 200, await pipelineLogs(req.url));
     if (p === '/pipeline/runs/lineage') return jsonRes(res, 200, await pipelineLineage(req.url));
+    if (p === '/pipelines/detail' && req.method === 'GET') return jsonRes(res, 200, await pipelineDetail(req));
     if (p === '/monitoring/trustyai/metrics') return jsonRes(res, 200, await trustyaiMetrics(req.url));
     if (p === '/models/registry/versions' && req.method === 'GET') return jsonRes(res, 200, await modelVersions(req.url));
     if (p === '/models/registry/versions' && req.method === 'POST') return jsonRes(res, 200, await addModelVersion(req));
@@ -8757,6 +10940,15 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/odh-components/action' && req.method === 'POST') return jsonRes(res, 200, await odhComponentOperation(req));
     if (p === '/admin/native/catalog' && req.method === 'GET') return jsonRes(res, 200, await nativeCatalog());
     if (p === '/admin/native/backends' && req.method === 'GET') return jsonRes(res, 200, await nativeBackends());
+    if (p === '/admin/native/support-services' && req.method === 'GET') return jsonRes(res, 200, await supportServices(req));
+    if (p === '/admin/native/support-services/serving/preview' && req.method === 'GET') return jsonRes(res, 200, await servingFoundationPreview(req));
+    if (p === '/admin/native/support-services/pipelines/preview' && req.method === 'GET') return jsonRes(res, 200, await pipelinesFoundationPreview(req));
+    if (p === '/admin/native/support-services/model-registry/preview' && req.method === 'GET') return jsonRes(res, 200, await modelRegistryFoundationPreview(req));
+    if (p === '/admin/native/support-services/observability/preview' && req.method === 'GET') return jsonRes(res, 200, await observabilityFoundationPreview(req));
+    if (p === '/admin/native/support-services/metadata/preview' && req.method === 'POST') return jsonRes(res, 200, await metadataPreview(req));
+    if (p === '/admin/native/support-services/metadata' && req.method === 'POST') return jsonRes(res, 200, await metadataBootstrap(req));
+    if (p === '/admin/native/support-services/object-storage/preview' && req.method === 'POST') return jsonRes(res, 200, await objectStoragePreview(req));
+    if (p === '/admin/native/support-services/object-storage' && req.method === 'POST') return jsonRes(res, 200, await objectStorageBootstrap(req));
     if (p === '/admin/native/controller-metrics' && req.method === 'GET') return jsonRes(res, 200, await nativeControllerMetricsWithAuditFallback());
     if (p === '/admin/native/audit-log' && req.method === 'GET') return jsonRes(res, 200, await nativeAuditLog());
     if (p === '/admin/native/final-readiness' && req.method === 'GET') return jsonRes(res, 200, await finalReadiness(req));
@@ -8796,40 +10988,40 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/setup/status') return jsonRes(res, 200, await setupStatus(req));
     if (p === '/admin/setup/plan') return jsonRes(res, 200, await setupPlan(req));
     if (p === '/admin/setup/install' && req.method === 'POST') return jsonRes(res, 200, await setupInstall(req));
-    if (p === '/summary') return jsonRes(res, 200, await summary());
-    if (p === '/projects') return jsonRes(res, 200, await projectsPayload());
-    if (p === '/workbenches') return jsonRes(res, 200, await resourcePayload('workbenches'));
-    if (p === '/workbenches/images') return jsonRes(res, 200, await resourcePayload('notebookImages'));
-    if (p === '/workbenches/data-connections') return jsonRes(res, 200, await resourcePayload('dataConnections'));
-    if (p === '/resources/agents') return jsonRes(res, 200, await resourcePayload('agents'));
-    if (p === '/foundation/routes') return jsonRes(res, 200, await resourcePayload('routes'));
-    if (p === '/foundation/retrieval') return jsonRes(res, 200, await resourcePayload('retrieval'));
-    if (p === '/models/serving-runtimes') return jsonRes(res, 200, await resourcePayload('servingRuntimes'));
-    if (p === '/models/registry') return jsonRes(res, 200, await resourcePayload('modelRegistry'));
-    if (p === '/pipelines') return jsonRes(res, 200, await resourcePayload('pipelines'));
-    if (p === '/pipeline/runs') return jsonRes(res, 200, await resourcePayload('pipelineRuns'));
-    if (p === '/training/compute') return jsonRes(res, 200, await resourcePayload('compute'));
-    if (p === '/training/datasets') return jsonRes(res, 200, await resourcePayload('datasets'));
-    if (p === '/training/jobs') return jsonRes(res, 200, await resourcePayload('trainingJobs'));
-    if (p === '/models/promotions') return jsonRes(res, 200, await resourcePayload('promotions'));
-    if (p === '/experiments/runs') return jsonRes(res, 200, await resourcePayload('experiments'));
-    if (p === '/experiments/executions') return jsonRes(res, 200, await resourcePayload('executions'));
-    if (p === '/experiments/artifacts') return jsonRes(res, 200, await resourcePayload('artifacts'));
-    if (p === '/evaluation/policies') return jsonRes(res, 200, await resourcePayload('evalPolicies'));
-    if (p === '/evaluation/jobs') return jsonRes(res, 200, await resourcePayload('evalJobs'));
-    if (p === '/monitoring/trustyai') return jsonRes(res, 200, await resourcePayload('trustyaiMonitoring'));
-    if (p === '/distributed/workloads') return jsonRes(res, 200, await resourcePayload('distributedWorkloads'));
-    if (p === '/inference') return jsonRes(res, 200, await resourcePayload('inference'));
-    if (p === '/admin/cluster-settings') return jsonRes(res, 200, await resourcePayload('clusterSettings'));
-    if (p === '/applications/enabled') return jsonRes(res, 200, await resourcePayload('enabledApplications'));
-    if (p === '/applications/explore') return jsonRes(res, 200, await resourcePayload('exploreApplications'));
-    if (p === '/developer/learning') return jsonRes(res, 200, await resourcePayload('developerLearning'));
-    if (p === '/catalog') return jsonRes(res, 200, await resourcePayload('catalog'));
+    if (p === '/summary') return jsonRes(res, 200, await summary(req));
+    if (p === '/projects') return jsonRes(res, 200, await projectsPayload(req));
+    if (p === '/workbenches') return jsonRes(res, 200, await resourcePayload('workbenches', req));
+    if (p === '/workbenches/images') return jsonRes(res, 200, await resourcePayload('notebookImages', req));
+    if (p === '/workbenches/data-connections') return jsonRes(res, 200, await resourcePayload('dataConnections', req));
+    if (p === '/resources/agents') return jsonRes(res, 200, await resourcePayload('agents', req));
+    if (p === '/foundation/routes') return jsonRes(res, 200, await resourcePayload('routes', req));
+    if (p === '/foundation/retrieval') return jsonRes(res, 200, await resourcePayload('retrieval', req));
+    if (p === '/models/serving-runtimes') return jsonRes(res, 200, await resourcePayload('servingRuntimes', req));
+    if (p === '/models/registry') return jsonRes(res, 200, await resourcePayload('modelRegistry', req));
+    if (p === '/pipelines') return jsonRes(res, 200, await resourcePayload('pipelines', req));
+    if (p === '/pipeline/runs') return jsonRes(res, 200, await resourcePayload('pipelineRuns', req));
+    if (p === '/training/compute') return jsonRes(res, 200, await resourcePayload('compute', req));
+    if (p === '/training/datasets') return jsonRes(res, 200, await resourcePayload('datasets', req));
+    if (p === '/training/jobs') return jsonRes(res, 200, await resourcePayload('trainingJobs', req));
+    if (p === '/models/promotions') return jsonRes(res, 200, await resourcePayload('promotions', req));
+    if (p === '/experiments/runs') return jsonRes(res, 200, await resourcePayload('experiments', req));
+    if (p === '/experiments/executions') return jsonRes(res, 200, await resourcePayload('executions', req));
+    if (p === '/experiments/artifacts') return jsonRes(res, 200, await resourcePayload('artifacts', req));
+    if (p === '/evaluation/policies') return jsonRes(res, 200, await resourcePayload('evalPolicies', req));
+    if (p === '/evaluation/jobs') return jsonRes(res, 200, await resourcePayload('evalJobs', req));
+    if (p === '/monitoring/trustyai') return jsonRes(res, 200, await resourcePayload('trustyaiMonitoring', req));
+    if (p === '/distributed/workloads') return jsonRes(res, 200, await resourcePayload('distributedWorkloads', req));
+    if (p === '/inference') return jsonRes(res, 200, await resourcePayload('inference', req));
+    if (p === '/admin/cluster-settings') return jsonRes(res, 200, await resourcePayload('clusterSettings', req));
+    if (p === '/applications/enabled') return jsonRes(res, 200, await resourcePayload('enabledApplications', req));
+    if (p === '/applications/explore') return jsonRes(res, 200, await resourcePayload('exploreApplications', req));
+    if (p === '/developer/learning') return jsonRes(res, 200, await resourcePayload('developerLearning', req));
+    if (p === '/catalog') return jsonRes(res, 200, await resourcePayload('catalog', req));
     if (p === '/api/session') {
       // WS(exec/터미널)용 신원 쿠키 발급 — 토큰 JWKS 검증 후 HttpOnly 쿠키로(브라우저 WS가 보낼 수 있게)
       let actor;
       try { actor = await verifyToken(req.headers['x-os-id-token']); }
-      catch (e) { return jsonRes(res, e.code || 401, { error: e.msg || 'unauthorized' }); }
+      catch (e) { return jsonRes(res, httpStatus(e, 401), { error: e.msg || 'unauthorized' }); }
       const secure = req.headers['x-forwarded-proto'] === 'https' ? ' Secure;' : '';
       res.writeHead(200, {
         'content-type': 'application/json',
@@ -8855,7 +11047,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/ai' || p.startsWith('/ai/')) return serveFrom(WWW, 'index.html', res);
     res.writeHead(404); res.end('not found');
   } catch (e) {
-    const code = e && e.code ? e.code : 500;
+    const code = httpStatus(e, 500);
     res.writeHead(code, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: e && e.msg ? e.msg : String(e), details: e && e.details ? e.details : undefined }));
   }

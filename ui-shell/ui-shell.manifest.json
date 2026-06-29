@@ -3,18 +3,18 @@
   "kind": "subShell",
   "id": "ai",
   "version": "0.1.0",
-  "title": "AI",
-  "description": "OpenSphere subShell — AI (SDK 표준 골격).",
+  "title": "OpenSphere AI Hub",
+  "description": "OpenSphere AI Hub subShell for project-centered AI operations.",
   "entry": "ui-shell.plugin.js",
-  "entrySha256": "REPLACE_ON_SIGN",
+  "entrySha256": "84a805dcf01a2190b34c6be84f602e2abe94c4a230f2355db08900733445c925",
   "shellCompat": ">=0.2.0 <0.9.0",
   "permissions": [
     "page:register",
     "api:proxy"
   ],
   "nav": {
-    "band": "운영 Operate",
-    "label": "AI"
+    "band": "Operate",
+    "label": "OpenSphere AI Hub"
   },
   "designSystem": "clarity",
   "apiBase": "/api/plugins/ai"

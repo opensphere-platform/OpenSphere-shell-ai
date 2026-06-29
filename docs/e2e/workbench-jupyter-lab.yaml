@@ -1,0 +1,33 @@
+apiVersion: ai.opensphere.io/v1alpha1
+kind: WorkbenchClaim
+metadata:
+  name: jupyter-lab-e2e
+  namespace: default
+  annotations:
+    opensphere.io/description: JupyterLab e2e runtime for AI Hub workbench detail and proxy verification.
+spec:
+  image: quay.io/jupyter/base-notebook:latest
+  storage: 2Gi
+  port: 8080
+  readinessPath: /api
+  computeBackendRef:
+    apiVersion: ai.opensphere.io/v1alpha1
+    kind: ComputeBackendClaim
+    namespace: opensphere-system
+    name: local-docker-gpu-bridge
+  resources:
+    gpuClass: external.opensphere.io/docker-gpu
+    gpuCount: 1
+  command:
+    - start-notebook.py
+  args:
+    - --ServerApp.ip=0.0.0.0
+    - --ServerApp.port=8080
+    - --ServerApp.token=
+    - --ServerApp.password=
+    - --ServerApp.allow_origin=*
+    - --ServerApp.root_dir=/workspace
+    - --ServerApp.base_url=/
+    - --ServerApp.default_url=/lab
+  env:
+    JUPYTER_ENABLE_LAB: "yes"

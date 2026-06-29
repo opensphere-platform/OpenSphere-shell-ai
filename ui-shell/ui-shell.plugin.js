@@ -9,7 +9,8 @@ let injected = false;
 function injectOnce(base) {
   if (injected) return;
   injected = true;
-  window.__OSP_NG_API_BASE__ = base; // Angular 앱이 /api/k8s/* 프록시를 셸 경유로 호출
+  window.__OSP_NG_API_BASE__ = base; // legacy SDK skeleton compatibility
+  window.__OSP_AI_API_BASE__ = base; // AI dashboard REST endpoints
   const v = `?v=${Date.now()}`; // 재배포 번들 즉시 반영(PoC 캐시버스터)
   const css = document.createElement('link');
   css.rel = 'stylesheet'; css.href = `${base}/app/styles.css${v}`;
@@ -25,8 +26,8 @@ export function activate(ctx) {
   injectOnce(base);
   ctx.extensions.registerPage({
     id: ctx.pluginId,
-    title: 'AI',
-    navBand: '운영 Operate',
+    title: 'OpenSphere AI Hub',
+    navBand: 'Operate',
     elementTag: TAG,
   });
 }

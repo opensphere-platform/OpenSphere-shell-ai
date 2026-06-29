@@ -1,0 +1,11 @@
+{
+  "name": "@opensphere/gpu-bridge",
+  "version": "0.1.0",
+  "description": "OpenSphere External GPU Compute Backend bridge MVP",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  }
+}

@@ -1,0 +1,158 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workbenchclaims.ai.opensphere.io
+spec:
+  group: ai.opensphere.io
+  names:
+    kind: WorkbenchClaim
+    listKind: WorkbenchClaimList
+    plural: workbenchclaims
+    shortNames:
+      - wb
+      - workbench
+    singular: workbenchclaim
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: boolean
+          jsonPath: .status.ready
+        - name: Runtime
+          type: string
+          jsonPath: .status.runtimeName
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: WorkbenchClaim declares a notebook or IDE runtime managed by OpenSphere AI Hub.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                image:
+                  type: string
+                  description: Runtime image. Use an approved notebook or IDE image.
+                notebookImage:
+                  type: string
+                runtimeImage:
+                  type: string
+                storage:
+                  type: string
+                  pattern: ^([0-9]+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$
+                storageSize:
+                  type: string
+                  pattern: ^([0-9]+)(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$
+                suspended:
+                  type: boolean
+                stopped:
+                  type: boolean
+                port:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                containerPort:
+                  type: integer
+                  minimum: 1
+                  maximum: 65535
+                readinessPath:
+                  type: string
+                healthPath:
+                  type: string
+                command:
+                  type: array
+                  items:
+                    type: string
+                args:
+                  type: array
+                  items:
+                    type: string
+                env:
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Environment variables as an object map or a Kubernetes-style env array.
+                description:
+                  type: string
+                dataConnectionRef:
+                  x-kubernetes-preserve-unknown-fields: true
+                computeBackendRef:
+                  x-kubernetes-preserve-unknown-fields: true
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                ready:
+                  type: boolean
+                reason:
+                  type: string
+                message:
+                  type: string
+                runtimeName:
+                  type: string
+                serviceName:
+                  type: string
+                image:
+                  type: string
+                url:
+                  type: string
+                backendResource:
+                  type: string
+                availableReplicas:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                lastReconciledAt:
+                  type: string
+                retryCount:
+                  type: integer
+                nextRetryAt:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - reason
+                      - message
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                upstreamConditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+              x-kubernetes-preserve-unknown-fields: true
