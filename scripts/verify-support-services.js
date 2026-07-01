@@ -28,6 +28,8 @@ function requirePattern(label, text, pattern) {
 const server = read('server.js');
 const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
+const browserVerifier = read('scripts/verify-support-services-browser.js');
+const packageJson = read('package.json');
 const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-06-29.md');
 
 for (const endpoint of [
@@ -159,5 +161,21 @@ for (const verifierText of [
 ]) {
   requireText('live support-services verifier', liveVerifier, verifierText);
 }
+
+for (const browserVerifierText of [
+  'osp-ai-shell',
+  '/ai/cluster-settings/support-services',
+  'OAH support services',
+  'Use Backbone defaults',
+  'Apply OAH claim',
+  'Bind issued Secrets',
+  'Preview pipelines foundation',
+  'Pipelines foundation preview generated',
+  'browser render and click-through checks passed',
+]) {
+  requireText('browser support-services verifier', browserVerifier, browserVerifierText);
+}
+
+requireText('package scripts', packageJson, 'test:browser-support-services');
 
 if (!process.exitCode) console.log('[support-services] regression checks passed');
