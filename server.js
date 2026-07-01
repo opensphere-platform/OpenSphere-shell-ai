@@ -7415,6 +7415,7 @@ const ADMIN_READ_PATHS = new Set([
   '/admin/native/backends',
   '/admin/native/support-services',
   '/admin/native/upstream-parity',
+  '/admin/native/product-flow',
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
@@ -10322,7 +10323,7 @@ async function configureDistributedFoundation(req) {
 }
 
 async function supportServices(req) {
-  const [objectStorage, backends, compute, gpu, setup, storageClasses, secrets, backbone, upstreamParity] = await Promise.all([
+  const [objectStorage, backends, compute, gpu, setup, storageClasses, secrets, backbone, upstreamParity, productFlow] = await Promise.all([
     supportObjectStorageService(req),
     nativeBackends(),
     computeBackendResources(),
@@ -10332,6 +10333,7 @@ async function supportServices(req) {
     k8sJsonForRequest('/api/v1/namespaces/opensphere-system/secrets', req),
     backboneInventory(),
     upstreamParityInventory(req),
+    productFlowInventory('opensphere-system'),
   ]);
   const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
   const hasDefaultStorageClass = (storageClasses?.items || []).some((sc) => sc.metadata?.annotations?.['storageclass.kubernetes.io/is-default-class'] === 'true');
@@ -10689,6 +10691,7 @@ async function supportServices(req) {
     configurationPages,
     backbone,
     upstreamParity,
+    productFlow,
     setupPrerequisites: setup.prerequisites,
   };
 }
@@ -10707,6 +10710,202 @@ function upstreamCheck(id, label, required, status, evidence, nextAction, resour
     evidence,
     nextAction,
     resources,
+  };
+}
+
+function productFlowCheck(id, label, stage, required, status, evidence, nextAction, resources = [], details = {}) {
+  return {
+    id,
+    label,
+    stage,
+    required,
+    status,
+    ready: status === 'Ready',
+    evidence,
+    nextAction,
+    resources,
+    details,
+  };
+}
+
+async function productFlowInventory(namespace = 'opensphere-system') {
+  const generatedAt = new Date().toISOString();
+  const checks = [];
+  const readyStatus = (value) => (value ? 'Ready' : 'Missing');
+
+  const deployment = await k8sJson(`/apis/apps/v1/namespaces/${namespace}/deployments/ai`);
+  const deploymentReady = Number(deployment?.status?.readyReplicas || 0) >= 1 && Number(deployment?.status?.availableReplicas || 0) >= 1;
+  checks.push(productFlowCheck(
+    'shell',
+    'Deployed OAH shell',
+    'Operate',
+    true,
+    readyStatus(deploymentReady),
+    deploymentReady
+      ? `Deployment ${namespace}/ai is available with image ${deployment.spec?.template?.spec?.containers?.[0]?.image || 'unknown'}.`
+      : `Deployment ${namespace}/ai is not fully available.`,
+    deploymentReady ? 'Keep the deployed plugin image aligned with uipluginpackage.yaml.' : 'Repair the OAH deployment before validating product flow.',
+    deployment ? [resourceRefFor(deployment, 'Deployment')] : [],
+    { image: deployment?.spec?.template?.spec?.containers?.[0]?.image || '' },
+  ));
+
+  const training = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/trainingjobclaims/external-gpu-smoke-e2e`);
+  const trainingReady = objectReadyCondition(training)?.status === 'True' && training?.status?.phase === 'Succeeded' && training?.status?.externalJob?.phase === 'Succeeded';
+  checks.push(productFlowCheck(
+    'training',
+    'GPU training smoke',
+    'Train',
+    true,
+    readyStatus(trainingReady),
+    trainingReady
+      ? `TrainingJobClaim ${namespace}/external-gpu-smoke-e2e succeeded through ${training.status?.provider || 'compute backend'}; external job ${training.status?.externalJob?.jobId || 'recorded'}.`
+      : 'GPU training smoke has not produced a succeeded TrainingJobClaim.',
+    trainingReady ? 'Use this as the current training evidence until a full user training benchmark is added.' : 'Run or repair the external GPU training smoke.',
+    training ? [resourceRefFor(training, 'TrainingJobClaim')] : [],
+    { phase: training?.status?.phase || '', externalJobPhase: training?.status?.externalJob?.phase || '', provider: training?.status?.provider || '' },
+  ));
+
+  const [pipelineBackend, pipelineRun] = await Promise.all([
+    pipelineBackendStatus(`http://localhost?namespace=${encodeURIComponent(namespace)}`).catch((e) => ({ error: e.msg || String(e), phase: 'Error', summary: {}, records: [] })),
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelinerunclaims/oah-kfp-smoke-run-v193`),
+  ]);
+  const smokeRecord = (pipelineBackend.records || []).find((record) => record.name === 'ospr-oah-kfp-smoke-run-v193-kfp-record');
+  const pipelineReady = pipelineBackend.phase === 'Ready'
+    && pipelineBackend.summary?.kfpReady === true
+    && pipelineBackend.summary?.kfpApiReady === true
+    && pipelineRun?.status?.kfpState === 'SUCCEEDED'
+    && !!pipelineRun?.status?.kfpRunId
+    && smokeRecord?.state === 'SUCCEEDED';
+  checks.push(productFlowCheck(
+    'pipelines',
+    'KFP pipeline execution',
+    'Train',
+    true,
+    readyStatus(pipelineReady),
+    pipelineReady
+      ? `DSPA/KFP backend is Ready; PipelineRunClaim oah-kfp-smoke-run-v193 succeeded as run ${pipelineRun.status?.kfpRunId}.`
+      : `Pipeline backend phase is ${pipelineBackend.phase || 'Unknown'}; smoke run state is ${pipelineRun?.status?.kfpState || smokeRecord?.state || 'Unknown'}.`,
+    pipelineReady ? 'Keep the KFP smoke run and seed pipeline as the upstream pipeline contract.' : 'Repair DSPA/KFP, seed pipeline, or rerun the smoke PipelineRunClaim.',
+    [
+      ...(pipelineRun ? [resourceRefFor(pipelineRun, 'PipelineRunClaim')] : []),
+      ...(pipelineBackend.backend?.name ? [{ kind: pipelineBackend.backend.kind || 'DataSciencePipelinesApplication', namespace: pipelineBackend.backend.namespace || namespace, name: pipelineBackend.backend.name, phase: pipelineBackend.phase }] : []),
+    ],
+    { phase: pipelineBackend.phase, runId: pipelineRun?.status?.kfpRunId || '', record: smokeRecord?.name || '' },
+  ));
+
+  const vector = await vectorMemoryState(namespace).catch((e) => ({ error: e.msg || String(e), extension: {}, summary: {} }));
+  const vectorReady = vector.extension?.ready === true && vector.summary?.ready === true && Number(vector.summary?.collections || 0) >= 1 && Number(vector.summary?.chunks || 0) >= 1;
+  checks.push(productFlowCheck(
+    'vector-memory',
+    'Backbone pgvector memory',
+    'Remember',
+    true,
+    readyStatus(vectorReady),
+    vectorReady
+      ? `Backbone PostgreSQL pgvector ${vector.extension?.version || ''} has ${vector.summary?.collections || 0} collection(s) and ${vector.summary?.chunks || 0} chunk(s).`
+      : `pgvector memory is not ready: ${vector.error || 'no persisted collection/chunk evidence'}.`,
+    vectorReady ? 'Use pgvector-backed memory for retrieval and agent memory flows.' : 'Bootstrap vector memory and confirm Backbone PostgreSQL pgvector extension.',
+    (vector.collections || []).map((item) => ({ kind: 'VectorCollection', namespace: item.namespace, name: item.name, phase: 'Ready' })),
+    { version: vector.extension?.version || '', collections: vector.summary?.collections || 0, chunks: vector.summary?.chunks || 0 },
+  ));
+
+  const registry = await modelRegistryState({ namespace }).catch((e) => ({ error: e.msg || String(e), versions: [], promotions: [], approvalAudit: [], evaluationMetrics: [], storage: {} }));
+  const registryVersions = registry.versions || [];
+  const registryReady = registry.storage?.type === 'postgres'
+    && registry.storage?.ready === true
+    && registry.source?.type === 'opensphere-postgres'
+    && registryVersions.some((item) => item.backend === 'opensphere-postgres')
+    && (registry.promotions || []).length >= 1
+    && (registry.approvalAudit || []).length >= 1
+    && (registry.evaluationMetrics || []).length >= 1;
+  checks.push(productFlowCheck(
+    'model-registry',
+    'Backbone PostgreSQL model registry',
+    'Govern',
+    true,
+    readyStatus(registryReady),
+    registryReady
+      ? `Model registry uses Backbone PostgreSQL with ${registryVersions.length} version(s), ${(registry.promotions || []).length} promotion(s), ${(registry.approvalAudit || []).length} audit record(s), and ${(registry.evaluationMetrics || []).length} metric record(s).`
+      : `Model registry is not fully backed by Backbone PostgreSQL: ${registry.error || registry.storage?.message || 'missing registry evidence'}.`,
+    registryReady ? 'Use this registry path for model version, promotion, and evaluation evidence.' : 'Configure Model Registry foundation against Backbone PostgreSQL.',
+    registry.source?.name ? [{ kind: 'Secret', namespace: registry.source.namespace || namespace, name: registry.source.name, phase: registry.storage?.ready ? 'Ready' : 'Missing' }] : [],
+    { versions: registryVersions.length, promotions: (registry.promotions || []).length, audit: (registry.approvalAudit || []).length, metrics: (registry.evaluationMetrics || []).length },
+  ));
+
+  const inference = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/inferenceclaims/oah-serving-contract-smoke`);
+  const runtimeName = inference?.status?.runtimeName || 'osinf-oah-serving-contract-smoke';
+  const isvc = await k8sJson(`/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices/${runtimeName}`);
+  const predictor = isvc?.status?.components?.predictor || {};
+  const trafficPercent = (predictor.traffic || []).reduce((sum, item) => sum + Number(item.percent || 0), 0);
+  const revisionName = predictor.latestReadyRevision || '';
+  const ksvc = await k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/services/${runtimeName}-predictor`);
+  const revision = revisionName ? await k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/revisions/${revisionName}`) : null;
+  const servingReady = objectReadyCondition(inference)?.status === 'True'
+    && inference?.status?.backendMode === 'upstream'
+    && objectReadyCondition(isvc)?.status === 'True'
+    && objectReadyCondition(ksvc)?.status === 'True'
+    && objectReadyCondition(revision)?.status === 'True'
+    && !!isvc?.status?.url
+    && trafficPercent === 100
+    && isvc?.metadata?.annotations?.['serving.kserve.io/storageSecretName'] === BACKBONE_KSERVE_S3_SECRET;
+  checks.push(productFlowCheck(
+    'serving',
+    'KServe / Knative serving',
+    'Serve',
+    true,
+    readyStatus(servingReady),
+    servingReady
+      ? `InferenceService ${namespace}/${runtimeName} is Ready with route, revision ${revisionName}, traffic=${trafficPercent}%, and storage secret ${BACKBONE_KSERVE_S3_SECRET}.`
+      : `KServe serving contract is incomplete for ${namespace}/${runtimeName}.`,
+    servingReady ? 'Keep storageUri, Route, Revision, Traffic, and S3 secret validation in live tests.' : 'Repair the KServe InferenceService, Knative Service/Revision, traffic split, or S3 storage secret.',
+    [
+      ...(inference ? [resourceRefFor(inference, 'InferenceClaim')] : []),
+      ...(isvc ? [resourceRefFor(isvc, 'InferenceService')] : []),
+      ...(ksvc ? [resourceRefFor(ksvc, 'KnativeService')] : []),
+      ...(revision ? [resourceRefFor(revision, 'Revision')] : []),
+    ],
+    { runtimeName, revisionName, trafficPercent, storageSecret: isvc?.metadata?.annotations?.['serving.kserve.io/storageSecretName'] || '' },
+  ));
+
+  const monitoring = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/monitoringtargets/oah-default-model-monitoring`);
+  const trusty = await trustyaiMetrics('/monitoring/trustyai/metrics').catch((e) => ({ error: e.msg || String(e), items: [], history: [] }));
+  const monitoringReady = objectReadyCondition(monitoring)?.status === 'True'
+    && Number(monitoring?.status?.summary?.healthy || 0) >= 3
+    && Number(monitoring?.status?.historySamples || 0) >= 1
+    && (trusty.items || []).length >= 3
+    && (trusty.history || []).length >= 1;
+  checks.push(productFlowCheck(
+    'monitoring',
+    'TrustyAI-compatible monitoring',
+    'Operate',
+    true,
+    readyStatus(monitoringReady),
+    monitoringReady
+      ? `MonitoringTarget oah-default-model-monitoring is healthy with ${(trusty.items || []).length} metric(s) and ${(trusty.history || []).length} retained history sample(s).`
+      : `Monitoring evidence is incomplete: ${trusty.error || monitoring?.status?.message || 'missing metrics/history'}.`,
+    monitoringReady ? 'Use this as current drift/bias/explainability compatibility evidence until upstream TrustyAI is installed.' : 'Configure observability foundation and reconcile MonitoringTarget.',
+    monitoring ? [resourceRefFor(monitoring, 'MonitoringTarget')] : [],
+    { metrics: (trusty.items || []).length, history: (trusty.history || []).length, source: monitoring?.status?.metricSource?.type || '' },
+  ));
+
+  const required = checks.filter((check) => check.required);
+  const ready = checks.filter((check) => check.status === 'Ready');
+  const warnings = checks.filter((check) => check.status === 'Warning' || check.status === 'Configured');
+  const missing = checks.filter((check) => check.status === 'Missing' || check.status === 'NotInstalled');
+  const requiredMissing = required.filter((check) => check.status !== 'Ready');
+  return {
+    generatedAt,
+    namespace,
+    phase: requiredMissing.length ? (ready.length ? 'Partial' : 'NotReady') : 'Ready',
+    summary: {
+      total: checks.length,
+      ready: ready.length,
+      warnings: warnings.length,
+      missing: missing.length,
+      required: required.length,
+      requiredMissing: requiredMissing.length,
+    },
+    checks,
   };
 }
 
@@ -14561,6 +14760,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/native/backends' && req.method === 'GET') return jsonRes(res, 200, await nativeBackends());
     if (p === '/admin/native/support-services' && req.method === 'GET') return jsonRes(res, 200, await supportServices(req));
     if (p === '/admin/native/upstream-parity' && req.method === 'GET') return jsonRes(res, 200, await upstreamParityInventory(req));
+    if (p === '/admin/native/product-flow' && req.method === 'GET') return jsonRes(res, 200, await productFlowInventory('opensphere-system'));
     if (p === '/admin/native/foundation-services' && req.method === 'GET') return jsonRes(res, 200, await foundationServices(req));
     if (p === '/admin/native/foundation-services/configure' && req.method === 'POST') return jsonRes(res, 200, await configureFoundationServices(req));
     if (p === '/admin/native/support-services/serving/preview' && req.method === 'GET') return jsonRes(res, 200, await servingFoundationPreview(req));

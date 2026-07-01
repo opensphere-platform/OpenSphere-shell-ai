@@ -32,13 +32,17 @@ const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
 const packageJson = read('package.json');
+const pluginPackage = read('uipluginpackage.yaml');
 const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-06-29.md');
+const dupaController = readRepo('OpenSphere-console/backend/dupa-control/controller.js');
+const dupaCrds = readRepo('OpenSphere-console/backend/dupa-control/ui-plugin-crds.yaml');
 
 for (const endpoint of [
   '/admin/native/support-services',
   '/admin/native/foundation-services',
   '/admin/native/foundation-services/configure',
   '/admin/native/upstream-parity',
+  '/admin/native/product-flow',
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
@@ -73,6 +77,10 @@ for (const id of [
 for (const uiText of [
   'Console Backbone provider',
   'OAH foundation services',
+  'OAH product flow readiness',
+  'training, KFP pipeline execution',
+  'pgvector memory',
+  'KServe serving',
   'Backbone-backed service availability',
   'Configure Backbone foundation',
   'Use Backbone defaults',
@@ -147,10 +155,29 @@ requirePattern('server upstream parity inventory', server, /async function upstr
 requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
 requirePattern('server upstream parity operator precision', server, /namespaceMatchingPodsReady/);
 requireText('server upstream parity operator precision', server, 'Data Science Pipelines Operator only');
+requirePattern('server product flow inventory', server, /async function productFlowInventory/);
+requirePattern('server product flow route', server, /\/admin\/native\/product-flow/);
+for (const productFlowServerText of [
+  'GPU training smoke',
+  'KFP pipeline execution',
+  'Backbone pgvector memory',
+  'Backbone PostgreSQL model registry',
+  'KServe / Knative serving',
+  'TrustyAI-compatible monitoring',
+  'trafficPercent === 100',
+  'BACKBONE_KSERVE_S3_SECRET',
+]) {
+  requireText('server product flow inventory', server, productFlowServerText);
+}
 requirePattern('server DSPA PostgreSQL runtime config verification', server, /async function verifyDspaPostgresRuntimeConfig/);
 requirePattern('server Model Registry foundation configure', server, /async function configureModelRegistryFoundation/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
-requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*setupPrerequisites/);
+requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*productFlow,\s*\n\s*setupPrerequisites/);
+requireText('AI plugin package KFP pod label', pluginPackage, 'podLabels:');
+requireText('AI plugin package KFP pod label', pluginPackage, 'pipelines.kubeflow.org/v2_component: "true"');
+requireText('DUPA CRD podLabels schema', dupaCrds, 'podLabels:');
+requirePattern('DUPA controller podLabels support', dupaController, /function podLabels\(pkg\)/);
+requirePattern('DUPA controller podLabels merge', dupaController, /metadata:\s*\{\s*labels:\s*\{\s*\.\.\.podLabels\(pkg\),\s*app:\s*name\s*\}\s*\}/);
 
 for (const verifierText of [
   'OAH_ID_TOKEN',
@@ -193,6 +220,10 @@ for (const browserVerifierText of [
   'osp-ai-shell',
   '/ai/cluster-settings/support-services',
   'OAH support services',
+  'oah product flow readiness',
+  'GPU training smoke',
+  'Backbone pgvector memory',
+  'KServe / Knative serving',
   'upstream parity inventory',
   'ODH/RHOAI operator',
   'Data Science Pipelines Operator only',

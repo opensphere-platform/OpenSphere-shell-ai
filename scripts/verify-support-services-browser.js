@@ -104,6 +104,21 @@ function supportServicesPayload() {
       { order: 1, id: 'backbone', title: 'Console Backbone provider', menu: 'Console / Backbone', status: 'Ready', action: 'Consume Backbone contract', blocks: ['Metadata DB', 'Object storage'] },
       { order: 2, id: 'pipelines', title: 'Data Science Pipelines / KFP', menu: 'Support services', status: 'Ready', action: 'Bind PostgreSQL and RustFS', blocks: ['PipelineRun', 'Artifacts'] },
     ],
+    productFlow: {
+      generatedAt,
+      namespace: 'opensphere-system',
+      phase: 'Ready',
+      summary: { total: 7, ready: 7, warnings: 0, missing: 0, required: 7, requiredMissing: 0 },
+      checks: [
+        { id: 'shell', label: 'Deployed OAH shell', stage: 'Operate', required: true, status: 'Ready', ready: true, evidence: 'Mock OAH shell deployment is available.', nextAction: 'Keep image aligned.', resources: [] },
+        { id: 'training', label: 'GPU training smoke', stage: 'Train', required: true, status: 'Ready', ready: true, evidence: 'Mock external GPU training job succeeded.', nextAction: 'Run benchmark next.', resources: [] },
+        { id: 'pipelines', label: 'KFP pipeline execution', stage: 'Train', required: true, status: 'Ready', ready: true, evidence: 'Mock KFP run succeeded.', nextAction: 'Keep KFP smoke seeded.', resources: [] },
+        { id: 'vector-memory', label: 'Backbone pgvector memory', stage: 'Remember', required: true, status: 'Ready', ready: true, evidence: 'Mock pgvector 0.8.3 collection has chunks.', nextAction: 'Use retrieval memory.', resources: [] },
+        { id: 'model-registry', label: 'Backbone PostgreSQL model registry', stage: 'Govern', required: true, status: 'Ready', ready: true, evidence: 'Mock registry uses Backbone PostgreSQL.', nextAction: 'Use registry promotion evidence.', resources: [] },
+        { id: 'serving', label: 'KServe / Knative serving', stage: 'Serve', required: true, status: 'Ready', ready: true, evidence: 'Mock KServe route/revision/traffic path validated with traffic=100%.', nextAction: 'Keep serving contract.', resources: [] },
+        { id: 'monitoring', label: 'TrustyAI-compatible monitoring', stage: 'Operate', required: true, status: 'Ready', ready: true, evidence: 'Mock monitoring metrics and history are ready.', nextAction: 'Keep monitoring target healthy.', resources: [] },
+      ],
+    },
     upstreamParity: {
       generatedAt,
       phase: 'Partial',
@@ -175,11 +190,17 @@ function createHarnessServer(port) {
         if (url.includes('/admin/native/support-services') || url.includes('/admin/native/foundation-services')) {
           const body = await response.clone().json();
           const parity = body.upstreamParity || body.supportServices?.upstreamParity;
+          const productFlow = body.productFlow || body.supportServices?.productFlow;
           window.__oahFetchLog.push({
             url,
             status: response.status,
             phase: body.phase,
             summary: body.summary,
+            productFlow: productFlow ? {
+              phase: productFlow.phase,
+              summary: productFlow.summary,
+              checks: (productFlow.checks || []).map((check) => ({ id: check.id, status: check.status, evidence: check.evidence })),
+            } : undefined,
             upstreamParity: parity ? {
               phase: parity.phase,
               summary: parity.summary,
@@ -228,6 +249,7 @@ function createHarnessServer(port) {
     }
     if (url.pathname === '/admin/native/support-services') return sendJson(res, 200, supportServicesPayload());
     if (url.pathname === '/admin/native/upstream-parity') return sendJson(res, 200, supportServicesPayload().upstreamParity);
+    if (url.pathname === '/admin/native/product-flow') return sendJson(res, 200, supportServicesPayload().productFlow);
     if (url.pathname === '/admin/native/foundation-services') return sendJson(res, 200, foundationPayload());
     if (url.pathname === '/admin/native/foundation-services/configure') return sendJson(res, 200, { phase: 'Configured', foundationServices: foundationPayload(), supportServices: supportServicesPayload() });
     if (url.pathname === '/admin/native/support-services/pipelines/preview') return sendJson(res, 200, foundationPreview('Data Science Pipelines / KFP'));
@@ -419,6 +441,10 @@ async function main() {
 
     const requiredTexts = [
       'oah support services',
+      'oah product flow readiness',
+      'gpu training smoke',
+      'backbone pgvector memory',
+      'kserve / knative serving',
       'upstream parity inventory',
       'odh/rhoai operator',
       'data science pipelines operator only',

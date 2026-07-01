@@ -1039,6 +1039,30 @@ interface SupportServicesResponse {
     requiredBefore: string[];
   }>;
   backbone?: BackboneInventory;
+  productFlow?: {
+    generatedAt: string;
+    namespace: string;
+    phase: string;
+    summary: {
+      total: number;
+      ready: number;
+      warnings: number;
+      missing: number;
+      required: number;
+      requiredMissing: number;
+    };
+    checks: Array<{
+      id: string;
+      label: string;
+      stage: string;
+      required: boolean;
+      status: string;
+      ready: boolean;
+      evidence: string;
+      nextAction: string;
+      resources?: SupportServiceResource[];
+    }>;
+  };
   upstreamParity?: {
     generatedAt: string;
     phase: string;
@@ -3308,6 +3332,75 @@ function phaseClass(phase: string): string {
                       <strong>{{ supportServices().summary.total }}</strong>
                       <span>tracked services</span>
                     </div>
+                  </div>
+                  <div class="ai-gpu-config-panel" [hidden]="!supportServices().productFlow">
+                    <div class="ai-section-header">
+                      <div>
+                        <h3 class="ai-panel-title">OAH product flow readiness</h3>
+                        <p class="ai-footnote">Tracks the live OpenSphere AI Hub user flow across training, KFP pipeline execution, pgvector memory, model registry, KServe serving, and monitoring. This is separate from full ODH/RHOAI upstream parity.</p>
+                      </div>
+                      <div class="ai-action-row">
+                        <span [class]="'label ' + statusClass(supportServices().productFlow?.phase || '')">{{ supportServices().productFlow?.phase }}</span>
+                        <span class="label label-info">{{ supportServices().productFlow?.summary?.ready || 0 }}/{{ supportServices().productFlow?.summary?.total || 0 }} ready</span>
+                        <span [class]="supportServices().productFlow?.summary?.requiredMissing ? 'label label-warning' : 'label label-success'">{{ supportServices().productFlow?.summary?.requiredMissing || 0 }} required missing</span>
+                      </div>
+                    </div>
+                    <div class="ai-gpu-metric-grid">
+                      <div class="ai-gpu-metric">
+                        <strong>{{ supportServices().productFlow?.summary?.ready || 0 }}</strong>
+                        <span>ready stages</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ supportServices().productFlow?.summary?.required || 0 }}</strong>
+                        <span>required stages</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ supportServices().productFlow?.summary?.missing || 0 }}</strong>
+                        <span>missing</span>
+                      </div>
+                      <div class="ai-gpu-metric">
+                        <strong>{{ supportServices().productFlow?.namespace || 'opensphere-system' }}</strong>
+                        <span>namespace</span>
+                      </div>
+                    </div>
+                    <div class="ai-chip-list">
+                      @for (check of supportServices().productFlow?.checks || []; track check.id) {
+                        <span [class]="'label ' + statusClass(check.status)">{{ check.stage }}: {{ check.status }}</span>
+                      }
+                    </div>
+                    <div class="ai-chip-list">
+                      <span [class]="'label ' + statusClass(supportServices().productFlow?.checks?.[1]?.status || '')">GPU training smoke: {{ supportServices().productFlow?.checks?.[1]?.status || 'Unknown' }}</span>
+                      <span [class]="'label ' + statusClass(supportServices().productFlow?.checks?.[3]?.status || '')">Backbone pgvector memory: {{ supportServices().productFlow?.checks?.[3]?.status || 'Unknown' }}</span>
+                      <span [class]="'label ' + statusClass(supportServices().productFlow?.checks?.[5]?.status || '')">KServe / Knative serving: {{ supportServices().productFlow?.checks?.[5]?.status || 'Unknown' }}</span>
+                    </div>
+                    <p class="ai-footnote">{{ supportServices().productFlow?.checks?.[1]?.evidence }}</p>
+                    <p class="ai-footnote">{{ supportServices().productFlow?.checks?.[3]?.evidence }}</p>
+                    <p class="ai-footnote">{{ supportServices().productFlow?.checks?.[5]?.evidence }}</p>
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Product stage</th><th>Status</th><th>Evidence</th><th>Next action</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (check of supportServices().productFlow?.checks || []; track check.id) {
+                          <tr>
+                            <td>
+                              <strong>{{ check.label }}</strong>
+                              <div class="ai-footnote">{{ check.stage }}</div>
+                              @if (check.resources?.length) {
+                                <div class="ai-chip-list">
+                                  @for (resource of (check.resources || []).slice(0, 3); track resource.kind + ':' + resource.namespace + ':' + resource.name) {
+                                    <span class="label label-info">{{ resource.kind }} {{ resource.namespace ? resource.namespace + '/' : '' }}{{ resource.name }}</span>
+                                  }
+                                </div>
+                              }
+                            </td>
+                            <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                            <td>{{ check.evidence }}</td>
+                            <td>{{ check.nextAction }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
                   </div>
                   <div class="ai-gpu-config-panel" [hidden]="!supportServices().upstreamParity">
                       <div class="ai-section-header">

@@ -9,9 +9,11 @@ spec:
   version: 0.1.0
   description: "OpenSphere AI Hub operations dashboard"
   serviceAccountName: ai-runtime
+  podLabels:
+    pipelines.kubeflow.org/v2_component: "true"
   image:
     repository: localhost:5000/ai
-    digest: v200
+    digest: v203
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"
