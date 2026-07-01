@@ -7834,6 +7834,37 @@ function dspaPostgresServerConfigMap() {
   };
 }
 
+async function verifyDspaPostgresRuntimeConfig() {
+  const [configMap, dspa] = await Promise.all([
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/configmaps/${DSPA_POSTGRES_SERVER_CONFIG}`),
+    k8sJson(`/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${DSPA_NAME}`),
+  ]);
+  let config = {};
+  try {
+    config = JSON.parse(configMap?.data?.['config.json'] || '{}');
+  } catch {
+    config = {};
+  }
+  const db = dspa?.spec?.database?.externalDB || {};
+  const configReady = config.DBDriverName === 'pgx';
+  const dbReady = db.host === `backbone-postgres.${BACKBONE_NAMESPACE}.svc.cluster.local`
+    && String(db.port || '') === '5432'
+    && db.pipelineDBName === DSPA_POSTGRES_DATABASE
+    && db.passwordSecret?.name === DSPA_POSTGRES_SECRET;
+  return {
+    id: 'dspa-postgres-runtime-config',
+    label: 'DSPA PostgreSQL runtime config',
+    phase: configReady && dbReady ? 'Succeeded' : 'Warning',
+    detail: configReady && dbReady
+      ? `DSPA uses ${DSPA_POSTGRES_DATABASE} on Backbone PostgreSQL with DBDriverName=pgx. DSPO may still render default DB_DRIVER_NAME env values; the mounted server config is authoritative for the patched API image.`
+      : `DSPA PostgreSQL runtime config is incomplete: DBDriverName=${config.DBDriverName || 'unset'}, host=${db.host || 'unset'}, database=${db.pipelineDBName || 'unset'}.`,
+    resources: [
+      configMap ? resourceRefFor(configMap, 'ConfigMap') : { kind: 'ConfigMap', namespace: BACKBONE_CLAIM_NAMESPACE, name: DSPA_POSTGRES_SERVER_CONFIG, phase: 'Missing' },
+      dspa ? resourceRefFor(dspa, 'DataSciencePipelinesApplication') : { kind: 'DataSciencePipelinesApplication', namespace: BACKBONE_CLAIM_NAMESPACE, name: DSPA_NAME, phase: 'Missing' },
+    ],
+  };
+}
+
 function backboneDspaManifest(config, postgresConfig) {
   const parts = endpointParts(config.endpoint);
   const pg = postgresConfig || {
@@ -9457,6 +9488,12 @@ async function configurePipelinesFoundation(req) {
       detail: `${BACKBONE_RUSTFS_SECRET} is missing; apply Backbone bindings before creating DSPA.`,
     };
   }
+  const dspaPostgresRuntime = await verifyDspaPostgresRuntimeConfig().catch((e) => ({
+    id: 'dspa-postgres-runtime-config',
+    label: 'DSPA PostgreSQL runtime config',
+    phase: 'Warning',
+    detail: e.msg || String(e),
+  }));
   const mlmdPostgresCompatibility = await ensureDspaMlmdPostgresCompatibility(req, postgresConfig).catch((e) => ({
     id: 'dspa-mlmd-postgres',
     label: 'DSPA MLMD PostgreSQL compatibility',
@@ -9496,6 +9533,7 @@ async function configurePipelinesFoundation(req) {
         resources: networkCompatibility.manifests || [],
       },
       dspaStep,
+      dspaPostgresRuntime,
       mlmdPostgresCompatibility,
       kfpSeedPipeline,
     ],
@@ -10138,7 +10176,7 @@ async function configureDistributedFoundation(req) {
 }
 
 async function supportServices(req) {
-  const [objectStorage, backends, compute, gpu, setup, storageClasses, secrets, backbone] = await Promise.all([
+  const [objectStorage, backends, compute, gpu, setup, storageClasses, secrets, backbone, upstreamParity] = await Promise.all([
     supportObjectStorageService(req),
     nativeBackends(),
     computeBackendResources(),
@@ -10147,6 +10185,7 @@ async function supportServices(req) {
     k8sJson('/apis/storage.k8s.io/v1/storageclasses'),
     k8sJsonForRequest('/api/v1/namespaces/opensphere-system/secrets', req),
     backboneInventory(),
+    upstreamParityInventory(req),
   ]);
   const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
   const hasDefaultStorageClass = (storageClasses?.items || []).some((sc) => sc.metadata?.annotations?.['storageclass.kubernetes.io/is-default-class'] === 'true');
@@ -10503,7 +10542,166 @@ async function supportServices(req) {
     installPlan,
     configurationPages,
     backbone,
+    upstreamParity,
     setupPrerequisites: setup.prerequisites,
+  };
+}
+
+function objectReadyCondition(obj) {
+  return (obj?.status?.conditions || []).find((condition) => condition.type === 'Ready');
+}
+
+function upstreamCheck(id, label, required, status, evidence, nextAction, resources = []) {
+  return {
+    id,
+    label,
+    required,
+    status,
+    ready: status === 'Ready',
+    evidence,
+    nextAction,
+    resources,
+  };
+}
+
+async function namespacePodsReady(namespace, labelSelector = '') {
+  const suffix = labelSelector ? `?labelSelector=${encodeURIComponent(labelSelector)}` : '';
+  const pods = await k8sJson(`/api/v1/namespaces/${namespace}/pods${suffix}`);
+  const items = pods?.items || [];
+  if (!items.length) return { ready: false, count: 0, detail: 'no pods found', resources: [] };
+  const notReady = items.filter((pod) => {
+    const phase = pod.status?.phase || '';
+    const ready = objectReadyCondition(pod)?.status === 'True';
+    return phase !== 'Running' || !ready;
+  });
+  return {
+    ready: notReady.length === 0,
+    count: items.length,
+    detail: notReady.length
+      ? notReady.map((pod) => `${pod.metadata?.name}:${pod.status?.phase || 'Unknown'}/${objectReadyCondition(pod)?.status || 'Unknown'}`).join(', ')
+      : `${items.length} pod(s) ready`,
+    resources: items.map((pod) => resourceRefFor(pod, 'Pod')),
+  };
+}
+
+async function upstreamParityInventory(req) {
+  const [setup, dspa, knativePods, kservePods, inferenceServices] = await Promise.all([
+    setupStatus(req).catch(() => null),
+    k8sJson(`/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${DSPA_NAME}`),
+    namespacePodsReady('knative-serving'),
+    namespacePodsReady('kserve'),
+    k8sJson('/apis/serving.kserve.io/v1beta1/inferenceservices'),
+  ]);
+  const checks = [];
+  const operatorPods = await namespacePodsReady('opendatahub', 'app.kubernetes.io/name=data-science-pipelines-operator,pod-template-hash');
+  checks.push(upstreamCheck(
+    'odh-namespace',
+    'ODH/RHOAI operator namespace',
+    true,
+    operatorPods.ready ? 'Ready' : 'NotInstalled',
+    operatorPods.ready ? `opendatahub namespace has ${operatorPods.detail}.` : `opendatahub namespace operator pods are not ready: ${operatorPods.detail}.`,
+    operatorPods.ready ? 'Keep operator pods healthy.' : 'Install ODH/RHOAI Operator or keep native-only mode explicitly labeled.',
+    operatorPods.resources,
+  ));
+
+  const hasDscCrd = await crdInstalled('datascienceclusters.datasciencecluster.opendatahub.io');
+  const dscs = hasDscCrd ? (setup?.dataScienceClusters || []) : [];
+  checks.push(upstreamCheck(
+    'datasciencecluster',
+    'DataScienceCluster',
+    true,
+    hasDscCrd && dscs.length ? 'Ready' : hasDscCrd ? 'Missing' : 'NotInstalled',
+    hasDscCrd && dscs.length ? `${dscs.length} DataScienceCluster resource(s) detected.` : hasDscCrd ? 'DataScienceCluster CRD exists but no instances were found.' : 'DataScienceCluster CRD is not installed.',
+    hasDscCrd && dscs.length ? 'Keep DataScienceCluster components aligned with OAH support services.' : 'Install the ODH/RHOAI Operator and create a DataScienceCluster for full upstream parity.',
+    dscs,
+  ));
+
+  const dspaReady = objectReadyCondition(dspa)?.status === 'True';
+  checks.push(upstreamCheck(
+    'dspa-kfp',
+    'Data Science Pipelines / KFP',
+    true,
+    dspaReady ? 'Ready' : dspa ? 'Warning' : 'NotInstalled',
+    dspaReady ? `DSPA ${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} is Ready.` : dspa ? `DSPA ${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} Ready=${objectReadyCondition(dspa)?.status || 'Unknown'}.` : 'DSPA CRD or instance is not installed.',
+    dspaReady ? 'Keep KFP API and PostgreSQL MLMD wrapper verified.' : 'Install or repair Data Science Pipelines Application.',
+    dspa ? [resourceRefFor(dspa, 'DataSciencePipelinesApplication')] : [],
+  ));
+
+  const knativeCrdNames = ['services.serving.knative.dev', 'routes.serving.knative.dev', 'revisions.serving.knative.dev'];
+  const knativeCrdStatuses = await Promise.all(knativeCrdNames.map(async (name) => ({ name, installed: await crdInstalled(name) })));
+  const knativeMissing = knativeCrdStatuses.filter((item) => !item.installed).map((item) => item.name);
+  const knativeCrdsReady = knativeMissing.length === 0;
+  checks.push(upstreamCheck(
+    'knative-serving',
+    'Knative Serving',
+    true,
+    knativeCrdsReady && knativePods.ready ? 'Ready' : knativeCrdsReady ? 'Warning' : 'NotInstalled',
+    knativeCrdsReady && knativePods.ready ? `Knative CRDs are installed and knative-serving has ${knativePods.detail}.` : knativeCrdsReady ? `Knative CRDs are installed, but pods are not fully ready: ${knativePods.detail}.` : `Missing Knative CRD(s): ${knativeMissing.join(', ') || 'unknown'}.`,
+    knativeCrdsReady && knativePods.ready ? 'Run Route/Revision/Traffic checks for each served model.' : 'Install or repair Knative Serving before upstream KServe validation.',
+    knativePods.resources,
+  ));
+
+  const kserveCrdNames = ['inferenceservices.serving.kserve.io', 'servingruntimes.serving.kserve.io', 'clusterservingruntimes.serving.kserve.io'];
+  const kserveCrdStatuses = await Promise.all(kserveCrdNames.map(async (name) => ({ name, installed: await crdInstalled(name) })));
+  const kserveMissing = kserveCrdStatuses.filter((item) => !item.installed).map((item) => item.name);
+  const kserveCrdsReady = kserveMissing.length === 0;
+  const isvcItems = inferenceServices?.items || [];
+  const isvcReady = isvcItems.filter((item) => objectReadyCondition(item)?.status === 'True').length;
+  checks.push(upstreamCheck(
+    'kserve-serving',
+    'KServe inference',
+    true,
+    kserveCrdsReady && kservePods.ready && isvcReady > 0 ? 'Ready' : kserveCrdsReady && kservePods.ready ? 'Warning' : kserveCrdsReady ? 'Warning' : 'NotInstalled',
+    kserveCrdsReady && kservePods.ready && isvcReady > 0
+      ? `KServe CRDs/control plane are ready and ${isvcReady}/${isvcItems.length} InferenceService resource(s) are Ready.`
+      : kserveCrdsReady && kservePods.ready
+        ? 'KServe CRDs/control plane are ready, but no Ready InferenceService was found.'
+        : kserveCrdsReady
+          ? `KServe CRDs exist, but control plane readiness is incomplete: ${kservePods.detail}.`
+          : `Missing KServe CRD(s): ${kserveMissing.join(', ') || 'unknown'}.`,
+    kserveCrdsReady && kservePods.ready && isvcReady > 0 ? 'Keep storageUri, Route, Revision, and Traffic validation in e2e.' : 'Install KServe and create or repair an upstream InferenceService smoke workload.',
+    [...kservePods.resources, ...isvcItems.map((item) => resourceRefFor(item, 'InferenceService'))],
+  ));
+
+  const modelRegistryInstalled = await crdInstalled('modelregistries.modelregistry.opendatahub.io');
+  checks.push(upstreamCheck(
+    'model-registry',
+    'Upstream Model Registry',
+    false,
+    modelRegistryInstalled ? 'Missing' : 'NotInstalled',
+    modelRegistryInstalled ? 'ModelRegistry CRD exists; instance readiness still needs validation.' : 'No modelregistries API resource was discovered.',
+    modelRegistryInstalled ? 'Run upstream registry write/read sync validation.' : 'Install or enable ODH/RHOAI Model Registry for upstream parity.',
+    [],
+  ));
+
+  const trustyInstalled = await crdInstalled('trustyaiservices.trustyai.opendatahub.io');
+  checks.push(upstreamCheck(
+    'trustyai',
+    'TrustyAI monitoring',
+    false,
+    trustyInstalled ? 'Missing' : 'NotInstalled',
+    trustyInstalled ? 'TrustyAIService CRD exists; instance readiness still needs validation.' : 'No trustyaiservices API resource was discovered.',
+    trustyInstalled ? 'Run model monitoring and explainability e2e.' : 'Install TrustyAI only when drift, bias, and explainability evidence are required.',
+    [],
+  ));
+
+  const required = checks.filter((item) => item.required);
+  const ready = checks.filter((item) => item.status === 'Ready');
+  const warnings = checks.filter((item) => item.status === 'Warning');
+  const missing = checks.filter((item) => ['Missing', 'NotInstalled'].includes(item.status));
+  const requiredMissing = required.filter((item) => ['Missing', 'NotInstalled', 'Warning'].includes(item.status));
+  return {
+    generatedAt: new Date().toISOString(),
+    phase: requiredMissing.length === 0 ? 'Ready' : ready.length ? 'Partial' : 'NotReady',
+    summary: {
+      total: checks.length,
+      ready: ready.length,
+      warnings: warnings.length,
+      missing: missing.length,
+      required: required.length,
+      requiredMissing: requiredMissing.length,
+    },
+    checks,
   };
 }
 
@@ -14154,6 +14352,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/native/catalog' && req.method === 'GET') return jsonRes(res, 200, await nativeCatalog());
     if (p === '/admin/native/backends' && req.method === 'GET') return jsonRes(res, 200, await nativeBackends());
     if (p === '/admin/native/support-services' && req.method === 'GET') return jsonRes(res, 200, await supportServices(req));
+    if (p === '/admin/native/upstream-parity' && req.method === 'GET') return jsonRes(res, 200, await upstreamParityInventory(req));
     if (p === '/admin/native/foundation-services' && req.method === 'GET') return jsonRes(res, 200, await foundationServices(req));
     if (p === '/admin/native/foundation-services/configure' && req.method === 'POST') return jsonRes(res, 200, await configureFoundationServices(req));
     if (p === '/admin/native/support-services/serving/preview' && req.method === 'GET') return jsonRes(res, 200, await servingFoundationPreview(req));

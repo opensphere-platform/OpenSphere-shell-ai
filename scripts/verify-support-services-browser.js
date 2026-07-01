@@ -97,6 +97,20 @@ function supportServicesPayload() {
       { order: 1, id: 'backbone', title: 'Console Backbone provider', menu: 'Console / Backbone', status: 'Ready', action: 'Consume Backbone contract', blocks: ['Metadata DB', 'Object storage'] },
       { order: 2, id: 'pipelines', title: 'Data Science Pipelines / KFP', menu: 'Support services', status: 'Ready', action: 'Bind PostgreSQL and RustFS', blocks: ['PipelineRun', 'Artifacts'] },
     ],
+    upstreamParity: {
+      generatedAt,
+      phase: 'Partial',
+      summary: { total: 7, ready: 4, warnings: 0, missing: 3, required: 5, requiredMissing: 1 },
+      checks: [
+        { id: 'odh-namespace', label: 'ODH/RHOAI operator namespace', required: true, status: 'Ready', ready: true, evidence: 'Mock ODH operator pod is ready.', nextAction: 'Keep operator pods healthy.', resources: [] },
+        { id: 'datasciencecluster', label: 'DataScienceCluster', required: true, status: 'NotInstalled', ready: false, evidence: 'DataScienceCluster CRD is not installed.', nextAction: 'Install the ODH/RHOAI Operator and create a DataScienceCluster for full upstream parity.', resources: [] },
+        { id: 'dspa-kfp', label: 'Data Science Pipelines / KFP', required: true, status: 'Ready', ready: true, evidence: 'Mock DSPA is ready.', nextAction: 'Keep KFP verified.', resources: [] },
+        { id: 'knative-serving', label: 'Knative Serving', required: true, status: 'Ready', ready: true, evidence: 'Mock Knative is ready.', nextAction: 'Run route checks.', resources: [] },
+        { id: 'kserve-serving', label: 'KServe inference', required: true, status: 'Ready', ready: true, evidence: 'Mock KServe is ready.', nextAction: 'Run serving e2e.', resources: [] },
+        { id: 'model-registry', label: 'Upstream Model Registry', required: false, status: 'NotInstalled', ready: false, evidence: 'Mock Model Registry is absent.', nextAction: 'Install when parity is required.', resources: [] },
+        { id: 'trustyai', label: 'TrustyAI monitoring', required: false, status: 'NotInstalled', ready: false, evidence: 'Mock TrustyAI is absent.', nextAction: 'Install when monitoring is required.', resources: [] },
+      ],
+    },
     items: [
       { id: 'backbone', label: 'Console Backbone provider', category: 'Core substrate', required: true, source: 'Backbone', status: 'Ready', usedBy: ['Metadata DB', 'Object storage'], evidence: 'Mock Backbone claim is bound.', nextAction: 'None', resources: [] },
       { id: 'metadata-store', label: 'Metadata PostgreSQL database', category: 'Metadata', required: true, source: 'Backbone PostgreSQL', status: 'Ready', usedBy: ['KFP metadata', 'Model Registry', 'TrustyAI storage'], evidence: 'Mock PostgreSQL binding is ready.', nextAction: 'None', resources: [] },
@@ -182,6 +196,7 @@ function createHarnessServer(port) {
       return;
     }
     if (url.pathname === '/admin/native/support-services') return sendJson(res, 200, supportServicesPayload());
+    if (url.pathname === '/admin/native/upstream-parity') return sendJson(res, 200, supportServicesPayload().upstreamParity);
     if (url.pathname === '/admin/native/foundation-services') return sendJson(res, 200, foundationPayload());
     if (url.pathname === '/admin/native/foundation-services/configure') return sendJson(res, 200, { phase: 'Configured', foundationServices: foundationPayload(), supportServices: supportServicesPayload() });
     if (url.pathname === '/admin/native/support-services/pipelines/preview') return sendJson(res, 200, foundationPreview('Data Science Pipelines / KFP'));
@@ -351,6 +366,8 @@ async function main() {
 
     const requiredTexts = [
       'oah support services',
+      'upstream parity inventory',
+      'datasciencecluster',
       'prerequisite services',
       'console backbone provider',
       'apply oah claim',

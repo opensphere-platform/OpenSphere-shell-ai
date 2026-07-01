@@ -37,6 +37,7 @@ for (const endpoint of [
   '/admin/native/support-services',
   '/admin/native/foundation-services',
   '/admin/native/foundation-services/configure',
+  '/admin/native/upstream-parity',
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
@@ -77,6 +78,9 @@ for (const uiText of [
   'Apply OAH claim',
   'Bind issued Secrets',
   'Configuration pages',
+  'Upstream parity inventory',
+  'DataScienceCluster',
+  'Native fallback readiness is intentionally reported separately',
   'OpenSphere-native fallback control plane',
   'Prepare native fallback',
   'Preview serving foundation',
@@ -135,8 +139,11 @@ requirePattern('server DSPO public MLMD envoy image', server, /docker\.io\/envoy
 requirePattern('server DSPA TLS compatibility', server, /function ensureDspaTlsCompatibility/);
 requirePattern('server DSPA network compatibility', server, /function ensureDspaNetworkCompatibility/);
 requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
+requirePattern('server upstream parity inventory', server, /async function upstreamParityInventory/);
+requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
+requirePattern('server DSPA PostgreSQL runtime config verification', server, /async function verifyDspaPostgresRuntimeConfig/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
-requirePattern('server backbone response', server, /backbone,\s*\n\s*setupPrerequisites/);
+requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*setupPrerequisites/);
 
 for (const verifierText of [
   'OAH_ID_TOKEN',
@@ -167,6 +174,7 @@ for (const browserVerifierText of [
   'osp-ai-shell',
   '/ai/cluster-settings/support-services',
   'OAH support services',
+  'upstream parity inventory',
   'Use Backbone defaults',
   'Apply OAH claim',
   'Bind issued Secrets',

@@ -1039,6 +1039,28 @@ interface SupportServicesResponse {
     requiredBefore: string[];
   }>;
   backbone?: BackboneInventory;
+  upstreamParity?: {
+    generatedAt: string;
+    phase: string;
+    summary: {
+      total: number;
+      ready: number;
+      warnings: number;
+      missing: number;
+      required: number;
+      requiredMissing: number;
+    };
+    checks: Array<{
+      id: string;
+      label: string;
+      required: boolean;
+      status: string;
+      ready: boolean;
+      evidence: string;
+      nextAction: string;
+      resources?: SupportServiceResource[];
+    }>;
+  };
   setupPrerequisites: Array<{ id: string; label: string; ready: boolean; required?: boolean; scope?: string; detail: string }>;
 }
 
@@ -3275,6 +3297,64 @@ function phaseClass(phase: string): string {
                       <span>tracked services</span>
                     </div>
                   </div>
+                  @if (supportServices().upstreamParity; as parity) {
+                    <div class="ai-gpu-config-panel">
+                      <div class="ai-section-header">
+                        <div>
+                          <h3 class="ai-panel-title">Upstream parity inventory</h3>
+                          <p class="ai-footnote">Tracks actual ODH/RHOAI, DataScienceCluster, DSPA/KFP, Knative, KServe, Model Registry, and TrustyAI substrate. Native fallback readiness is intentionally reported separately.</p>
+                        </div>
+                        <div class="ai-action-row">
+                          <span [class]="'label ' + statusClass(parity.phase)">{{ parity.phase }}</span>
+                          <span class="label label-info">{{ parity.summary.ready }}/{{ parity.summary.total }} ready</span>
+                          <span [class]="parity.summary.requiredMissing ? 'label label-warning' : 'label label-success'">{{ parity.summary.requiredMissing }} required missing</span>
+                        </div>
+                      </div>
+                      <div class="ai-gpu-metric-grid">
+                        <div class="ai-gpu-metric">
+                          <strong>{{ parity.summary.ready }}</strong>
+                          <span>ready</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ parity.summary.warnings }}</strong>
+                          <span>warnings</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ parity.summary.missing }}</strong>
+                          <span>missing</span>
+                        </div>
+                        <div class="ai-gpu-metric">
+                          <strong>{{ parity.summary.requiredMissing }}</strong>
+                          <span>required missing</span>
+                        </div>
+                      </div>
+                      <table class="table table-compact ai-mini-table">
+                        <thead>
+                          <tr><th>Upstream substrate</th><th>Required</th><th>Status</th><th>Evidence</th><th>Next action</th></tr>
+                        </thead>
+                        <tbody>
+                          @for (check of parity.checks; track check.id) {
+                            <tr>
+                              <td>
+                                <strong>{{ check.label }}</strong>
+                                @if (check.resources?.length) {
+                                  <div class="ai-chip-list">
+                                    @for (resource of (check.resources || []).slice(0, 3); track resource.kind + ':' + resource.namespace + ':' + resource.name) {
+                                      <span class="label label-info">{{ resource.kind }} {{ resource.namespace ? resource.namespace + '/' : '' }}{{ resource.name }}</span>
+                                    }
+                                  </div>
+                                }
+                              </td>
+                              <td><span [class]="check.required ? 'label label-warning' : 'label label-info'">{{ check.required ? 'Required' : 'Optional' }}</span></td>
+                              <td><span [class]="'label ' + statusClass(check.status)">{{ check.status }}</span></td>
+                              <td>{{ check.evidence }}</td>
+                              <td>{{ check.nextAction }}</td>
+                            </tr>
+                          }
+                        </tbody>
+                      </table>
+                    </div>
+                  }
                   @if (supportServices().backbone; as backbone) {
                     <div class="ai-gpu-config-panel">
                       <div class="ai-section-header">
