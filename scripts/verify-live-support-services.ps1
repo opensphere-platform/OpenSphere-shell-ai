@@ -3,7 +3,11 @@ param(
   [string]$Deployment = "ai",
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
-  [string]$PackagePath = "uipluginpackage.yaml"
+  [string]$PackagePath = "uipluginpackage.yaml",
+  [string]$DspaName = "oah-dspa",
+  [string]$ExpectedMlmdImage = "localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1",
+  [string]$SeedPipelineName = "oah-kfp-smoke-pipeline",
+  [string]$SmokeRunName = "ospr-oah-kfp-smoke-run-v193-kfp-record"
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,4 +66,69 @@ if ($running.Count -lt 1) {
 }
 
 Write-Output "[support-services-live] running pod=$($running[0].metadata.name)"
+
+try {
+  $dspa = kubectl get dspa $DspaName -n $Namespace -o json | ConvertFrom-Json
+} catch {
+  Fail "DSPA $Namespace/$DspaName could not be read. $_"
+}
+
+$dspaReady = @($dspa.status.conditions | Where-Object { $_.type -eq "Ready" })[0]
+$dspaMlmdImage = $dspa.spec.mlmd.grpc.image
+Write-Output "[support-services-live] dspa=$DspaName ready=$($dspaReady.status) mlmdImage=$dspaMlmdImage"
+if ($dspaReady.status -ne "True") {
+  Fail "DSPA $Namespace/$DspaName is not Ready."
+}
+if ($dspaMlmdImage -ne $ExpectedMlmdImage) {
+  Fail "DSPA MLMD image $dspaMlmdImage does not match expected $ExpectedMlmdImage."
+}
+
+$mlmdDeployment = "ds-pipeline-metadata-grpc-$DspaName"
+try {
+  $mlmd = kubectl get deploy $mlmdDeployment -n $Namespace -o json | ConvertFrom-Json
+} catch {
+  Fail "MLMD deployment $Namespace/$mlmdDeployment could not be read. $_"
+}
+$mlmdImage = $mlmd.spec.template.spec.containers[0].image
+$mlmdReady = "$($mlmd.status.readyReplicas)/$($mlmd.status.replicas)"
+Write-Output "[support-services-live] mlmd deployment image=$mlmdImage ready=$mlmdReady"
+if ($mlmdImage -ne $ExpectedMlmdImage) {
+  Fail "MLMD deployment image $mlmdImage does not match expected $ExpectedMlmdImage."
+}
+if ($mlmdReady -ne "1/1") {
+  Fail "MLMD deployment is not fully ready."
+}
+
+$podName = $running[0].metadata.name
+$pipelineBackendRaw = kubectl exec -n $Namespace $podName -- wget -qO- http://127.0.0.1:8080/pipelines/backend
+$pipelineBackend = $pipelineBackendRaw | ConvertFrom-Json
+Write-Output "[support-services-live] pipelines phase=$($pipelineBackend.phase) kfpReady=$($pipelineBackend.summary.kfpReady) kfpApiReady=$($pipelineBackend.summary.kfpApiReady) records=$($pipelineBackend.summary.runRecords)"
+if ($pipelineBackend.phase -ne "Ready" -or -not $pipelineBackend.summary.kfpReady -or -not $pipelineBackend.summary.kfpApiReady) {
+  Fail "Pipeline backend is not Ready with KFP API access."
+}
+
+$smokeRecord = @($pipelineBackend.records | Where-Object { $_.name -eq $SmokeRunName })[0]
+if (-not $smokeRecord) {
+  Fail "Expected KFP smoke record $SmokeRunName was not found."
+}
+Write-Output "[support-services-live] kfp smoke record=$($smokeRecord.name) state=$($smokeRecord.state) runId=$($smokeRecord.runId)"
+if ($smokeRecord.state -ne "SUCCEEDED" -or -not $smokeRecord.runId) {
+  Fail "KFP smoke record $SmokeRunName is not Succeeded."
+}
+
+$seedRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://ds-pipeline-$DspaName.$Namespace.svc.cluster.local:8888/apis/v2beta1/pipelines?page_size=100"
+$seed = $seedRaw | ConvertFrom-Json
+$seedPipeline = @($seed.pipelines | Where-Object { $_.display_name -eq $SeedPipelineName -or $_.name -eq $SeedPipelineName })[0]
+Write-Output "[support-services-live] kfp seed pipeline=$($seedPipeline.display_name) id=$($seedPipeline.pipeline_id)"
+if (-not $seedPipeline) {
+  Fail "KFP seed pipeline $SeedPipelineName was not found."
+}
+
+$vectorRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/memory/vector?namespace=$Namespace"
+$vector = $vectorRaw | ConvertFrom-Json
+Write-Output "[support-services-live] pgvector ready=$($vector.extension.ready) version=$($vector.extension.version) collections=$($vector.summary.collections) chunks=$($vector.summary.chunks)"
+if (-not $vector.extension.ready -or -not $vector.summary.ready) {
+  Fail "Backbone pgvector memory is not ready."
+}
+
 Write-Output "[support-services-live] checks passed"

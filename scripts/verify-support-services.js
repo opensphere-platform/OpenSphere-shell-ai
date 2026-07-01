@@ -27,6 +27,7 @@ function requirePattern(label, text, pattern) {
 
 const server = read('server.js');
 const app = read('src/app/app.component.ts');
+const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-06-29.md');
 
 for (const endpoint of [
@@ -133,5 +134,17 @@ requirePattern('server DSPA network compatibility', server, /function ensureDspa
 requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
 requirePattern('server backbone response', server, /backbone,\s*\n\s*setupPrerequisites/);
+
+for (const verifierText of [
+  'ExpectedMlmdImage',
+  'DSPA MLMD image',
+  '/pipelines/backend',
+  'KFP smoke record',
+  'KFP seed pipeline',
+  '/memory/vector',
+  'pgvector',
+]) {
+  requireText('live support-services verifier', liveVerifier, verifierText);
+}
 
 if (!process.exitCode) console.log('[support-services] regression checks passed');
