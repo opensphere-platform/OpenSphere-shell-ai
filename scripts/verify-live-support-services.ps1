@@ -4,6 +4,7 @@ param(
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
   [string]$UpstreamParityApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/upstream-parity",
+  [string]$ModelRegistryConfigureApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services/model-registry/configure",
   [string]$ObservabilityConfigureApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services/observability/configure",
   [string]$FinalReadinessApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/final-readiness",
   [string]$PluginManifest = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.manifest.json",
@@ -38,6 +39,17 @@ function Get-HttpText([string]$Url, [string]$Label) {
     Fail "$Label did not return HTTP 200 from $Url."
   }
   return $body
+}
+
+function Convert-JsonArray([string]$Text) {
+  if (-not $Text) {
+    return @()
+  }
+  $parsed = ConvertFrom-Json -InputObject $Text
+  if ($null -eq $parsed) {
+    return @()
+  }
+  return @($parsed | ForEach-Object { $_ })
 }
 
 try {
@@ -126,6 +138,12 @@ $upstreamParityBody = & curl.exe -k -s $UpstreamParityApi
 Write-Output "[support-services-live] unauthenticated upstream-parity response=$upstreamParityBody"
 if ($upstreamParityBody -notmatch "Authentication required") {
   Fail "Unauthenticated upstream-parity API did not enforce authentication."
+}
+
+$modelRegistryConfigureBody = & curl.exe -k -s -X POST -H "content-type: application/json" -d "{}" $ModelRegistryConfigureApi
+Write-Output "[support-services-live] unauthenticated model-registry configure response=$modelRegistryConfigureBody"
+if ($modelRegistryConfigureBody -notmatch "Authentication required") {
+  Fail "Unauthenticated model-registry configure API did not enforce authentication."
 }
 
 $observabilityBody = & curl.exe -k -s -X POST -H "content-type: application/json" -d "{}" $ObservabilityConfigureApi
@@ -235,6 +253,40 @@ $vector = $vectorRaw | ConvertFrom-Json
 Write-Output "[support-services-live] pgvector ready=$($vector.extension.ready) version=$($vector.extension.version) collections=$($vector.summary.collections) chunks=$($vector.summary.chunks)"
 if (-not $vector.extension.ready -or -not $vector.summary.ready) {
   Fail "Backbone pgvector memory is not ready."
+}
+
+$registryRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/models/registry/versions?namespace=$Namespace"
+$registry = $registryRaw | ConvertFrom-Json
+$registryItems = @($registry.items)
+$registryPromotions = @($registry.promotions)
+$registryAudit = @($registry.approvalAudit)
+$registryMetrics = @($registry.evaluationMetrics)
+$registryPgItems = @($registryItems | Where-Object { $_.backend -eq "opensphere-postgres" -and $_.registry -match "ai-hub-backbone-postgres" })
+$registrySmoke = @($registryItems | Where-Object { $_.name -eq "oah-pg-smoke-model" -and $_.version -eq "oah-model-registry-pg-smoke" })[0]
+Write-Output "[support-services-live] model registry storage=$($registry.storage.type) ready=$($registry.storage.ready) source=$($registry.source.type) versions=$($registryItems.Count) postgresVersions=$($registryPgItems.Count) promotions=$($registryPromotions.Count) audit=$($registryAudit.Count) metrics=$($registryMetrics.Count)"
+if ($registry.storage.type -ne "postgres" -or -not $registry.storage.ready -or $registry.source.type -ne "opensphere-postgres") {
+  Fail "Model Registry is not using the Backbone PostgreSQL store."
+}
+if ($registryItems.Count -lt 1 -or $registryPgItems.Count -lt 1 -or -not $registrySmoke) {
+  Fail "Backbone PostgreSQL model registry does not expose the expected registered model versions."
+}
+if ($registryPromotions.Count -lt 1 -or $registryAudit.Count -lt 1 -or $registryMetrics.Count -lt 1) {
+  Fail "Backbone PostgreSQL model registry does not expose promotion, audit, and evaluation evidence."
+}
+
+try {
+  $registryCm = kubectl get cm ai-model-registry-versions -n $Namespace -o json | ConvertFrom-Json
+} catch {
+  Fail "Model Registry ConfigMap mirror $Namespace/ai-model-registry-versions could not be read. $_"
+}
+$mirrorVersions = @(Convert-JsonArray $registryCm.data.versions)
+$mirrorPromotions = @(Convert-JsonArray $registryCm.data.promotions)
+$mirrorAudit = @(Convert-JsonArray $registryCm.data.approvalAudit)
+$mirrorMetrics = @(Convert-JsonArray $registryCm.data.evaluationMetrics)
+$mirrorSmoke = @($mirrorVersions | Where-Object { $_.name -eq "oah-pg-smoke-model" -and $_.backend -eq "opensphere-postgres" })[0]
+Write-Output "[support-services-live] model registry mirror versions=$($mirrorVersions.Count) promotions=$($mirrorPromotions.Count) audit=$($mirrorAudit.Count) metrics=$($mirrorMetrics.Count)"
+if ($mirrorVersions.Count -lt 1 -or -not $mirrorSmoke -or $mirrorPromotions.Count -lt 1 -or $mirrorAudit.Count -lt 1 -or $mirrorMetrics.Count -lt 1) {
+  Fail "Model Registry ConfigMap compatibility mirror is missing PostgreSQL-backed registry evidence."
 }
 
 try {

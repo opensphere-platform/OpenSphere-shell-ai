@@ -162,6 +162,7 @@ for (const verifierText of [
   'Preview pipelines foundation',
   'Configure registry foundation',
   'Unauthenticated upstream-parity API did not enforce authentication',
+  'Unauthenticated model-registry configure API did not enforce authentication',
   'Unauthenticated observability configure API did not enforce authentication',
   'authenticated final-readiness',
   'nativeReadiness',
@@ -173,6 +174,9 @@ for (const verifierText of [
   'KFP seed pipeline',
   '/memory/vector',
   'pgvector',
+  '/models/registry/versions',
+  'model registry storage=',
+  'model registry mirror versions=',
   'monitoring target=',
   '/monitoring/trustyai/metrics',
 ]) {
