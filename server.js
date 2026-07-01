@@ -10730,6 +10730,29 @@ async function namespacePodsReady(namespace, labelSelector = '') {
   };
 }
 
+async function namespaceMatchingPodsReady(namespace, pattern) {
+  const pods = await k8sJson(`/api/v1/namespaces/${namespace}/pods`).catch(() => null);
+  const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+  const items = (pods?.items || []).filter((pod) => {
+    const labels = Object.entries(pod.metadata?.labels || {}).map(([key, value]) => `${key}=${value}`).join(' ');
+    return regex.test(`${pod.metadata?.name || ''} ${labels}`);
+  });
+  if (!items.length) return { ready: false, count: 0, detail: 'no matching pods found', resources: [] };
+  const notReady = items.filter((pod) => {
+    const phase = pod.status?.phase || '';
+    const ready = objectReadyCondition(pod)?.status === 'True';
+    return phase !== 'Running' || !ready;
+  });
+  return {
+    ready: notReady.length === 0,
+    count: items.length,
+    detail: notReady.length
+      ? notReady.map((pod) => `${pod.metadata?.name}:${pod.status?.phase || 'Unknown'}/${objectReadyCondition(pod)?.status || 'Unknown'}`).join(', ')
+      : `${items.length} matching pod(s) ready`,
+    resources: items.map((pod) => resourceRefFor(pod, 'Pod')),
+  };
+}
+
 async function upstreamParityInventory(req) {
   const [setup, dspa, knativePods, kservePods, inferenceServices] = await Promise.all([
     setupStatus(req).catch(() => null),
@@ -10739,15 +10762,23 @@ async function upstreamParityInventory(req) {
     k8sJson('/apis/serving.kserve.io/v1beta1/inferenceservices'),
   ]);
   const checks = [];
-  const operatorPods = await namespacePodsReady('opendatahub', 'app.kubernetes.io/name=data-science-pipelines-operator,pod-template-hash');
+  const operatorPods = await namespaceMatchingPodsReady('opendatahub', /(opendatahub-operator|rhods-operator|redhat-ods-operator)/);
+  const dspoOperatorPods = await namespacePodsReady('opendatahub', 'app.kubernetes.io/name=data-science-pipelines-operator,pod-template-hash');
+  const operatorStatus = operatorPods.count > 0
+    ? operatorPods.ready ? 'Ready' : 'Warning'
+    : dspoOperatorPods.count > 0 ? 'Warning' : 'NotInstalled';
   checks.push(upstreamCheck(
-    'odh-namespace',
-    'ODH/RHOAI operator namespace',
+    'odh-operator',
+    'ODH/RHOAI operator',
     true,
-    operatorPods.ready ? 'Ready' : 'NotInstalled',
-    operatorPods.ready ? `opendatahub namespace has ${operatorPods.detail}.` : `opendatahub namespace operator pods are not ready: ${operatorPods.detail}.`,
-    operatorPods.ready ? 'Keep operator pods healthy.' : 'Install ODH/RHOAI Operator or keep native-only mode explicitly labeled.',
-    operatorPods.resources,
+    operatorStatus,
+    operatorPods.count > 0
+      ? `opendatahub namespace has ODH/RHOAI operator evidence: ${operatorPods.detail}.`
+      : dspoOperatorPods.count > 0
+        ? `opendatahub namespace has Data Science Pipelines Operator only (${dspoOperatorPods.detail}); full ODH/RHOAI operator evidence was not found.`
+        : 'opendatahub namespace has no ODH/RHOAI operator evidence.',
+    operatorPods.count > 0 && operatorPods.ready ? 'Keep ODH/RHOAI operator pods healthy.' : 'Install the ODH/RHOAI Operator before claiming full upstream substrate parity.',
+    operatorPods.count > 0 ? operatorPods.resources : dspoOperatorPods.resources,
   ));
 
   const hasDscCrd = await crdInstalled('datascienceclusters.datasciencecluster.opendatahub.io');
@@ -10793,20 +10824,51 @@ async function upstreamParityInventory(req) {
   const kserveCrdsReady = kserveMissing.length === 0;
   const isvcItems = inferenceServices?.items || [];
   const isvcReady = isvcItems.filter((item) => objectReadyCondition(item)?.status === 'True').length;
+  let routeTrafficReady = 0;
+  const routeTrafficDetails = [];
+  const routeTrafficResources = [];
+  if (kserveCrdsReady && isvcItems.length) {
+    for (const isvc of isvcItems) {
+      const namespace = isvc.metadata?.namespace || BACKBONE_CLAIM_NAMESPACE;
+      const name = isvc.metadata?.name || '';
+      const predictor = isvc.status?.components?.predictor || {};
+      const latestReadyRevision = predictor.latestReadyRevision || '';
+      const trafficPercent = (predictor.traffic || []).reduce((sum, item) => sum + Number(item.percent || 0), 0);
+      const ksvcName = predictor.name || `${name}-predictor`;
+      const [ksvc, revision] = await Promise.all([
+        k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/services/${ksvcName}`).catch(() => null),
+        latestReadyRevision
+          ? k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/revisions/${latestReadyRevision}`).catch(() => null)
+          : null,
+      ]);
+      const url = isvc.status?.url || ksvc?.status?.url || '';
+      const routeReady = objectReadyCondition(isvc)?.status === 'True'
+        && objectReadyCondition(ksvc)?.status === 'True'
+        && objectReadyCondition(revision)?.status === 'True'
+        && !!url
+        && trafficPercent === 100;
+      if (routeReady) routeTrafficReady += 1;
+      if (ksvc) routeTrafficResources.push(resourceRefFor(ksvc, 'KnativeService'));
+      if (revision) routeTrafficResources.push(resourceRefFor(revision, 'KnativeRevision'));
+      routeTrafficDetails.push(`${namespace}/${name} route=${!!url} revision=${latestReadyRevision || '-'} revisionReady=${objectReadyCondition(revision)?.status || 'Unknown'} traffic=${trafficPercent}%`);
+    }
+  }
   checks.push(upstreamCheck(
     'kserve-serving',
     'KServe inference',
     true,
-    kserveCrdsReady && kservePods.ready && isvcReady > 0 ? 'Ready' : kserveCrdsReady && kservePods.ready ? 'Warning' : kserveCrdsReady ? 'Warning' : 'NotInstalled',
-    kserveCrdsReady && kservePods.ready && isvcReady > 0
-      ? `KServe CRDs/control plane are ready and ${isvcReady}/${isvcItems.length} InferenceService resource(s) are Ready.`
+    kserveCrdsReady && kservePods.ready && isvcReady > 0 && routeTrafficReady > 0 ? 'Ready' : kserveCrdsReady && kservePods.ready ? 'Warning' : kserveCrdsReady ? 'Warning' : 'NotInstalled',
+    kserveCrdsReady && kservePods.ready && isvcReady > 0 && routeTrafficReady > 0
+      ? `KServe CRDs/control plane are ready; ${isvcReady}/${isvcItems.length} InferenceService resource(s) Ready; ${routeTrafficReady} route/revision/traffic path(s) validated. ${routeTrafficDetails.join('; ')}`
+      : kserveCrdsReady && kservePods.ready && isvcReady > 0
+        ? `KServe has ${isvcReady}/${isvcItems.length} Ready InferenceService resource(s), but route/revision/traffic validation did not pass. ${routeTrafficDetails.join('; ')}`
       : kserveCrdsReady && kservePods.ready
         ? 'KServe CRDs/control plane are ready, but no Ready InferenceService was found.'
         : kserveCrdsReady
           ? `KServe CRDs exist, but control plane readiness is incomplete: ${kservePods.detail}.`
           : `Missing KServe CRD(s): ${kserveMissing.join(', ') || 'unknown'}.`,
-    kserveCrdsReady && kservePods.ready && isvcReady > 0 ? 'Keep storageUri, Route, Revision, and Traffic validation in e2e.' : 'Install KServe and create or repair an upstream InferenceService smoke workload.',
-    [...kservePods.resources, ...isvcItems.map((item) => resourceRefFor(item, 'InferenceService'))],
+    kserveCrdsReady && kservePods.ready && isvcReady > 0 && routeTrafficReady > 0 ? 'Keep storageUri, Route, Revision, and Traffic validation in e2e.' : 'Install KServe and create or repair an upstream InferenceService smoke workload.',
+    [...kservePods.resources, ...isvcItems.map((item) => resourceRefFor(item, 'InferenceService')), ...routeTrafficResources],
   ));
 
   const modelRegistryInstalled = await crdInstalled('modelregistries.modelregistry.opendatahub.io');

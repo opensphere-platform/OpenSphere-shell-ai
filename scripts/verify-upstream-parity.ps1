@@ -75,6 +75,33 @@ function PodsReady([string]$NamespaceName, [string]$LabelSelector = "") {
   }
 }
 
+function MatchingPodsReady([string]$NamespaceName, [string]$Pattern) {
+  $pods = KubeJson @("get", "pods", "-n", $NamespaceName)
+  if (-not $pods -or -not $pods.items) {
+    return @{ Ready = $false; Count = 0; Detail = "no matching pods found" }
+  }
+  $items = @($pods.items | Where-Object {
+    $labelText = if ($_.metadata.labels) { ($_.metadata.labels.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join " " } else { "" }
+    "$($_.metadata.name) $labelText" -match $Pattern
+  })
+  if ($items.Count -lt 1) {
+    return @{ Ready = $false; Count = 0; Detail = "no matching pods found" }
+  }
+  $notReady = @()
+  foreach ($pod in $items) {
+    $phase = [string]$pod.status.phase
+    $readyCondition = @($pod.status.conditions | Where-Object { $_.type -eq "Ready" })[0]
+    if ($phase -ne "Running" -or $readyCondition.status -ne "True") {
+      $notReady += "$($pod.metadata.name):$phase/$($readyCondition.status)"
+    }
+  }
+  return @{
+    Ready = $notReady.Count -eq 0
+    Count = $items.Count
+    Detail = if ($notReady.Count) { $notReady -join ", " } else { "$($items.Count) matching pod(s) ready" }
+  }
+}
+
 function ReadyCondition($Object) {
   if (-not $Object -or -not $Object.status -or -not $Object.status.conditions) {
     return $null
@@ -100,11 +127,14 @@ function AddCheck([System.Collections.Generic.List[object]]$Checks, [string]$Id,
 
 $checks = [System.Collections.Generic.List[object]]::new()
 
-$odhPods = PodsReady $OdhNamespace "app.kubernetes.io/name=data-science-pipelines-operator,pod-template-hash"
-if ($odhPods.Count -gt 0) {
-  AddCheck $checks "odh-namespace" "ODH/RHOAI operator namespace" ($(if ($odhPods.Ready) { "Ready" } else { "Warning" })) "$OdhNamespace namespace has $($odhPods.Detail)." "Keep operator pods healthy."
+$odhOperatorPods = MatchingPodsReady $OdhNamespace "(opendatahub-operator|rhods-operator|redhat-ods-operator)"
+$dspoPods = PodsReady $OdhNamespace "app.kubernetes.io/name=data-science-pipelines-operator,pod-template-hash"
+if ($odhOperatorPods.Count -gt 0) {
+  AddCheck $checks "odh-operator" "ODH/RHOAI operator" ($(if ($odhOperatorPods.Ready) { "Ready" } else { "Warning" })) "$OdhNamespace namespace has ODH/RHOAI operator evidence: $($odhOperatorPods.Detail)." "Keep ODH/RHOAI operator pods healthy."
+} elseif ($dspoPods.Count -gt 0) {
+  AddCheck $checks "odh-operator" "ODH/RHOAI operator" "Warning" "$OdhNamespace namespace has Data Science Pipelines Operator only ($($dspoPods.Detail)); full ODH/RHOAI operator evidence was not found." "Install the ODH/RHOAI Operator before claiming full upstream substrate parity."
 } else {
-  AddCheck $checks "odh-namespace" "ODH/RHOAI operator namespace" "NotInstalled" "$OdhNamespace namespace or operator pods were not found." "Install ODH/RHOAI Operator or document native-only mode."
+  AddCheck $checks "odh-operator" "ODH/RHOAI operator" "NotInstalled" "$OdhNamespace namespace has no ODH/RHOAI operator evidence." "Install ODH/RHOAI Operator or document native-only mode."
 }
 
 $hasDscCrd = HasCrd "datascienceclusters.datasciencecluster.opendatahub.io"

@@ -144,6 +144,8 @@ requirePattern('server DSPA network compatibility', server, /function ensureDspa
 requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
 requirePattern('server upstream parity inventory', server, /async function upstreamParityInventory/);
 requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
+requirePattern('server upstream parity operator precision', server, /namespaceMatchingPodsReady/);
+requireText('server upstream parity operator precision', server, 'Data Science Pipelines Operator only');
 requirePattern('server DSPA PostgreSQL runtime config verification', server, /async function verifyDspaPostgresRuntimeConfig/);
 requirePattern('server Model Registry foundation configure', server, /async function configureModelRegistryFoundation/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
@@ -204,6 +206,8 @@ requireText('package scripts', packageJson, 'test:upstream-parity');
 
 for (const upstreamVerifierText of [
   'DataScienceCluster',
+  'ODH/RHOAI operator',
+  'Data Science Pipelines Operator only',
   'Data Science Pipelines / KFP',
   'Knative Serving',
   'KServe inference',
