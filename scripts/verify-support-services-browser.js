@@ -100,22 +100,22 @@ function supportServicesPayload() {
     upstreamParity: {
       generatedAt,
       phase: 'Partial',
-      summary: { total: 7, ready: 4, warnings: 0, missing: 3, required: 5, requiredMissing: 1 },
+      summary: { total: 7, ready: 3, warnings: 1, missing: 3, required: 5, requiredMissing: 2 },
       checks: [
-        { id: 'odh-namespace', label: 'ODH/RHOAI operator namespace', required: true, status: 'Ready', ready: true, evidence: 'Mock ODH operator pod is ready.', nextAction: 'Keep operator pods healthy.', resources: [] },
+        { id: 'odh-operator', label: 'ODH/RHOAI operator', required: true, status: 'Warning', ready: false, evidence: 'Mock opendatahub namespace has Data Science Pipelines Operator only; full ODH/RHOAI operator evidence was not found.', nextAction: 'Install the ODH/RHOAI Operator before claiming full upstream substrate parity.', resources: [] },
         { id: 'datasciencecluster', label: 'DataScienceCluster', required: true, status: 'NotInstalled', ready: false, evidence: 'DataScienceCluster CRD is not installed.', nextAction: 'Install the ODH/RHOAI Operator and create a DataScienceCluster for full upstream parity.', resources: [] },
         { id: 'dspa-kfp', label: 'Data Science Pipelines / KFP', required: true, status: 'Ready', ready: true, evidence: 'Mock DSPA is ready.', nextAction: 'Keep KFP verified.', resources: [] },
         { id: 'knative-serving', label: 'Knative Serving', required: true, status: 'Ready', ready: true, evidence: 'Mock Knative is ready.', nextAction: 'Run route checks.', resources: [] },
-        { id: 'kserve-serving', label: 'KServe inference', required: true, status: 'Ready', ready: true, evidence: 'Mock KServe is ready.', nextAction: 'Run serving e2e.', resources: [] },
+        { id: 'kserve-serving', label: 'KServe inference', required: true, status: 'Ready', ready: true, evidence: 'Mock KServe route/revision/traffic path validated with traffic=100%.', nextAction: 'Run serving e2e.', resources: [] },
         { id: 'model-registry', label: 'Upstream Model Registry', required: false, status: 'NotInstalled', ready: false, evidence: 'Mock Model Registry is absent.', nextAction: 'Install when parity is required.', resources: [] },
         { id: 'trustyai', label: 'TrustyAI monitoring', required: false, status: 'NotInstalled', ready: false, evidence: 'Mock TrustyAI is absent.', nextAction: 'Install when monitoring is required.', resources: [] },
       ],
     },
     items: [
-      { id: 'backbone', label: 'Console Backbone provider', category: 'Core substrate', required: true, source: 'Backbone', status: 'Ready', usedBy: ['Metadata DB', 'Object storage'], evidence: 'Mock Backbone claim is bound.', nextAction: 'None', resources: [] },
-      { id: 'metadata-store', label: 'Metadata PostgreSQL database', category: 'Metadata', required: true, source: 'Backbone PostgreSQL', status: 'Ready', usedBy: ['KFP metadata', 'Model Registry', 'TrustyAI storage'], evidence: 'Mock PostgreSQL binding is ready.', nextAction: 'None', resources: [] },
-      { id: 'object-storage', label: 'S3-compatible object storage', category: 'Artifacts', required: true, source: 'Backbone RustFS', status: 'Ready', usedBy: ['KServe storageUri', 'KFP artifact store'], evidence: 'Mock RustFS binding is ready.', nextAction: 'None', resources: [] },
-      { id: 'pipelines', label: 'Data Science Pipelines / KFP', category: 'Pipelines', required: true, source: 'ODH/RHOAI or native fallback', status: 'Ready', usedBy: ['PipelineRun', 'Experiments', 'Artifacts'], evidence: 'Mock pipeline runtime is ready.', nextAction: 'None', resources: [] },
+      { id: 'backbone', label: 'Console Backbone provider', category: 'Core substrate', required: true, requiredFor: ['Metadata DB', 'Object storage'], phase: 'Ready', ready: true, installed: true, configured: true, evidence: 'Mock Backbone claim is bound.', nextStep: 'None', resources: [] },
+      { id: 'metadata-store', label: 'Metadata PostgreSQL database', category: 'Metadata', required: true, requiredFor: ['KFP metadata', 'Model Registry', 'TrustyAI storage'], phase: 'Ready', ready: true, installed: true, configured: true, evidence: 'Mock PostgreSQL binding is ready.', nextStep: 'None', resources: [] },
+      { id: 'object-storage', label: 'S3-compatible object storage', category: 'Artifacts', required: true, requiredFor: ['KServe storageUri', 'KFP artifact store'], phase: 'Ready', ready: true, installed: true, configured: true, evidence: 'Mock RustFS binding is ready.', nextStep: 'None', resources: [] },
+      { id: 'pipelines', label: 'Data Science Pipelines / KFP', category: 'Pipelines', required: true, requiredFor: ['PipelineRun', 'Experiments', 'Artifacts'], phase: 'Ready', ready: true, installed: true, configured: true, evidence: 'Mock pipeline runtime is ready.', nextStep: 'None', resources: [] },
     ],
   };
 }
@@ -126,8 +126,8 @@ function foundationPayload() {
     phase: 'Ready',
     summary: { total: 8, ready: 7, configured: 2, required: 6, requiredReady: 6, requiredMissing: 0, optionalReady: 1 },
     items: [
-      { id: 'backbone', label: 'Console Backbone provider', required: true, source: 'Backbone', status: 'Ready', usedBy: ['Metadata DB', 'Object storage'], evidence: 'Mock Backbone provider ready.', nextAction: 'None' },
-      { id: 'pipelines', label: 'Data Science Pipelines / KFP', required: true, source: 'Native fallback', status: 'Ready', usedBy: ['PipelineRun', 'Artifacts'], evidence: 'Mock KFP ready.', nextAction: 'None' },
+      { id: 'backbone', label: 'Console Backbone provider', category: 'Core substrate', required: true, source: 'Backbone', phase: 'Ready', ready: true, available: true, usedBy: ['Metadata DB', 'Object storage'], evidence: 'Mock Backbone provider ready.', action: 'None', resources: [] },
+      { id: 'pipelines', label: 'Data Science Pipelines / KFP', category: 'Pipelines', required: true, source: 'Native fallback', phase: 'Ready', ready: true, available: true, usedBy: ['PipelineRun', 'Artifacts'], evidence: 'Mock KFP ready.', action: 'None', resources: [] },
     ],
     supportServices: supportServicesPayload(),
   };
@@ -159,6 +159,30 @@ function createHarnessServer(port) {
   <script>
     window.__OSP_AI_API_BASE__ = '';
     window.__OSP_NG_API_BASE__ = '';
+    window.__oahFetchLog = [];
+    const __oahOriginalFetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await __oahOriginalFetch(...args);
+      try {
+        const url = String(args[0]);
+        if (url.includes('/admin/native/support-services') || url.includes('/admin/native/foundation-services')) {
+          const body = await response.clone().json();
+          const parity = body.upstreamParity || body.supportServices?.upstreamParity;
+          window.__oahFetchLog.push({
+            url,
+            status: response.status,
+            phase: body.phase,
+            summary: body.summary,
+            upstreamParity: parity ? {
+              phase: parity.phase,
+              summary: parity.summary,
+              checks: (parity.checks || []).map((check) => ({ id: check.id, status: check.status, evidence: check.evidence })),
+            } : undefined,
+          });
+        }
+      } catch {}
+      return response;
+    };
     window.history.replaceState({}, '', '/ai/cluster-settings/support-services');
   </script>
   <link rel="stylesheet" href="/app/styles.css">
@@ -238,10 +262,16 @@ function cdpClient(wsUrl) {
     const ws = new WebSocket(wsUrl);
     let id = 0;
     const pending = new Map();
+    const events = [];
     ws.on('open', () => {
       ws.on('message', (raw) => {
         const message = JSON.parse(String(raw));
-        if (!message.id) return;
+        if (!message.id) {
+          if (message.method === 'Runtime.exceptionThrown' || message.method === 'Log.entryAdded') {
+            events.push(message);
+          }
+          return;
+        }
         const entry = pending.get(message.id);
         if (!entry) return;
         pending.delete(message.id);
@@ -259,6 +289,7 @@ function cdpClient(wsUrl) {
         close() {
           ws.close();
         },
+        events,
       });
     });
     ws.on('error', reject);
@@ -322,10 +353,23 @@ async function waitForRuntime(client, expression, label) {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   const debug = await client.send('Runtime.evaluate', {
-    expression: `({ url: location.href, text: (document.body.innerText || '').slice(0, 1200), html: document.body.innerHTML.slice(0, 1200) })`,
+    expression: `(() => {
+      const tables = [...document.querySelectorAll('table')].map((table) => ({
+        headers: [...table.querySelectorAll('th')].map((cell) => (cell.innerText || '').trim()),
+        rows: [...table.querySelectorAll('tbody tr')].slice(0, 8).map((row) => ({
+          innerText: (row.innerText || '').replace(/\\s+/g, ' ').trim(),
+          textContent: (row.textContent || '').replace(/\\s+/g, ' ').trim(),
+          html: (row.outerHTML || '').replace(/\\s+/g, ' ').trim().slice(0, 600),
+        })),
+      }));
+      return { url: location.href, missing: window.__oahMissingSupportTexts || [], fetchLog: window.__oahFetchLog || [], tables, innerText: (document.body.innerText || '').slice(0, 1600), textContent: (document.body.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 1600), html: document.body.innerHTML.slice(0, 1200) };
+    })()`,
     returnByValue: true,
   }).catch(() => ({ result: { value: {} } }));
-  throw new Error(`${label} did not become true. Last value: ${JSON.stringify(last)} Debug=${JSON.stringify(debug.result.value)}`);
+  throw new Error(`${label} did not become true. Last value: ${JSON.stringify(last)} Debug=${JSON.stringify({
+    ...debug.result.value,
+    browserEvents: (client.events || []).slice(-5),
+  })}`);
 }
 
 async function main() {
@@ -360,6 +404,7 @@ async function main() {
     client = await cdpClient(page.webSocketDebuggerUrl);
     await client.send('Page.enable');
     await client.send('Runtime.enable');
+    await client.send('Log.enable').catch(() => undefined);
 
     await waitForRuntime(client, `Boolean(customElements.get('osp-ai-shell'))`, 'custom element registration');
     await waitForRuntime(client, `Boolean(document.querySelector('osp-ai-shell'))`, 'AI shell element');
@@ -368,6 +413,9 @@ async function main() {
     const requiredTexts = [
       'oah support services',
       'upstream parity inventory',
+      'odh/rhoai operator',
+      'data science pipelines operator only',
+      'traffic=100%',
       'datasciencecluster',
       'prerequisite services',
       'console backbone provider',
@@ -379,12 +427,14 @@ async function main() {
       'object storage bootstrap',
     ];
     await waitForRuntime(client, `(() => {
-      const text = (document.body.innerText || '').toLowerCase();
-      return ${JSON.stringify(requiredTexts)}.every((item) => text.includes(item));
+      const text = ((document.body.innerText || '') + ' ' + (document.body.textContent || '')).toLowerCase();
+      const missing = ${JSON.stringify(requiredTexts)}.filter((item) => !text.includes(item));
+      window.__oahMissingSupportTexts = missing;
+      return missing.length === 0;
     })()`, 'Support services controls');
     const rendered = await client.send('Runtime.evaluate', {
       expression: `(() => {
-        const text = (document.body.innerText || '').toLowerCase();
+        const text = ((document.body.innerText || '') + ' ' + (document.body.textContent || '')).toLowerCase();
         const required = ${JSON.stringify(requiredTexts)};
         const buttons = [...document.querySelectorAll('button')].map((button) => ({
           text: (button.textContent || '').replace(/\\s+/g, ' ').trim(),

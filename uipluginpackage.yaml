@@ -11,7 +11,7 @@ spec:
   serviceAccountName: ai-runtime
   image:
     repository: localhost:5000/ai
-    digest: v199
+    digest: v200
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"

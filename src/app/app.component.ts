@@ -3309,43 +3309,48 @@ function phaseClass(phase: string): string {
                       <span>tracked services</span>
                     </div>
                   </div>
-                  @if (supportServices().upstreamParity; as parity) {
-                    <div class="ai-gpu-config-panel">
+                  <div class="ai-gpu-config-panel" [hidden]="!supportServices().upstreamParity">
                       <div class="ai-section-header">
                         <div>
                           <h3 class="ai-panel-title">Upstream parity inventory</h3>
                           <p class="ai-footnote">Tracks actual ODH/RHOAI, DataScienceCluster, DSPA/KFP, Knative, KServe, Model Registry, and TrustyAI substrate. Native fallback readiness is intentionally reported separately.</p>
                         </div>
                         <div class="ai-action-row">
-                          <span [class]="'label ' + statusClass(parity.phase)">{{ parity.phase }}</span>
-                          <span class="label label-info">{{ parity.summary.ready }}/{{ parity.summary.total }} ready</span>
-                          <span [class]="parity.summary.requiredMissing ? 'label label-warning' : 'label label-success'">{{ parity.summary.requiredMissing }} required missing</span>
+                          <span [class]="'label ' + statusClass(supportServices().upstreamParity?.phase || '')">{{ supportServices().upstreamParity?.phase }}</span>
+                          <span class="label label-info">{{ supportServices().upstreamParity?.summary?.ready || 0 }}/{{ supportServices().upstreamParity?.summary?.total || 0 }} ready</span>
+                          <span [class]="supportServices().upstreamParity?.summary?.requiredMissing ? 'label label-warning' : 'label label-success'">{{ supportServices().upstreamParity?.summary?.requiredMissing || 0 }} required missing</span>
                         </div>
                       </div>
                       <div class="ai-gpu-metric-grid">
                         <div class="ai-gpu-metric">
-                          <strong>{{ parity.summary.ready }}</strong>
+                          <strong>{{ supportServices().upstreamParity?.summary?.ready || 0 }}</strong>
                           <span>ready</span>
                         </div>
                         <div class="ai-gpu-metric">
-                          <strong>{{ parity.summary.warnings }}</strong>
+                          <strong>{{ supportServices().upstreamParity?.summary?.warnings || 0 }}</strong>
                           <span>warnings</span>
                         </div>
                         <div class="ai-gpu-metric">
-                          <strong>{{ parity.summary.missing }}</strong>
+                          <strong>{{ supportServices().upstreamParity?.summary?.missing || 0 }}</strong>
                           <span>missing</span>
                         </div>
                         <div class="ai-gpu-metric">
-                          <strong>{{ parity.summary.requiredMissing }}</strong>
+                          <strong>{{ supportServices().upstreamParity?.summary?.requiredMissing || 0 }}</strong>
                           <span>required missing</span>
                         </div>
                       </div>
+                      <div class="ai-chip-list">
+                        <span [class]="'label ' + statusClass(supportServices().upstreamParity?.checks?.[0]?.status || '')">ODH/RHOAI operator: {{ supportServices().upstreamParity?.checks?.[0]?.status || 'Unknown' }}</span>
+                        <span [class]="'label ' + statusClass(supportServices().upstreamParity?.checks?.[4]?.status || '')">KServe inference: {{ supportServices().upstreamParity?.checks?.[4]?.status || 'Unknown' }}</span>
+                      </div>
+                      <p class="ai-footnote">{{ supportServices().upstreamParity?.checks?.[0]?.evidence }}</p>
+                      <p class="ai-footnote">{{ supportServices().upstreamParity?.checks?.[4]?.evidence }}</p>
                       <table class="table table-compact ai-mini-table">
                         <thead>
                           <tr><th>Upstream substrate</th><th>Required</th><th>Status</th><th>Evidence</th><th>Next action</th></tr>
                         </thead>
                         <tbody>
-                          @for (check of parity.checks; track check.id) {
+                          @for (check of supportServices().upstreamParity?.checks || []; track check.id) {
                             <tr>
                               <td>
                                 <strong>{{ check.label }}</strong>
@@ -3366,7 +3371,6 @@ function phaseClass(phase: string): string {
                         </tbody>
                       </table>
                     </div>
-                  }
                   @if (supportServices().backbone; as backbone) {
                     <div class="ai-gpu-config-panel">
                       <div class="ai-section-header">
