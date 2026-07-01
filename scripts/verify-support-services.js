@@ -208,7 +208,10 @@ for (const browserVerifierText of [
 }
 
 requireText('package scripts', packageJson, 'test:browser-support-services');
+requireText('package scripts', packageJson, 'test:ui');
+requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm run test:contracts && npm run test:ui"/);
 requireText('package scripts', packageJson, 'test:upstream-parity');
+requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
 
 for (const upstreamVerifierText of [
   'DataScienceCluster',
