@@ -183,13 +183,35 @@ if ($IdToken) {
   Write-Output "[support-services-live] authenticated final-readiness skipped; set OAH_ID_TOKEN or pass -IdToken to enable it"
 }
 
-$podJson = kubectl get pods -n $Namespace -l app=$Deployment --field-selector=status.phase=Running -o json | ConvertFrom-Json
-$running = @($podJson.items)
+$podJson = kubectl get pods -n $Namespace -l app=$Deployment -o json | ConvertFrom-Json
+$running = @(
+  $podJson.items |
+    Where-Object {
+      -not $_.metadata.deletionTimestamp -and
+      $_.status.phase -eq "Running" -and
+      @($_.status.containerStatuses | Where-Object { $_.ready }).Count -gt 0
+    } |
+    Sort-Object { [datetime]$_.metadata.creationTimestamp } -Descending
+)
 if ($running.Count -lt 1) {
-  Fail "No running $Deployment pod found."
+  $seenPods = @($podJson.items | ForEach-Object { "$($_.metadata.name):phase=$($_.status.phase):deleting=$([bool]$_.metadata.deletionTimestamp)" }) -join ", "
+  Fail "No active running $Deployment pod found. Seen: $seenPods"
 }
 
-Write-Output "[support-services-live] running pod=$($running[0].metadata.name)"
+$currentPods = @(
+  $running |
+    Where-Object { @($_.spec.containers | Where-Object { $_.image -eq $image }).Count -gt 0 }
+)
+if ($currentPods.Count -lt 1) {
+  $runningPods = @($running | ForEach-Object {
+    $podImages = @($_.spec.containers | ForEach-Object { $_.image }) -join "+"
+    "$($_.metadata.name):images=$podImages"
+  }) -join ", "
+  Fail "No active running $Deployment pod uses deployment image $image. Running: $runningPods"
+}
+
+$podName = $currentPods[0].metadata.name
+Write-Output "[support-services-live] running pod=$podName image=$image"
 
 try {
   $dspa = kubectl get dspa $DspaName -n $Namespace -o json | ConvertFrom-Json
@@ -223,7 +245,6 @@ if ($mlmdReady -ne "1/1") {
   Fail "MLMD deployment is not fully ready."
 }
 
-$podName = $running[0].metadata.name
 $pipelineBackendRaw = kubectl exec -n $Namespace $podName -- wget -qO- http://127.0.0.1:8080/pipelines/backend
 $pipelineBackend = $pipelineBackendRaw | ConvertFrom-Json
 Write-Output "[support-services-live] pipelines phase=$($pipelineBackend.phase) kfpReady=$($pipelineBackend.summary.kfpReady) kfpApiReady=$($pipelineBackend.summary.kfpApiReady) records=$($pipelineBackend.summary.runRecords)"
