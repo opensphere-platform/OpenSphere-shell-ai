@@ -4,6 +4,10 @@ param(
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
   [string]$FinalReadinessApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/final-readiness",
+  [string]$PluginManifest = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.manifest.json",
+  [string]$PluginEntry = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.plugin.js",
+  [string]$PluginAppBundle = "https://console.opensphere.dev/api/plugins/ai/app/main.js",
+  [string]$PluginStyles = "https://console.opensphere.dev/api/plugins/ai/app/styles.css",
   [string]$PackagePath = "uipluginpackage.yaml",
   [string]$DspaName = "oah-dspa",
   [string]$ExpectedMlmdImage = "localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1",
@@ -17,6 +21,21 @@ $ErrorActionPreference = "Stop"
 function Fail([string]$Message) {
   Write-Error "[support-services-live] $Message"
   exit 1
+}
+
+function Get-HttpText([string]$Url, [string]$Label) {
+  $tmp = New-TemporaryFile
+  try {
+    $status = & curl.exe -k -s -o $tmp.FullName -w "%{http_code}" $Url
+    $body = Get-Content -Raw $tmp.FullName
+  } finally {
+    Remove-Item -LiteralPath $tmp.FullName -ErrorAction SilentlyContinue
+  }
+  Write-Host "[support-services-live] $Label status=$status"
+  if ($status -ne "200") {
+    Fail "$Label did not return HTTP 200 from $Url."
+  }
+  return $body
 }
 
 try {
@@ -54,6 +73,44 @@ Write-Output "[support-services-live] route $Route status=$routeStatus"
 if ($routeStatus -ne "200") {
   Fail "Support services route did not return HTTP 200."
 }
+
+$manifestBody = Get-HttpText $PluginManifest "plugin manifest"
+try {
+  $manifest = $manifestBody | ConvertFrom-Json
+} catch {
+  Fail "Plugin manifest did not return valid JSON. $_"
+}
+if ($manifest.id -ne "ai" -or $manifest.entry -ne "ui-shell.plugin.js" -or $manifest.apiBase -ne "/api/plugins/ai") {
+  Fail "Plugin manifest contract is not the expected AI subShell contract."
+}
+
+$pluginEntryBody = Get-HttpText $PluginEntry "plugin entry"
+if ($pluginEntryBody -notmatch "/app/main\.js" -or $pluginEntryBody -notmatch "/app/styles\.css") {
+  Fail "Plugin entry does not inject the AI app bundle and stylesheet."
+}
+
+$pluginStyleStatus = & curl.exe -k -s -o NUL -w "%{http_code}" -I $PluginStyles
+Write-Output "[support-services-live] plugin styles status=$pluginStyleStatus"
+if ($pluginStyleStatus -ne "200") {
+  Fail "Plugin styles did not return HTTP 200."
+}
+
+$pluginAppBundleBody = Get-HttpText $PluginAppBundle "plugin app bundle"
+foreach ($uiText in @(
+  "OAH foundation services",
+  "Backbone-backed service availability",
+  "Configure Backbone foundation",
+  "Apply OAH claim",
+  "Bind issued Secrets",
+  "Preview pipelines foundation",
+  "Metadata credential bootstrap",
+  "Object storage bootstrap"
+)) {
+  if ($pluginAppBundleBody -notmatch [regex]::Escape($uiText)) {
+    Fail "Deployed Support services UI bundle is missing '$uiText'."
+  }
+}
+Write-Output "[support-services-live] deployed UI bundle contains required support-services controls"
 
 $apiBody = & curl.exe -k -s $Api
 Write-Output "[support-services-live] unauthenticated api response=$apiBody"
