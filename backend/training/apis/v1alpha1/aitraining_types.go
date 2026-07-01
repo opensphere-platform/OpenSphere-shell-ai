@@ -116,6 +116,51 @@ type InferenceClaimSpec struct {
 	// Runtime 은 kserve, vllm 같은 serving runtime 이다.
 	// +kubebuilder:validation:Enum=kserve;vllm
 	Runtime string `json:"runtime,omitempty"`
+
+	// Backend selects auto, OpenSphere native fallback, or an upstream serving backend.
+	// +kubebuilder:validation:Enum=auto;opensphere;native;fallback;kubernetes;internal;upstream;kserve
+	Backend string `json:"backend,omitempty"`
+
+	// BackendMode is accepted as an alias for Backend for UI and API compatibility.
+	// +kubebuilder:validation:Enum=auto;opensphere;native;fallback;kubernetes;internal;upstream;kserve
+	BackendMode string `json:"backendMode,omitempty"`
+
+	// BackendType is accepted as an alias for Backend for create forms and automation.
+	// +kubebuilder:validation:Enum=auto;opensphere;native;fallback;kubernetes;internal;upstream;kserve
+	BackendType string `json:"backendType,omitempty"`
+
+	// ModelURI is the model artifact URI used by KServe storageUri.
+	ModelURI string `json:"modelUri,omitempty"`
+
+	// StorageURI is the KServe-compatible alias for ModelURI.
+	StorageURI string `json:"storageUri,omitempty"`
+
+	// ArtifactURI is an alternate model artifact URI accepted by OAH.
+	ArtifactURI string `json:"artifactUri,omitempty"`
+
+	// Source is a compact alias for model artifact URI.
+	Source string `json:"source,omitempty"`
+
+	// ModelFormat is the KServe model format name, such as sklearn or pytorch.
+	ModelFormat string `json:"modelFormat,omitempty"`
+
+	// ServingRuntime points to a KServe ServingRuntime when upstream serving is selected.
+	ServingRuntime string `json:"servingRuntime,omitempty"`
+
+	// RuntimeImage overrides the OpenSphere-native fallback image.
+	RuntimeImage string `json:"runtimeImage,omitempty"`
+
+	// ServingImage is accepted as an alias for RuntimeImage.
+	ServingImage string `json:"servingImage,omitempty"`
+
+	// Image is accepted as a compact runtime image alias.
+	Image string `json:"image,omitempty"`
+
+	// ServiceAccountName is passed to KServe predictor when required for storage credentials.
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// ComputeBackendRef lets OAH route native serving fallback to a registered compute backend.
+	ComputeBackendRef ObjectRef `json:"computeBackendRef,omitempty"`
 }
 
 // ObjectRef 는 OpenSphere CR 참조다.

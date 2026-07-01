@@ -31,6 +31,8 @@ const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-0
 
 for (const endpoint of [
   '/admin/native/support-services',
+  '/admin/native/foundation-services',
+  '/admin/native/foundation-services/configure',
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
@@ -39,6 +41,10 @@ for (const endpoint of [
   '/admin/native/support-services/metadata',
   '/admin/native/support-services/object-storage/preview',
   '/admin/native/support-services/object-storage',
+  '/admin/native/support-services/backbone/claim/preview',
+  '/admin/native/support-services/backbone/claim',
+  '/admin/native/support-services/backbone/bindings/preview',
+  '/admin/native/support-services/backbone/bindings',
 ]) {
   requireText('server support-services API', server, endpoint);
 }
@@ -59,7 +65,13 @@ for (const id of [
 
 for (const uiText of [
   'Console Backbone provider',
+  'OAH foundation services',
+  'Backbone-backed service availability',
+  'Configure Backbone foundation',
   'Use Backbone defaults',
+  'Preview OAH claim',
+  'Apply OAH claim',
+  'Bind issued Secrets',
   'Configuration pages',
   'OpenSphere-native fallback control plane',
   'Prepare native fallback',
@@ -75,7 +87,13 @@ for (const uiText of [
 
 for (const method of [
   'openConfigurationPage',
+  'loadFoundationServices',
+  'configureFoundationServices',
   'applyBackboneDefaults',
+  'previewBackboneClaim',
+  'applyBackboneClaim',
+  'previewBackboneBindings',
+  'applyBackboneBindings',
   'previewServingFoundation',
   'previewPipelinesFoundation',
   'previewModelRegistryFoundation',
@@ -101,6 +119,19 @@ for (const docText of [
 
 requirePattern('Support services documentation', supportDoc, /Deployed image at writing:\s*`localhost:5000\/ai:v\d+`/);
 requirePattern('server backbone inventory', server, /BACKBONE_NAMESPACE\s*=\s*'opensphere-backbone'/);
+requirePattern('server backbone claim contract', server, /BACKBONE_CLAIM_NAME\s*=\s*'ai-hub'/);
+requirePattern('server backbone object store secret', server, /BACKBONE_RUSTFS_SECRET\s*=\s*'ai-hub-backbone-rustfs'/);
+requirePattern('server KServe S3 storage secret', server, /BACKBONE_KSERVE_S3_SECRET\s*=\s*'ai-hub-kserve-s3'/);
+requirePattern('server KServe storage annotation', server, /serving\.kserve\.io\/storageSecretName/);
+requirePattern('server DSPA manifest helper', server, /function backboneDspaManifest/);
+requirePattern('server DSPA apiVersion', server, /datasciencepipelinesapplications\.opendatahub\.io\/v1/);
+requirePattern('server DSPA external storage', server, /externalStorage:\s*\{/);
+requirePattern('server DSPO public kube-rbac-proxy image', server, /quay\.io\/openshift\/origin-kube-rbac-proxy:latest/);
+requirePattern('server DSPO public MLMD envoy image', server, /docker\.io\/envoyproxy\/envoy:v1\.31-latest/);
+requirePattern('server DSPA TLS compatibility', server, /function ensureDspaTlsCompatibility/);
+requirePattern('server DSPA network compatibility', server, /function ensureDspaNetworkCompatibility/);
+requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
+requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
 requirePattern('server backbone response', server, /backbone,\s*\n\s*setupPrerequisites/);
 
 if (!process.exitCode) console.log('[support-services] regression checks passed');

@@ -21,7 +21,7 @@ rules:
     resources: ["nodes", "namespaces", "pods", "pods/log", "services", "configmaps", "events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: ["deployments", "replicasets", "statefulsets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -65,8 +65,14 @@ rules:
   - apiGroups: ["tekton.dev"]
     resources: ["pipelines", "pipelineruns"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["datasciencepipelinesapplications.opendatahub.io"]
+    resources: ["datasciencepipelinesapplications"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["datasciencecluster.opendatahub.io"]
     resources: ["datascienceclusters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["backbone.opensphere.io"]
+    resources: ["backboneclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["ai.opensphere.io"]
     resources:
@@ -127,6 +133,12 @@ rules:
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns"]
     verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["datasciencepipelinesapplications.opendatahub.io"]
+    resources: ["datasciencepipelinesapplications"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "update", "patch", "delete"]
   - apiGroups: ["orchestrator.ai.opensphere.io"]
     resources: ["aiagents", "promptlibraries", "toolclaims", "agenttracepolicies"]
     verbs: ["create", "update", "patch", "delete"]
@@ -180,6 +192,9 @@ rules:
       - "opensphereinstallplans/status"
       - "openspheredatascienceclusters/status"
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["backbone.opensphere.io"]
+    resources: ["backboneclaims"]
+    verbs: ["create", "update", "patch"]
   - apiGroups: ["eval.ai.opensphere.io"]
     resources: ["evaluationpolicies", "evaluationjobs"]
     verbs: ["create", "update", "patch", "delete"]
@@ -203,6 +218,9 @@ rules:
     verbs: ["create", "update", "patch"]
   - apiGroups: ["datasciencecluster.opendatahub.io"]
     resources: ["datascienceclusters"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: ["backbone.opensphere.io"]
+    resources: ["backboneclaims"]
     verbs: ["create", "update", "patch"]
   - apiGroups: ["ai.opensphere.io"]
     resources:
@@ -233,8 +251,38 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["oah-external-gpu-credentials"]
+    resourceNames:
+      - "oah-external-gpu-credentials"
+      - "ai-hub-backbone-postgres"
+      - "ai-hub-backbone-rustfs"
+      - "ai-hub-kserve-s3"
+      - "ds-pipelines-proxy-tls-oah-dspa"
+      - "ds-pipelines-envoy-proxy-tls-oah-dspa"
+      - "opensphere-wildcard-tls"
+      - "shell-service-token"
     verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ai-support-service-writer
+  namespace: opensphere-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - "ai-hub-kserve-s3"
+      - "ds-pipelines-proxy-tls-oah-dspa"
+      - "ds-pipelines-envoy-proxy-tls-oah-dspa"
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames:
+      - "ai-runtime"
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -244,6 +292,20 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: ai-reader
+subjects:
+  - kind: ServiceAccount
+    name: ai-runtime
+    namespace: opensphere-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ai-support-service-writer-system
+  namespace: opensphere-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ai-support-service-writer
 subjects:
   - kind: ServiceAccount
     name: ai-runtime

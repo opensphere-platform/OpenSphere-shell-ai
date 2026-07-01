@@ -8,6 +8,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
+const { Pool: PgPool } = require('pg');
 const COOKIE = 'osng_token'; // 브라우저 WS는 커스텀 헤더를 못 실음 → 신원 토큰을 HttpOnly 쿠키로 전달
 function tokenFromCookie(cookieHeader) {
   if (!cookieHeader) return null;
@@ -228,6 +229,45 @@ const LEARNING_RESOURCES = [
 
 const LEARNING_RESOURCE_CONFIGMAP = 'ai-learning-resources';
 
+const NOTEBOOK_IMAGE_CATALOG = [
+  {
+    name: 'standard-data-science',
+    version: '2026.06',
+    runtime: 'JupyterLab',
+    accelerator: 'CPU/GPU optional',
+    packages: ['python', 'jupyterlab', 'numpy', 'pandas', 'scikit-learn', 'matplotlib'],
+    description: 'Python, JupyterLab, and common data science packages',
+  },
+  {
+    name: 'pytorch-gpu',
+    version: '2.7-cuda',
+    runtime: 'JupyterLab',
+    accelerator: 'NVIDIA CUDA',
+    packages: ['python', 'jupyterlab', 'pytorch', 'torchvision', 'cuda', 'transformers'],
+    description: 'PyTorch image with CUDA-ready dependencies',
+  },
+  {
+    name: 'tensorflow-gpu',
+    version: '2.17-cuda',
+    runtime: 'JupyterLab',
+    accelerator: 'NVIDIA CUDA',
+    packages: ['python', 'jupyterlab', 'tensorflow', 'keras', 'cuda', 'tensorboard'],
+    description: 'TensorFlow image with CUDA-ready dependencies',
+  },
+];
+
+function notebookImageProfile(name) {
+  const key = optionalString(name || 'standard-data-science') || 'standard-data-science';
+  return NOTEBOOK_IMAGE_CATALOG.find((item) => item.name === key) || {
+    name: key,
+    version: 'custom',
+    runtime: 'Custom',
+    accelerator: 'custom',
+    packages: [],
+    description: 'Custom workbench image',
+  };
+}
+
 const FALLBACK_RESOURCES = {
   agents: [
     { name: 'support-rag-agent', kind: 'AIAgent', namespace: 'cmars-dev', phase: 'Ready', ready: true, description: 'RAG assistant with source attribution' },
@@ -242,8 +282,18 @@ const FALLBACK_RESOURCES = {
     { name: 'sandbox-vscode', kind: 'Notebook', namespace: 'sandbox-shared-models', phase: 'Stopped', ready: false, description: 'VS Code workbench template reference' },
   ],
   notebookImages: [
-    { name: 'standard-data-science', kind: 'NotebookImage', namespace: 'opensphere-system', phase: 'Enabled', ready: true, description: 'Python, JupyterLab, and common data science packages' },
-    { name: 'pytorch-gpu', kind: 'NotebookImage', namespace: 'opensphere-system', phase: 'Enabled', ready: true, description: 'PyTorch image with CUDA-ready dependencies' },
+    ...NOTEBOOK_IMAGE_CATALOG.map((image) => ({
+      name: image.name,
+      kind: 'NotebookImage',
+      namespace: 'opensphere-system',
+      phase: 'Enabled',
+      ready: true,
+      description: image.description,
+      version: image.version,
+      runtime: image.runtime,
+      accelerator: image.accelerator,
+      packages: image.packages,
+    })),
   ],
   dataConnections: [
     { name: 'default-object-store', kind: 'DataConnection', namespace: 'cmars-dev', phase: 'Ready', ready: true, description: 'S3-compatible object storage connection metadata' },
@@ -655,15 +705,25 @@ function objectMeta(name, namespace, description) {
 function buildSpec(page, body, namespace) {
   switch (page) {
     case 'workbenches':
-      return {
-        image: body.image || body.notebookImage || body.source || 'standard-data-science',
+      {
+        const image = body.image || body.notebookImage || body.source || 'standard-data-science';
+        const sourceRef = optionalString(body.sourceRef);
+        const gpuClass = optionalString(body.gpuClass);
+        return {
+        image,
+        notebookImage: image,
+        imageProfile: notebookImageProfile(image),
         storage: body.storage || '20Gi',
-        dataConnections: optionalString(body.sourceRef) ? [ref(body.sourceRef, 'DataConnectionClaim', 'ai.opensphere.io/v1alpha1', namespace)] : [],
+        dataConnections: sourceRef ? [ref(sourceRef, 'DataConnectionClaim', 'ai.opensphere.io/v1alpha1', namespace)] : [],
+        connections: sourceRef ? [ref(sourceRef, 'DataConnectionClaim', 'ai.opensphere.io/v1alpha1', namespace)] : [],
         computeBackendRef: computeBackendReference(body, namespace, 'sandbox-gpu-pool'),
+        hardwareProfileRef: gpuClass ? { name: gpuClass } : undefined,
         resources: {
-          gpuClass: optionalString(body.gpuClass),
+          gpuClass,
+          gpuCount: numberOrUndefined(body.gpuCount),
         },
       };
+      }
     case 'data-connections':
       return {
         connectionType: body.sourceType || 'bucket',
@@ -717,6 +777,7 @@ function buildSpec(page, body, namespace) {
         datasetRef: ref(body.datasetRef || 'support-ticket-dataset', 'DatasetClaim', 'ai.opensphere.io/v1alpha1', namespace),
         framework: body.framework || 'transformers',
         trainingMode: body.trainingMode || 'lora',
+        jobType: optionalString(body.jobType),
       };
     case 'model-promotion':
       return {
@@ -752,6 +813,13 @@ function buildSpec(page, body, namespace) {
         runtime: body.runtime || 'kserve',
         backend: body.backendType || body.backend || 'auto',
         computeBackendRef: computeBackendReference(body, namespace, 'sandbox-gpu-pool'),
+        modelUri: optionalString(body.modelUri || body.storageUri || body.artifactUri || body.source),
+        storageUri: optionalString(body.storageUri || body.modelUri || body.artifactUri || body.source),
+        artifactUri: optionalString(body.artifactUri),
+        modelFormat: optionalString(body.modelFormat || 'sklearn') || 'sklearn',
+        servingRuntime: optionalString(body.servingRuntime),
+        runtimeImage: optionalString(body.runtimeImage || body.servingImage || body.image),
+        serviceAccountName: optionalString(body.serviceAccountName),
       };
     case 'pipelines':
       return {
@@ -976,6 +1044,15 @@ async function patchK8s(apiPath, patch, req) {
     _internal: !req,
   };
   return writeK8s(apiPath, 'PATCH', patch, patchReq);
+}
+
+async function patchK8sJson(apiPath, operations, req) {
+  const patchReq = {
+    headers: req?.headers || {},
+    contentType: 'application/json-patch+json',
+    _internal: !req,
+  };
+  return writeK8s(apiPath, 'PATCH', operations, patchReq);
 }
 
 async function tryPatch(paths, patch, req) {
@@ -2031,6 +2108,10 @@ function workbenchResources(claim) {
   };
   const storage = optionalString(spec.storage || spec.storageSize || '10Gi') || '10Gi';
   const image = workbenchImageFor(spec);
+  const imageKey = optionalString(spec.notebookImage || spec.image || spec.runtimeImage || 'standard-data-science') || 'standard-data-science';
+  const dataConnections = Array.isArray(spec.dataConnections || spec.connections)
+    ? (spec.dataConnections || spec.connections).map((item) => `${item.namespace || namespace}/${item.name}`).filter((item) => !item.endsWith('/'))
+    : [];
   const containerPort = Number(spec.port || spec.containerPort || 8080) || 8080;
   const readinessPath = optionalString(spec.readinessPath || spec.healthPath || '/healthz') || '/healthz';
   const command = Array.isArray(spec.command) ? spec.command.map(optionalString).filter(Boolean) : [];
@@ -2071,11 +2152,13 @@ function workbenchResources(claim) {
             ports: [{ name: 'http', containerPort }],
             env: [
               { name: 'OPENSPHERE_WORKBENCH_CLAIM', value: claim.metadata?.name || '' },
+              { name: 'OPENSPHERE_WORKBENCH_IMAGE_KEY', value: imageKey },
               { name: 'OPENSPHERE_WORKSPACE_PATH', value: '/workspace' },
               { name: 'OPENSPHERE_COMPUTE_BACKEND_NAME', value: compute.name },
               { name: 'OPENSPHERE_COMPUTE_BACKEND_NAMESPACE', value: compute.namespace },
               { name: 'OPENSPHERE_GPU_CLASS', value: compute.gpuClass },
               { name: 'OPENSPHERE_GPU_COUNT', value: String(compute.gpuCount || '') },
+              { name: 'OPENSPHERE_DATA_CONNECTIONS', value: dataConnections.join(',') },
               ...extraEnv,
             ],
             ...(compute.k8sGpuResource && compute.gpuCount > 0 ? {
@@ -2349,7 +2432,11 @@ async function kfpBackendInfo(namespace) {
         apiVersion: item.apiVersion || 'datasciencepipelinesapplications.opendatahub.io/v1',
         name: item.metadata?.name || 'default-dspa',
         namespace: item.metadata?.namespace || namespace,
-        endpoint: item.status?.apiServerRoute || item.status?.url || item.status?.externalUrl || item.spec?.apiServer?.deploy || '',
+        endpoint: item.status?.components?.apiServer?.externalUrl !== 'https://'
+          ? item.status?.components?.apiServer?.externalUrl
+          : '',
+        internalEndpoint: item.status?.components?.apiServer?.url || '',
+        apiEndpoint: `http://ds-pipeline-${item.metadata?.name || 'default-dspa'}.${item.metadata?.namespace || namespace}.svc.cluster.local:8888`,
         conditions,
       };
     }
@@ -2366,23 +2453,165 @@ async function kfpBackendInfo(namespace) {
       name: 'detected-kfp-backend',
       namespace,
       endpoint: '',
+      internalEndpoint: '',
+      apiEndpoint: '',
       conditions: [],
     };
   }
-  return { ready: false, kind: '', apiVersion: '', name: '', namespace, endpoint: '', conditions: [] };
+  return { ready: false, kind: '', apiVersion: '', name: '', namespace, endpoint: '', internalEndpoint: '', apiEndpoint: '', conditions: [] };
 }
 
 function kfpRunIdForClaim(claim) {
   return `kfp-${shortHash(`${claim.metadata?.namespace || 'default'}/${claim.metadata?.name || 'run'}/${claim.metadata?.uid || ''}`)}`;
 }
 
-async function kfpRunRecordForClaim(claim, resources, info) {
+function kfpApiBase(info) {
+  return String(info.apiEndpoint || info.internalEndpoint || info.endpoint || '').replace(/\/+$/, '');
+}
+
+async function probeKfpApi(info) {
+  const probes = [
+    { path: '/apis/v1beta1/healthz', success: 'Kubeflow Pipelines API health endpoint is reachable.' },
+    { path: '/apis/v2beta1/experiments', success: 'Kubeflow Pipelines experiments API is reachable.' },
+    { path: '/apis/v2beta1/pipelines', success: 'Kubeflow Pipelines pipelines API is reachable.' },
+    { path: '/apis/v2beta1/runs', success: 'Kubeflow Pipelines runs API is reachable.' },
+  ];
+  let lastError = null;
+  for (const probe of probes) {
+    try {
+      await kfpFetchJson(info, probe.path, { timeoutMs: 2500 });
+      return { attempted: true, ready: true, path: probe.path, message: probe.success };
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  return {
+    attempted: true,
+    ready: false,
+    path: probes[probes.length - 1].path,
+    message: lastError?.msg || lastError?.message || String(lastError || 'Kubeflow Pipelines API probe failed.'),
+  };
+}
+
+async function kfpFetchJson(info, pathName, options = {}) {
+  const base = kfpApiBase(info);
+  if (!base) throw { code: 409, msg: 'Kubeflow Pipelines API endpoint is not available from DSPA status.' };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 10000);
+  try {
+    const r = await fetch(`${base}${pathName}`, {
+      method: options.method || 'GET',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await r.text();
+    let data = {};
+    if (text) {
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    }
+    if (!r.ok) {
+      const message = data?.message || data?.error || data?.raw || `KFP API HTTP ${r.status}`;
+      throw { code: r.status, msg: message, data };
+    }
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') throw { code: 504, msg: 'Timed out while calling Kubeflow Pipelines API.' };
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function kfpRecordName(resources) {
+  return `${resources.name}-kfp-record`;
+}
+
+async function existingKfpRunRecord(resources) {
+  return k8sJson(`/api/v1/namespaces/${resources.namespace}/configmaps/${kfpRecordName(resources)}`);
+}
+
+function normalizeKfpExperimentId(experiment) {
+  return experiment?.experiment_id || experiment?.id || '';
+}
+
+async function kfpDefaultExperiment(info, preferredName) {
+  const preferred = optionalString(preferredName || '');
+  const result = await kfpFetchJson(info, '/apis/v2beta1/experiments?page_size=100').catch(async () => (
+    kfpFetchJson(info, '/apis/v1beta1/experiments?page_size=100')
+  ));
+  const experiments = result?.experiments || [];
+  const match = experiments.find((experiment) => (
+    preferred
+    && [experiment.display_name, experiment.name].filter(Boolean).some((name) => name === preferred)
+  ));
+  const selected = match
+    || experiments.find((experiment) => [experiment.display_name, experiment.name].includes('Default'))
+    || experiments[0];
+  return normalizeKfpExperimentId(selected);
+}
+
+function kfpPipelineVersionReferenceFromSpec(spec) {
+  const ref = spec.pipelineVersionReference || spec.kfpPipelineVersionReference || {};
+  const pipelineId = optionalString(ref.pipeline_id || ref.pipelineId || spec.pipelineId || spec.kfpPipelineId);
+  const pipelineVersionId = optionalString(ref.pipeline_version_id || ref.pipelineVersionId || spec.pipelineVersionId || spec.kfpPipelineVersionId);
+  return pipelineId && pipelineVersionId ? { pipeline_id: pipelineId, pipeline_version_id: pipelineVersionId } : null;
+}
+
+async function kfpPipelineVersionReference(info, claim, resources) {
+  const spec = claim.spec || {};
+  const explicit = kfpPipelineVersionReferenceFromSpec(spec);
+  if (explicit) return { reference: explicit, version: null, matchedBy: 'spec' };
+
+  const pipelines = await kfpFetchJson(info, '/apis/v2beta1/pipelines?page_size=100');
+  const pipelineItems = pipelines?.pipelines || [];
+  const wanted = optionalString(resources.pipelineName || spec.pipelineRef?.name || spec.pipeline || '');
+  const selectedPipeline = pipelineItems.find((pipeline) => (
+    wanted
+    && [pipeline.display_name, pipeline.name, pipeline.pipeline_id].filter(Boolean).some((value) => value === wanted)
+  )) || pipelineItems[0];
+  const pipelineId = selectedPipeline?.pipeline_id;
+  if (!pipelineId) throw { code: 409, msg: 'Kubeflow Pipelines has no registered pipeline. Upload or seed a pipeline before creating a run.' };
+
+  const versions = await kfpFetchJson(info, `/apis/v2beta1/pipelines/${encodeURIComponent(pipelineId)}/versions?page_size=100`);
+  const versionItems = versions?.pipeline_versions || [];
+  const wantedVersion = optionalString(spec.pipelineVersion || spec.version || spec.pipelineVersionRef?.name || '');
+  const selectedVersion = versionItems.find((version) => (
+    wantedVersion
+    && [version.display_name, version.name, version.pipeline_version_id].filter(Boolean).some((value) => value === wantedVersion)
+  )) || versionItems[0];
+  const pipelineVersionId = selectedVersion?.pipeline_version_id;
+  if (!pipelineVersionId) throw { code: 409, msg: `Kubeflow pipeline ${pipelineId} has no registered version.` };
+  return {
+    reference: { pipeline_id: pipelineId, pipeline_version_id: pipelineVersionId },
+    version: selectedVersion,
+    pipeline: selectedPipeline,
+    matchedBy: selectedPipeline === pipelineItems[0] && wanted ? 'first-available' : 'pipeline-name',
+  };
+}
+
+function kfpRuntimeParameters(parameters, version) {
+  const declared = version?.pipeline_spec?.root?.inputDefinitions?.parameters;
+  if (!declared || !Object.keys(declared).length) return parameters || {};
+  const filtered = {};
+  for (const [name, value] of Object.entries(parameters || {})) {
+    if (Object.prototype.hasOwnProperty.call(declared, name)) filtered[name] = value;
+  }
+  return filtered;
+}
+
+async function kfpRunStatus(info, runId) {
+  if (!runId) return null;
+  return kfpFetchJson(info, `/apis/v2beta1/runs/${encodeURIComponent(runId)}`).catch(() => null);
+}
+
+async function upsertKfpRunRecord(claim, resources, info, data) {
   const spec = claim.spec || {};
   const record = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
     metadata: {
-      name: `${resources.name}-kfp-record`,
+      name: kfpRecordName(resources),
       namespace: resources.namespace,
       labels: {
         'app.kubernetes.io/part-of': 'opensphere-ai',
@@ -2392,12 +2621,17 @@ async function kfpRunRecordForClaim(claim, resources, info) {
       ownerReferences: ownerRefFor(claim),
     },
     data: {
-      runId: kfpRunIdForClaim(claim),
+      runId: data.runId || '',
       pipelineName: resources.pipelineName,
       parameters: JSON.stringify(resources.parameters || {}),
       experiment: spec.experimentRef?.name || spec.experiment || 'default',
+      experimentId: data.experimentId || '',
+      pipelineId: data.pipelineId || '',
+      pipelineVersionId: data.pipelineVersionId || '',
+      kfpState: data.kfpState || '',
       backend: JSON.stringify(info),
-      submittedAt: new Date().toISOString(),
+      submittedAt: data.submittedAt || new Date().toISOString(),
+      lastObservedAt: new Date().toISOString(),
     },
   };
   await upsertK8s(
@@ -2410,21 +2644,115 @@ async function kfpRunRecordForClaim(claim, resources, info) {
   return record;
 }
 
-function normalizeKfpPipelineRunStatus(record, info) {
+async function kfpRunRecordForClaim(claim, resources, info) {
+  const existing = await existingKfpRunRecord(resources);
+  const existingRunId = optionalString(existing?.data?.runId || claim.status?.kfpRunId || '');
+  if (existingRunId) {
+    const run = await kfpRunStatus(info, existingRunId);
+    if (run) {
+      return {
+        record: await upsertKfpRunRecord(claim, resources, info, {
+          runId: existingRunId,
+          experimentId: existing?.data?.experimentId || run.experiment_id || '',
+          pipelineId: existing?.data?.pipelineId || run.pipeline_version_reference?.pipeline_id || '',
+          pipelineVersionId: existing?.data?.pipelineVersionId || run.pipeline_version_reference?.pipeline_version_id || '',
+          kfpState: run.state || existing?.data?.kfpState || '',
+          submittedAt: existing?.data?.submittedAt,
+        }),
+        run,
+      };
+    }
+  }
+
+  const spec = claim.spec || {};
+  const experimentId = await kfpDefaultExperiment(info, spec.experimentRef?.name || spec.experiment);
+  const selectedVersion = await kfpPipelineVersionReference(info, claim, resources);
+  const runtimeParameters = kfpRuntimeParameters(resources.parameters || {}, selectedVersion.version);
+  const body = {
+    display_name: claim.metadata?.name || resources.name,
+    description: optionalString(spec.description || `OpenSphere PipelineRunClaim ${resources.namespace}/${claim.metadata?.name || resources.name}`),
+    pipeline_version_reference: selectedVersion.reference,
+    runtime_config: { parameters: runtimeParameters },
+  };
+  if (experimentId) body.experiment_id = experimentId;
+  const run = await kfpFetchJson(info, '/apis/v2beta1/runs', { method: 'POST', body });
+  const runId = run.run_id || kfpRunIdForClaim(claim);
+  return {
+    record: await upsertKfpRunRecord(claim, resources, info, {
+      runId,
+      experimentId: run.experiment_id || experimentId,
+      pipelineId: selectedVersion.reference.pipeline_id,
+      pipelineVersionId: selectedVersion.reference.pipeline_version_id,
+      kfpState: run.state || '',
+    }),
+    run,
+  };
+}
+
+function normalizeKfpPipelineRunStatus(record, info, run) {
+  const state = optionalString(run?.state || record.data.kfpState || 'PENDING');
+  const phaseByState = {
+    PENDING: 'Pending',
+    RUNNING: 'Running',
+    SUCCEEDED: 'Succeeded',
+    FAILED: 'Failed',
+    CANCELING: 'Canceling',
+    CANCELED: 'Canceled',
+    PAUSED: 'Paused',
+    SKIPPED: 'Skipped',
+  };
+  const phase = phaseByState[state] || 'Submitted';
+  const ready = ['SUCCEEDED'].includes(state);
+  const failed = ['FAILED', 'CANCELED'].includes(state);
   return normalizedStatus({
-    phase: 'Submitted',
-    ready: false,
-    reason: 'KubeflowPipelineRunSubmitted',
-    message: info.endpoint
-      ? `Kubeflow Pipelines run ${record.data.runId} submitted through ${info.endpoint}.`
-      : `Kubeflow Pipelines run ${record.data.runId} submitted to ${info.kind}.`,
+    phase,
+    ready,
+    reason: failed ? `KubeflowPipelineRun${phase}` : ready ? 'KubeflowPipelineRunSucceeded' : `KubeflowPipelineRun${phase}`,
+    message: `Kubeflow Pipelines run ${record.data.runId} is ${phase}.`,
     upstreamConditions: info.conditions,
     extra: {
       kfpRunId: record.data.runId,
       kfpExperiment: record.data.experiment,
+      kfpExperimentId: record.data.experimentId,
+      kfpPipelineId: record.data.pipelineId,
+      kfpPipelineVersionId: record.data.pipelineVersionId,
+      kfpState: state,
       kfpApplication: info.name,
-      kfpEndpoint: info.endpoint,
+      kfpEndpoint: info.endpoint || info.internalEndpoint || info.apiEndpoint,
     },
+  });
+}
+
+function terminalKfpStatusFromClaim(claim, resources) {
+  const status = claim.status || {};
+  if (status.kfpState !== 'SUCCEEDED' || !status.kfpRunId) return null;
+  return resetRetryFields({
+    jobName: resources.name,
+    pipelineName: resources.pipelineName,
+    parameters: resources.parameters,
+    backendMode: status.backendMode || 'upstream',
+    backendRequested: status.backendRequested || 'upstream',
+    backendPhase: status.backendPhase || 'UpstreamReady',
+    backendMessage: status.backendMessage || 'Pipeline runtime can use upstream backend.',
+    backendType: status.backendType || 'kubeflow-pipelines',
+    backendResource: status.backendResource || '',
+    observedGeneration: claim.metadata?.generation || 0,
+    lastReconciledAt: new Date().toISOString(),
+    phase: 'Succeeded',
+    ready: true,
+    reason: 'KubeflowPipelineRunSucceeded',
+    message: `Kubeflow Pipelines run ${status.kfpRunId} is Succeeded.`,
+    normalizedAt: new Date().toISOString(),
+    conditions: [readyCondition(true, 'KubeflowPipelineRunSucceeded', `Kubeflow Pipelines run ${status.kfpRunId} is Succeeded.`)],
+    upstreamConditions: status.upstreamConditions || [],
+    kfpRunId: status.kfpRunId,
+    kfpExperiment: status.kfpExperiment || '',
+    kfpExperimentId: status.kfpExperimentId || '',
+    kfpPipelineId: status.kfpPipelineId || '',
+    kfpPipelineVersionId: status.kfpPipelineVersionId || '',
+    kfpState: 'SUCCEEDED',
+    kfpApplication: status.kfpApplication || '',
+    kfpEndpoint: status.kfpEndpoint || '',
   });
 }
 
@@ -2479,6 +2807,11 @@ async function reconcilePipelineRunClaim(claim) {
   const cleanup = await cleanupClaimResources(claim, 'pipelinerunclaims', cleanupPipelineRunResources);
   if (cleanup) return cleanup;
   await ensureClaimFinalizer(claim, 'pipelinerunclaims');
+  const terminalKfpStatus = terminalKfpStatusFromClaim(claim, resources);
+  if (terminalKfpStatus) {
+    await patchPipelineRunStatus(claim, terminalKfpStatus);
+    return { name: claim.metadata?.name, namespace, jobName: name, backend: 'kubeflow-pipelines', phase: 'Succeeded' };
+  }
   if (pendingRetryMs(claim) > 0) return retryingResult(claim, name);
   const backend = await selectBackend('pipelines', claim.spec || {});
   const baseStatus = {
@@ -2502,8 +2835,8 @@ async function reconcilePipelineRunClaim(claim) {
         if (!kfpInfo.ready) {
           if (preferKfp) throw { code: 409, msg: 'Kubeflow Pipelines backend requested but no DataSciencePipelinesApplication or Kubeflow Pipelines API was found.' };
         } else {
-          const record = await kfpRunRecordForClaim(claim, resources, kfpInfo);
-          const normalized = normalizeKfpPipelineRunStatus(record, kfpInfo);
+          const { record, run } = await kfpRunRecordForClaim(claim, resources, kfpInfo);
+          const normalized = normalizeKfpPipelineRunStatus(record, kfpInfo, run);
           await patchPipelineRunStatus(claim, resetRetryFields({
             ...baseStatus,
             backendMode: 'upstream',
@@ -2650,7 +2983,9 @@ function kserveInferenceServiceForClaim(claim, resources) {
   const spec = claim.spec || {};
   const modelUri = optionalString(spec.modelUri || spec.storageUri || spec.artifactUri || spec.sourceRef || spec.source);
   const modelFormat = optionalString(spec.modelFormat || spec.format || 'sklearn') || 'sklearn';
-  const runtime = optionalString(spec.servingRuntime || spec.runtime);
+  const runtime = optionalString(spec.servingRuntime);
+  const storageSecretName = optionalString(spec.storageSecretName || spec.kserveStorageSecretName)
+    || (modelUri.startsWith('s3://') ? BACKBONE_KSERVE_S3_SECRET : '');
   const predictor = {
     model: {
       modelFormat: { name: modelFormat },
@@ -2669,6 +3004,7 @@ function kserveInferenceServiceForClaim(claim, resources) {
       ownerReferences: ownerRefFor(claim),
       annotations: {
         'ai.opensphere.io/inference-claim': claim.metadata?.name || '',
+        ...(storageSecretName ? { 'serving.kserve.io/storageSecretName': storageSecretName } : {}),
       },
     },
     spec: { predictor },
@@ -2751,11 +3087,15 @@ async function reconcileInferenceClaim(claim) {
         if (backend.requested === 'upstream') throw { code: 400, msg: 'KServe upstream backend requires spec.modelUri, spec.storageUri, spec.artifactUri, spec.sourceRef, or spec.source' };
       } else {
         const inferenceService = kserveInferenceServiceForClaim(claim, resources);
+        const inferenceServicePatchSpec = JSON.parse(JSON.stringify(inferenceService.spec));
+        if (!inferenceServicePatchSpec.predictor?.model?.runtime) {
+          inferenceServicePatchSpec.predictor.model.runtime = null;
+        }
         await upsertK8s(
           `/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices`,
           `/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices/${name}`,
           inferenceService,
-          { metadata: { labels: inferenceService.metadata.labels, annotations: inferenceService.metadata.annotations }, spec: inferenceService.spec },
+          { metadata: { labels: inferenceService.metadata.labels, annotations: inferenceService.metadata.annotations }, spec: inferenceServicePatchSpec },
           null,
         );
         const current = await k8sJson(`/apis/serving.kserve.io/v1beta1/namespaces/${namespace}/inferenceservices/${name}`);
@@ -2880,6 +3220,181 @@ async function createAction(req) {
   return { created: itemFromK8s(created, def.kind), raw: created, routedBackend: routed.routedBackend };
 }
 
+async function launchWorkbench(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  if (!(await crdInstalled('workbenchclaims.ai.opensphere.io'))) {
+    throw { code: 409, msg: 'WorkbenchClaim CRD is not installed', details: { crdName: 'workbenchclaims.ai.opensphere.io' } };
+  }
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const name = requireDnsName(body.name || 'oah-jupyter-lab', 'name');
+  const routed = await applyComputeRoutingDefaults('workbenches', {
+    name,
+    namespace,
+    source: body.image || body.notebookImage || 'standard-data-science',
+    sourceRef: body.sourceRef || '',
+    computeBackendRef: body.computeBackendRef || '',
+    gpuClass: body.gpuClass || '',
+    storage: body.storage || '20Gi',
+  }, namespace);
+  const metadata = objectMeta(name, namespace, 'JupyterLab-compatible OpenSphere AI Hub workbench.');
+  if (routed.routedBackend) {
+    metadata.annotations = {
+      ...(metadata.annotations || {}),
+      'opensphere.io/compute-routing-workload': workloadIdForCreatePage('workbenches'),
+      'opensphere.io/compute-routing-backend': routed.routedBackend.key,
+      'opensphere.io/compute-routing-applied-at': new Date().toISOString(),
+    };
+  }
+  const claim = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'WorkbenchClaim',
+    metadata,
+    spec: {
+      ...buildSpec('workbenches', routed.body, namespace),
+      runtime: 'jupyterlab',
+      port: Number(body.port || 8080) || 8080,
+      readinessPath: optionalString(body.readinessPath || '/healthz') || '/healthz',
+      stopped: false,
+      suspended: false,
+    },
+  };
+  const raw = await upsertK8s(
+    `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/workbenchclaims`,
+    `/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/workbenchclaims/${name}`,
+    claim,
+    { metadata: { labels: claim.metadata.labels, annotations: claim.metadata.annotations }, spec: claim.spec },
+    req,
+  );
+  const reconcile = await reconcileWorkbenchClaim(raw);
+  return { phase: reconcile.phase || 'Requested', claim: itemFromK8s(raw, 'WorkbenchClaim'), reconcile, routedBackend: routed.routedBackend };
+}
+
+async function upsertLifecycleResource(page, body, req) {
+  const def = ACTIONS[page];
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const name = requireDnsName(body.name, 'name');
+  if (!(await crdInstalled(def.crdName))) {
+    return { page, name, namespace, phase: 'SkippedCrdMissing', reason: 'CrdMissing', message: `${def.crdName} is not installed.` };
+  }
+  const obj = {
+    apiVersion: def.apiVersion,
+    kind: def.kind,
+    metadata: objectMeta(name, namespace, body.description || ''),
+    spec: buildSpec(page, body, namespace),
+  };
+  const raw = await upsertK8s(
+    `/apis/${def.group}/v1alpha1/namespaces/${namespace}/${def.plural}`,
+    `/apis/${def.group}/v1alpha1/namespaces/${namespace}/${def.plural}/${name}`,
+    obj,
+    { metadata: { labels: obj.metadata.labels, annotations: obj.metadata.annotations }, spec: obj.spec },
+    req,
+  );
+  return { page, name, namespace, kind: def.kind, phase: 'Applied', item: itemFromK8s(raw, def.kind), raw };
+}
+
+async function trainingLifecycleRun(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const baseName = requireDnsName(body.name || 'oah-train-registry-serve', 'name');
+  const version = optionalString(body.version || new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 12)) || '0.1.0';
+  const modelName = requireDnsName(body.modelName || baseName, 'modelName');
+  const artifactUri = optionalString(body.artifactUri || `s3://ai-hub/models/${modelName}/${version}`) || `s3://ai-hub/models/${modelName}/${version}`;
+  const steps = [];
+  const training = await upsertLifecycleResource('training-jobs', {
+    ...body,
+    namespace,
+    name: `${baseName}-train`,
+    datasetRef: body.datasetRef || 'support-ticket-dataset',
+    framework: body.framework || 'smoke',
+    trainingMode: body.trainingMode || 'smoke',
+    jobType: body.jobType || 'smoke',
+  }, req);
+  if (training.raw) {
+    try {
+      training.reconcile = await reconcileTrainingJobClaim(PASSIVE_RECONCILE_TARGETS.find((target) => target.kind === 'TrainingJobClaim'), training.raw);
+      training.phase = training.reconcile.phase || training.phase;
+    } catch (e) {
+      training.phase = 'AppliedWithReconcileError';
+      training.error = e.msg || String(e);
+    }
+  }
+  steps.push(training);
+
+  const registryBackend = await modelRegistryBackend(namespace, { backend: body.backendType || 'opensphere' });
+  const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+  const registrySource = current.source || registryBackend.source;
+  const versionRecord = {
+    name: modelName,
+    version,
+    stage: 'candidate',
+    source: `${namespace}/${training.name}`,
+    artifactUri,
+    backend: registrySource.type,
+    registry: `${registrySource.namespace}/${registrySource.name}`,
+    trainingJobRef: training.name,
+    registeredAt: new Date().toISOString(),
+  };
+  const savedRegistry = await saveModelRegistryState({
+    ...current,
+    versions: [...current.versions.filter((item) => !(item.name === modelName && item.version === version)), versionRecord],
+  }, req, registrySource);
+  steps.push({ page: 'model-registry', name: modelName, version, namespace, phase: savedRegistry.pgSync?.synced === false ? 'RegisteredWithFallback' : 'Registered', item: versionRecord, pgSync: savedRegistry.pgSync, upstreamSync: savedRegistry.upstreamSync });
+
+  const promotion = await upsertLifecycleResource('model-promotion', {
+    namespace,
+    name: `${baseName}-promote`,
+    modelRef: `${baseName}-train`,
+    version,
+    stage: body.stage || 'production',
+    approved: true,
+  }, req);
+  if (promotion.raw) {
+    promotion.raw.spec = { ...(promotion.raw.spec || {}), version, approved: true, modelName };
+    await patchK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/modelpromotionclaims/${promotion.name}`, { spec: promotion.raw.spec }, req);
+    const patched = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/modelpromotionclaims/${promotion.name}`);
+    try {
+      promotion.reconcile = await reconcileModelPromotionClaim(patched || promotion.raw);
+      promotion.phase = promotion.reconcile.phase || promotion.phase;
+    } catch (e) {
+      promotion.phase = 'AppliedWithReconcileError';
+      promotion.error = e.msg || String(e);
+    }
+  }
+  steps.push(promotion);
+
+  const inference = await upsertLifecycleResource('inference', {
+    ...body,
+    namespace,
+    name: `${baseName}-serve`,
+    modelRef: `${baseName}-train`,
+    promotionRef: `${baseName}-promote`,
+    runtime: body.runtime || 'kserve',
+    storageUri: artifactUri,
+    artifactUri,
+    modelFormat: body.modelFormat || 'sklearn',
+    serviceAccountName: body.serviceAccountName || OAH_RUNTIME_SERVICE_ACCOUNT,
+  }, req);
+  if (inference.raw) {
+    try {
+      inference.reconcile = await reconcileInferenceClaim(inference.raw);
+      inference.phase = inference.reconcile.phase || inference.phase;
+    } catch (e) {
+      inference.phase = 'AppliedWithReconcileError';
+      inference.error = e.msg || String(e);
+    }
+  }
+  steps.push(inference);
+
+  return {
+    phase: steps.some((step) => /error|failed|missing/i.test(step.phase || '')) ? 'CompletedWithWarnings' : 'Completed',
+    namespace,
+    modelName,
+    version,
+    artifactUri,
+    steps,
+  };
+}
+
 async function deleteAction(req) {
   const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
   const kindDef = body.kind ? ACTION_BY_KIND[body.kind] : null;
@@ -2970,6 +3485,28 @@ function workbenchRuntimeNameFrom(name, raw) {
   return raw?.status?.runtimeName || raw?.status?.serviceName || runtimeNameForClaim({ metadata: { name } });
 }
 
+function workbenchConnectionRefs(spec, namespace) {
+  const raw = Array.isArray(spec?.dataConnections) ? spec.dataConnections : Array.isArray(spec?.connections) ? spec.connections : [];
+  return raw
+    .map((item) => ({
+      name: optionalString(item?.name),
+      namespace: optionalString(item?.namespace || namespace) || namespace,
+      kind: optionalString(item?.kind || 'DataConnectionClaim') || 'DataConnectionClaim',
+      apiVersion: optionalString(item?.apiVersion || 'ai.opensphere.io/v1alpha1') || 'ai.opensphere.io/v1alpha1',
+    }))
+    .filter((item) => item.name);
+}
+
+async function workbenchConnectionSummaries(spec, namespace) {
+  const refs = workbenchConnectionRefs(spec, namespace);
+  return Promise.all(refs.map(async (item) => {
+    const raw = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${item.namespace}/dataconnectionclaims/${item.name}`);
+    if (!raw) return { ...item, phase: 'Missing', ready: false, message: 'DataConnectionClaim was not found.' };
+    const summary = itemFromK8s(raw, 'DataConnectionClaim');
+    return { ...item, phase: summary.phase, ready: summary.ready, source: summary.source, message: summary.message || summary.description };
+  }));
+}
+
 function inferenceRuntimeNameFrom(name, raw) {
   return raw?.status?.runtimeName || raw?.status?.serviceName || inferenceRuntimeNameForClaim({ metadata: { name } });
 }
@@ -2983,6 +3520,82 @@ function compactK8sObject(obj, fallbackKind) {
     phase: obj.status?.phase || obj.status?.conditions?.find((c) => c.type === 'Ready')?.reason || '',
     ready: obj.status?.readyReplicas > 0 || obj.status?.availableReplicas > 0 || obj.status?.phase === 'Running' || obj.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') || false,
     message: obj.status?.conditions?.find((c) => c.message)?.message || '',
+  };
+}
+
+function compactKnativeRevision(obj) {
+  if (!obj) return null;
+  const containers = obj.spec?.containers || [];
+  return {
+    name: obj.metadata?.name || '',
+    namespace: obj.metadata?.namespace || '',
+    kind: obj.kind || 'Revision',
+    phase: obj.status?.conditions?.find((c) => c.type === 'Ready')?.reason || (obj.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') ? 'Ready' : 'Pending'),
+    ready: obj.status?.conditions?.some((c) => c.type === 'Ready' && c.status === 'True') || false,
+    message: obj.status?.conditions?.find((c) => c.message)?.message || '',
+    generation: obj.metadata?.labels?.['serving.knative.dev/configurationGeneration'] || '',
+    routingState: obj.metadata?.labels?.['serving.knative.dev/routingState'] || '',
+    actualReplicas: obj.status?.actualReplicas ?? '',
+    desiredReplicas: obj.status?.desiredReplicas ?? '',
+    image: containers[0]?.image || '',
+    createdAt: obj.metadata?.creationTimestamp || '',
+  };
+}
+
+function compactTrafficTarget(target) {
+  return {
+    tag: optionalString(target.tag || ''),
+    revisionName: optionalString(target.revisionName || target.latestReadyRevisionName || ''),
+    latestRevision: !!target.latestRevision,
+    percent: target.percent ?? '',
+    url: optionalString(target.url || ''),
+  };
+}
+
+async function kserveOperationalDetail(namespace, runtimeName, inferenceService) {
+  if (!inferenceService) return null;
+  const predictor = inferenceService.status?.components?.predictor || {};
+  const predictorName = optionalString(predictor.name || predictor.routeName || `${runtimeName}-predictor`);
+  const revisionSelector = encodeURIComponent(`serving.kserve.io/inferenceservice=${runtimeName}`);
+  const serviceRevisionSelector = encodeURIComponent(`serving.knative.dev/service=${predictorName}`);
+  const [knativeService, route, revisionsByInference, revisionsByService] = await Promise.all([
+    k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/services/${predictorName}`),
+    k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/routes/${predictorName}`),
+    k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/revisions?labelSelector=${revisionSelector}`),
+    k8sJson(`/apis/serving.knative.dev/v1/namespaces/${namespace}/revisions?labelSelector=${serviceRevisionSelector}`),
+  ]);
+  const revisions = new Map();
+  for (const revision of [...(revisionsByInference?.items || []), ...(revisionsByService?.items || [])]) {
+    if (revision?.metadata?.name) revisions.set(revision.metadata.name, revision);
+  }
+  const revisionItems = [...revisions.values()]
+    .sort((a, b) => String(a.metadata?.creationTimestamp || '').localeCompare(String(b.metadata?.creationTimestamp || '')))
+    .map(compactKnativeRevision)
+    .filter(Boolean);
+  const traffic = (predictor.traffic || route?.status?.traffic || knativeService?.status?.traffic || []).map(compactTrafficTarget);
+  const modelStatus = inferenceService.status?.modelStatus || {};
+  return {
+    deploymentMode: optionalString(inferenceService.status?.deploymentMode || ''),
+    clusterServingRuntimeName: optionalString(inferenceService.status?.clusterServingRuntimeName || inferenceService.status?.servingRuntimeName || ''),
+    predictor: {
+      name: predictorName,
+      url: optionalString(predictor.url || predictor.address?.url || ''),
+      latestCreatedRevision: optionalString(predictor.latestCreatedRevision || knativeService?.status?.latestCreatedRevisionName || ''),
+      latestReadyRevision: optionalString(predictor.latestReadyRevision || knativeService?.status?.latestReadyRevisionName || ''),
+      latestRolledoutRevision: optionalString(predictor.latestRolledoutRevision || ''),
+    },
+    route: route ? compactK8sObject(route, 'Route') : null,
+    knativeService: knativeService ? compactK8sObject(knativeService, 'Service') : null,
+    traffic,
+    revisions: revisionItems,
+    modelStatus: {
+      activeModelState: optionalString(modelStatus.states?.activeModelState || ''),
+      targetModelState: optionalString(modelStatus.states?.targetModelState || ''),
+      transitionStatus: optionalString(modelStatus.transitionStatus || ''),
+      failedCopies: modelStatus.copies?.failedCopies ?? '',
+      lastFailureReason: optionalString(modelStatus.lastFailureInfo?.reason || ''),
+      lastFailureMessage: optionalString(modelStatus.lastFailureInfo?.message || '').split(/\r?\n/).find(Boolean) || '',
+    },
   };
 }
 
@@ -3010,12 +3623,13 @@ async function workbenchDetail(req) {
   if (!raw || !item) throw { code: 404, msg: `Workbench ${namespace}/${name} was not found.` };
 
   const runtimeName = workbenchRuntimeNameFrom(name, raw);
-  const [deployment, service, pvc, pods, events] = await Promise.all([
+  const [deployment, service, pvc, pods, events, connections] = await Promise.all([
     k8sJson(`/apis/apps/v1/namespaces/${namespace}/deployments/${runtimeName}`),
     k8sJson(`/api/v1/namespaces/${namespace}/services/${runtimeName}`),
     k8sJson(`/api/v1/namespaces/${namespace}/persistentvolumeclaims/${runtimeName}-workspace`),
     k8sJson(`/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${runtimeName}`)}`),
     k8sJson(`/api/v1/namespaces/${namespace}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${runtimeName}`)}`),
+    workbenchConnectionSummaries(raw.spec || {}, namespace),
   ]);
   const podItems = pods?.items || [];
   const firstPod = podItems[0]?.metadata?.name || '';
@@ -3025,19 +3639,30 @@ async function workbenchDetail(req) {
   const proxyUrl = service ? `/workbenches/proxy/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/` : '';
   const reachability = await workbenchReachability(runtimeName, namespace, servicePort, service);
   const compute = workbenchComputeMeta(raw.spec || {}, namespace);
+  const imageKey = optionalString(raw.spec?.notebookImage || raw.spec?.image || raw.spec?.runtimeImage || raw.status?.image || 'standard-data-science') || 'standard-data-science';
+  const imageProfile = raw.spec?.imageProfile || notebookImageProfile(imageKey);
   return {
     item: withBackendMetadata({ ...item, backendMode }),
     runtime: {
       name: runtimeName,
       namespace,
       image: raw.status?.image || raw.spec?.image || '',
+      imageKey,
+      imageProfile,
       openUrl: clusterUrl,
       proxyUrl,
       backendMode,
       computeBackendRef: raw.status?.computeBackendRef || (compute.name ? `${compute.namespace}/${compute.name}` : ''),
       gpuClass: raw.status?.gpuClass || compute.gpuClass,
+      hardwareProfile: {
+        name: raw.spec?.hardwareProfileRef?.name || compute.gpuClass || 'cpu-standard',
+        gpuClass: raw.status?.gpuClass || compute.gpuClass,
+        gpuCount: raw.status?.gpuCount ?? compute.gpuCount,
+        backend: compute.name ? `${compute.namespace}/${compute.name}` : '',
+      },
       reachability,
     },
+    dataConnections: connections,
     storage: pvc ? compactK8sObject(pvc, 'PersistentVolumeClaim') : null,
     deployment: deployment ? compactK8sObject(deployment, 'Deployment') : null,
     service: service ? compactK8sObject(service, 'Service') : null,
@@ -3248,6 +3873,7 @@ async function inferenceDetail(req) {
     deployment: deployment ? compactK8sObject(deployment, 'Deployment') : null,
     service: service ? compactK8sObject(service, 'Service') : null,
     inferenceService: inferenceService ? compactK8sObject(inferenceService, 'InferenceService') : null,
+    kserve: await kserveOperationalDetail(namespace, runtimeName, inferenceService),
     pods: podItems.map((pod) => compactK8sObject(pod, 'Pod')),
     conditions: compactConditions(raw.status?.conditions || []),
     upstreamConditions: compactConditions(raw.status?.upstreamConditions || []),
@@ -3423,6 +4049,60 @@ async function pipelineLineage(reqUrl) {
   return { name, items: FALLBACK_DETAILS.lineage };
 }
 
+async function pipelineBackendStatus(reqUrl) {
+  const u = new URL(reqUrl, 'http://x');
+  const namespace = requireDnsName(u.searchParams.get('namespace') || 'opensphere-system', 'namespace');
+  const [info, tektonReady, dspaReady, runRecords] = await Promise.all([
+    kfpBackendInfo(namespace),
+    crdInstalled('pipelineruns.tekton.dev'),
+    crdInstalled('datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io'),
+    k8sJson(`/api/v1/namespaces/${namespace}/configmaps?labelSelector=${encodeURIComponent('ai.opensphere.io/backend=kubeflow-pipelines')}`),
+  ]);
+  const records = (runRecords?.items || []).map((cm) => ({
+    name: cm.metadata?.name || '',
+    namespace: cm.metadata?.namespace || namespace,
+    runId: cm.data?.runId || '',
+    pipelineName: cm.data?.pipelineName || '',
+    experiment: cm.data?.experiment || '',
+    experimentId: cm.data?.experimentId || '',
+    pipelineId: cm.data?.pipelineId || '',
+    pipelineVersionId: cm.data?.pipelineVersionId || '',
+    state: cm.data?.kfpState || '',
+    submittedAt: cm.data?.submittedAt || '',
+    lastObservedAt: cm.data?.lastObservedAt || '',
+  })).sort((a, b) => String(b.lastObservedAt || b.submittedAt).localeCompare(String(a.lastObservedAt || a.submittedAt)));
+  const apiBase = kfpApiBase(info);
+  let apiProbe = { attempted: false, ready: false, message: info.ready ? 'KFP backend detected; API probe not attempted.' : 'KFP backend is not detected.' };
+  if (apiBase) {
+    apiProbe = await probeKfpApi(info);
+  }
+  return {
+    namespace,
+    phase: info.ready ? apiProbe.ready || !apiProbe.attempted ? 'Ready' : 'DetectedApiDegraded' : tektonReady ? 'TektonFallback' : 'NativeFallback',
+    summary: {
+      kfpReady: info.ready,
+      kfpApiReady: apiProbe.ready,
+      tektonReady,
+      dspaCrdInstalled: dspaReady,
+      runRecords: records.length,
+    },
+    backend: {
+      ready: info.ready,
+      kind: info.kind || '',
+      apiVersion: info.apiVersion || '',
+      name: info.name || '',
+      namespace: info.namespace || namespace,
+      endpoint: info.endpoint || '',
+      internalEndpoint: info.internalEndpoint || '',
+      apiEndpoint: info.apiEndpoint || '',
+      apiBase,
+      conditions: compactConditions(info.conditions || []),
+      apiProbe,
+    },
+    records: records.slice(0, 20),
+  };
+}
+
 async function requirePipelineReadAccess(req, namespace, name, kind = 'PipelineClaim', action = '/pipelines/detail') {
   await requestActor(req);
   const target = kind === 'PipelineRunClaim'
@@ -3452,12 +4132,14 @@ async function pipelineDetail(req) {
   const pipelineName = kind === 'PipelineRunClaim'
     ? optionalString(raw.spec?.pipelineRef?.name || raw.status?.pipelineName || raw.spec?.pipeline || name)
     : name;
-  const [runs, experiments, artifacts, lineage, logs] = await Promise.all([
+  const resources = kind === 'PipelineRunClaim' ? pipelineRunResources(raw) : null;
+  const [runs, experiments, artifacts, lineage, logs, kfpRecord] = await Promise.all([
     k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/pipelinerunclaims`),
     k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/experimentclaims`),
     k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/artifactclaims`),
     kind === 'PipelineRunClaim' ? pipelineLineage(`/pipeline/runs/lineage?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`) : Promise.resolve({ name, items: [] }),
     kind === 'PipelineRunClaim' ? pipelineLogs(`/pipeline/runs/logs?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`) : Promise.resolve({ name, namespace, lines: [] }),
+    resources ? existingKfpRunRecord(resources) : Promise.resolve(null),
   ]);
   const runItems = (runs?.items || [])
     .filter((run) => {
@@ -3487,6 +4169,19 @@ async function pipelineDetail(req) {
       source: raw.spec?.source || raw.spec?.sourceRef || raw.status?.source || '',
       parameters: raw.spec?.parameters || {},
     },
+    kfp: kind === 'PipelineRunClaim' ? {
+      runId: raw.status?.kfpRunId || kfpRecord?.data?.runId || '',
+      state: raw.status?.kfpState || kfpRecord?.data?.kfpState || '',
+      application: raw.status?.kfpApplication || '',
+      endpoint: raw.status?.kfpEndpoint || '',
+      experiment: raw.status?.kfpExperiment || kfpRecord?.data?.experiment || '',
+      experimentId: raw.status?.kfpExperimentId || kfpRecord?.data?.experimentId || '',
+      pipelineId: raw.status?.kfpPipelineId || kfpRecord?.data?.pipelineId || '',
+      pipelineVersionId: raw.status?.kfpPipelineVersionId || kfpRecord?.data?.pipelineVersionId || '',
+      submittedAt: kfpRecord?.data?.submittedAt || '',
+      lastObservedAt: kfpRecord?.data?.lastObservedAt || '',
+      recordName: kfpRecord?.metadata?.name || '',
+    } : null,
     runs: runItems,
     experiments: experimentItems,
     artifacts: artifactItems,
@@ -4256,6 +4951,376 @@ function modelRegistrySource(backend, info) {
   };
 }
 
+let _modelRegistryPgPool = null;
+let _modelRegistryPgPoolKey = '';
+let _modelRegistryPgSchemaReady = false;
+
+function modelRegistryPostgresSource(config, message = '') {
+  return {
+    type: 'opensphere-postgres',
+    name: BACKBONE_POSTGRES_SECRET,
+    namespace: BACKBONE_CLAIM_NAMESPACE,
+    endpoint: `${config.host}:${config.port}/${config.database}`,
+    apiVersion: 'postgresql/v16',
+    message,
+  };
+}
+
+function jsonObject(value, fallback) {
+  if (!value) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
+async function backbonePostgresConfig() {
+  return postgresConfigFromSecret(BACKBONE_POSTGRES_SECRET, 'Backbone PostgreSQL');
+}
+
+async function dspaPostgresConfig() {
+  return postgresConfigFromSecret(DSPA_POSTGRES_SECRET, 'DSPA PostgreSQL');
+}
+
+async function postgresConfigFromSecret(secretName, label) {
+  const secret = await k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${secretName}`);
+  if (!secretKeyReady(secret, ['host', 'port', 'database', 'username', 'password'])) {
+    throw { code: 424, msg: `${BACKBONE_CLAIM_NAMESPACE}/${secretName} is not ready.` };
+  }
+  const config = {
+    host: decodeSecretValue(secret.data.host),
+    port: Number(decodeSecretValue(secret.data.port) || 5432),
+    database: decodeSecretValue(secret.data.database),
+    user: decodeSecretValue(secret.data.username),
+    password: decodeSecretValue(secret.data.password),
+    secretName,
+  };
+  if (!config.host || !config.database || !config.user || !config.password) throw { code: 424, msg: `${label} Secret is incomplete.` };
+  return config;
+}
+
+async function modelRegistryPgPool() {
+  const config = await backbonePostgresConfig();
+  const key = `${config.host}:${config.port}/${config.database}/${config.user}`;
+  if (!_modelRegistryPgPool || _modelRegistryPgPoolKey !== key) {
+    if (_modelRegistryPgPool) await _modelRegistryPgPool.end().catch(() => null);
+    _modelRegistryPgPool = new PgPool({
+      host: config.host,
+      port: config.port,
+      database: config.database,
+      user: config.user,
+      password: config.password,
+      max: 4,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 3_000,
+    });
+    _modelRegistryPgPoolKey = key;
+    _modelRegistryPgSchemaReady = false;
+  }
+  return { pool: _modelRegistryPgPool, config };
+}
+
+async function ensureModelRegistryPgSchema(client) {
+  if (_modelRegistryPgSchemaReady) return;
+  await client.query(`
+    create extension if not exists vector;
+    create table if not exists oah_model_registry_versions (
+      name text not null,
+      version text not null,
+      data jsonb not null,
+      updated_at timestamptz not null default now(),
+      primary key (name, version)
+    );
+    create table if not exists oah_model_registry_promotions (
+      namespace text not null,
+      name text not null,
+      data jsonb not null,
+      updated_at timestamptz not null default now(),
+      primary key (namespace, name)
+    );
+    create table if not exists oah_model_registry_approval_audit (
+      id text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
+    create table if not exists oah_model_registry_evaluation_metrics (
+      id text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
+    create table if not exists oah_vector_collections (
+      namespace text not null,
+      name text not null,
+      description text not null default '',
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (namespace, name)
+    );
+    create table if not exists oah_vector_chunks (
+      id text primary key,
+      namespace text not null,
+      collection text not null,
+      document_id text not null,
+      content text not null,
+      embedding vector(16) not null,
+      metadata jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      foreign key (namespace, collection) references oah_vector_collections(namespace, name) on delete cascade
+    );
+    create index if not exists oah_vector_chunks_collection_idx on oah_vector_chunks(namespace, collection);
+    create index if not exists oah_vector_chunks_embedding_hnsw on oah_vector_chunks using hnsw (embedding vector_cosine_ops);
+  `);
+  _modelRegistryPgSchemaReady = true;
+}
+
+async function withModelRegistryPg(fn) {
+  const { pool, config } = await modelRegistryPgPool();
+  const client = await pool.connect();
+  try {
+    await ensureModelRegistryPgSchema(client);
+    return await fn(client, config);
+  } finally {
+    client.release();
+  }
+}
+
+function deterministicEmbedding(text, dimensions = 16) {
+  const values = [];
+  let seed = optionalString(text) || 'opensphere-ai-hub';
+  while (values.length < dimensions) {
+    const digest = createHash('sha256').update(seed).digest();
+    for (let i = 0; i < digest.length && values.length < dimensions; i += 2) {
+      values.push((digest.readUInt16BE(i) / 65535) * 2 - 1);
+    }
+    seed = digest.toString('hex');
+  }
+  const norm = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0)) || 1;
+  return values.map((value) => Number((value / norm).toFixed(6)));
+}
+
+function pgVectorLiteral(values) {
+  return `[${values.map((value) => Number(value || 0).toFixed(6)).join(',')}]`;
+}
+
+async function vectorMemoryState(namespaceFilter = '') {
+  return withModelRegistryPg(async (client, config) => {
+    const extension = await client.query("select extversion from pg_extension where extname = 'vector'");
+    const params = [];
+    const where = namespaceFilter ? 'where c.namespace = $1' : '';
+    if (namespaceFilter) params.push(namespaceFilter);
+    const collections = await client.query(`
+      select c.namespace, c.name, c.description, c.metadata, c.updated_at, count(ch.id)::int as chunks
+      from oah_vector_collections c
+      left join oah_vector_chunks ch on ch.namespace = c.namespace and ch.collection = c.name
+      ${where}
+      group by c.namespace, c.name, c.description, c.metadata, c.updated_at
+      order by c.namespace, c.name
+    `, params);
+    const total = collections.rows.reduce((sum, row) => sum + Number(row.chunks || 0), 0);
+    return {
+      source: modelRegistryPostgresSource(config, 'Backbone PostgreSQL pgvector is the OpenSphere-native vector memory store.'),
+      extension: { name: 'vector', version: extension.rows[0]?.extversion || '', ready: extension.rows.length > 0 },
+      summary: {
+        collections: collections.rows.length,
+        chunks: total,
+        ready: extension.rows.length > 0,
+      },
+      collections: collections.rows.map((row) => ({
+        namespace: row.namespace,
+        name: row.name,
+        description: row.description,
+        chunks: Number(row.chunks || 0),
+        metadata: jsonObject(row.metadata, {}),
+        updatedAt: row.updated_at,
+      })),
+    };
+  });
+}
+
+async function vectorMemoryResponse(reqUrl) {
+  const u = new URL(reqUrl, 'http://localhost');
+  const namespace = optionalString(u.searchParams.get('namespace'));
+  return vectorMemoryState(namespace);
+}
+
+async function upsertVectorCollection(client, namespace, name, description, metadata = {}) {
+  await client.query(
+    `insert into oah_vector_collections (namespace, name, description, metadata, updated_at)
+     values ($1, $2, $3, $4::jsonb, now())
+     on conflict (namespace, name) do update set description = excluded.description, metadata = excluded.metadata, updated_at = now()`,
+    [namespace, name, description, JSON.stringify(metadata || {})],
+  );
+}
+
+async function ingestVectorMemoryItem({ namespace, collection, documentId, content, metadata }) {
+  const ns = requireDnsName(namespace || 'default', 'namespace');
+  const collectionName = requireDnsName(collection || 'default-memory', 'collection');
+  const docId = optionalString(documentId || `${collectionName}-${shortHash(content)}`) || `${collectionName}-${Date.now()}`;
+  const text = optionalString(content);
+  if (!text) throw { code: 400, msg: 'content is required' };
+  return withModelRegistryPg(async (client) => {
+    await upsertVectorCollection(client, ns, collectionName, 'OpenSphere AI Hub pgvector memory collection.', {
+      provider: 'backbone-postgres',
+      dimensions: 16,
+    });
+    const id = shortHash(`${ns}/${collectionName}/${docId}/${text}`);
+    const embedding = pgVectorLiteral(deterministicEmbedding(text));
+    await client.query(
+      `insert into oah_vector_chunks (id, namespace, collection, document_id, content, embedding, metadata, created_at)
+       values ($1, $2, $3, $4, $5, $6::vector, $7::jsonb, now())
+       on conflict (id) do update set content = excluded.content, embedding = excluded.embedding, metadata = excluded.metadata, created_at = now()`,
+      [id, ns, collectionName, docId, text, embedding, JSON.stringify(metadata || {})],
+    );
+    return { id, namespace: ns, collection: collectionName, documentId: docId };
+  });
+}
+
+async function vectorMemoryBootstrap(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const collection = requireDnsName(body.collection || 'oah-vector-memory', 'collection');
+  const samples = [
+    { documentId: 'model-registry', content: 'OpenSphere AI Hub stores model versions, promotion decisions, evaluation metrics, and approval audit records in Backbone PostgreSQL.', topic: 'registry' },
+    { documentId: 'object-storage', content: 'Backbone RustFS provides S3-compatible object storage for model artifacts, KServe storageUri, and pipeline artifacts.', topic: 'storage' },
+    { documentId: 'workbench', content: 'WorkbenchClaim starts a JupyterLab-compatible runtime with PVC workspace storage and optional data connection references.', topic: 'workbench' },
+  ];
+  const ingested = [];
+  for (const sample of samples) {
+    ingested.push(await ingestVectorMemoryItem({
+      namespace,
+      collection,
+      documentId: sample.documentId,
+      content: sample.content,
+      metadata: { topic: sample.topic, seededBy: 'oah-bootstrap' },
+    }));
+  }
+  return { phase: 'Ready', ingested, state: await vectorMemoryState(namespace) };
+}
+
+async function vectorMemoryIngest(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const item = await ingestVectorMemoryItem(body);
+  return { phase: 'Ingested', item, state: await vectorMemoryState(item.namespace) };
+}
+
+async function vectorMemoryQuery(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const collection = requireDnsName(body.collection || 'oah-vector-memory', 'collection');
+  const query = optionalString(body.query);
+  if (!query) throw { code: 400, msg: 'query is required' };
+  const limit = Math.max(1, Math.min(20, Number(body.limit || 5)));
+  return withModelRegistryPg(async (client) => {
+    const embedding = pgVectorLiteral(deterministicEmbedding(query));
+    const rows = await client.query(
+      `select id, namespace, collection, document_id, content, metadata, 1 - (embedding <=> $1::vector) as score
+       from oah_vector_chunks
+       where namespace = $2 and collection = $3
+       order by embedding <=> $1::vector
+       limit $4`,
+      [embedding, namespace, collection, limit],
+    );
+    return {
+      namespace,
+      collection,
+      query,
+      items: rows.rows.map((row) => ({
+        id: row.id,
+        namespace: row.namespace,
+        collection: row.collection,
+        documentId: row.document_id,
+        content: row.content,
+        metadata: jsonObject(row.metadata, {}),
+        score: Number(row.score),
+      })),
+    };
+  });
+}
+
+async function readModelRegistryPgState() {
+  return withModelRegistryPg(async (client, config) => {
+    const [versions, promotions, approvalAudit, evaluationMetrics] = await Promise.all([
+      client.query('select data from oah_model_registry_versions order by updated_at asc'),
+      client.query('select data from oah_model_registry_promotions order by updated_at asc'),
+      client.query('select data from oah_model_registry_approval_audit order by updated_at asc'),
+      client.query('select data from oah_model_registry_evaluation_metrics order by updated_at asc'),
+    ]);
+    return {
+      source: modelRegistryPostgresSource(config, 'Backbone PostgreSQL is the OpenSphere-native model registry store.'),
+      versions: versions.rows.map((row) => jsonObject(row.data, {})).filter((item) => item.name && item.version),
+      promotions: promotions.rows.map((row) => jsonObject(row.data, {})).filter((item) => item.name),
+      approvalAudit: approvalAudit.rows.map((row) => jsonObject(row.data, {})).filter((item) => item.id),
+      evaluationMetrics: evaluationMetrics.rows.map((row) => jsonObject(row.data, {})).filter((item) => item.id),
+    };
+  });
+}
+
+async function upsertModelRegistryPgState(state) {
+  return withModelRegistryPg(async (client, config) => {
+    await client.query('begin');
+    try {
+      for (const item of state.versions || []) {
+        if (!item?.name || !item?.version) continue;
+        await client.query(
+          `insert into oah_model_registry_versions (name, version, data, updated_at)
+           values ($1, $2, $3::jsonb, now())
+           on conflict (name, version) do update set data = excluded.data, updated_at = now()`,
+          [item.name, item.version, JSON.stringify(item)],
+        );
+      }
+      const versionKeys = (state.versions || []).filter((item) => item?.name && item?.version).map((item) => `${item.name}\t${item.version}`);
+      if (versionKeys.length) {
+        await client.query(`delete from oah_model_registry_versions where not ((name || chr(9) || version) = any($1::text[]))`, [versionKeys]);
+      } else {
+        await client.query('delete from oah_model_registry_versions');
+      }
+      for (const item of state.promotions || []) {
+        if (!item?.name) continue;
+        await client.query(
+          `insert into oah_model_registry_promotions (namespace, name, data, updated_at)
+           values ($1, $2, $3::jsonb, now())
+           on conflict (namespace, name) do update set data = excluded.data, updated_at = now()`,
+          [item.namespace || 'default', item.name, JSON.stringify(item)],
+        );
+      }
+      const promotionKeys = (state.promotions || []).filter((item) => item?.name).map((item) => `${item.namespace || 'default'}\t${item.name}`);
+      if (promotionKeys.length) {
+        await client.query(`delete from oah_model_registry_promotions where not ((namespace || chr(9) || name) = any($1::text[]))`, [promotionKeys]);
+      } else {
+        await client.query('delete from oah_model_registry_promotions');
+      }
+      for (const item of state.approvalAudit || []) {
+        if (!item?.id) continue;
+        await client.query(
+          `insert into oah_model_registry_approval_audit (id, data, updated_at)
+           values ($1, $2::jsonb, now())
+           on conflict (id) do update set data = excluded.data, updated_at = now()`,
+          [item.id, JSON.stringify(item)],
+        );
+      }
+      for (const item of state.evaluationMetrics || []) {
+        if (!item?.id) continue;
+        await client.query(
+          `insert into oah_model_registry_evaluation_metrics (id, data, updated_at)
+           values ($1, $2::jsonb, now())
+           on conflict (id) do update set data = excluded.data, updated_at = now()`,
+          [item.id, JSON.stringify(item)],
+        );
+      }
+      await client.query('commit');
+    } catch (e) {
+      await client.query('rollback').catch(() => null);
+      throw e;
+    }
+    return {
+      source: modelRegistryPostgresSource(config, 'Backbone PostgreSQL write succeeded.'),
+    };
+  });
+}
+
 async function fetchModelRegistryApi(endpoint, path, options = {}) {
   if (!endpoint) throw { code: 424, msg: 'Model Registry endpoint is not published by the ModelRegistry resource.' };
   const base = endpoint.replace(/\/+$/, '');
@@ -4643,15 +5708,19 @@ async function modelVersions(reqUrl = '') {
   const namespace = params.get('namespace') || 'opensphere-system';
   const backendType = params.get('backend') || params.get('backendType') || 'auto';
   const registry = await modelRegistryState({ namespace, spec: { backend: backendType } });
+  const items = await modelRegistryServingTargets(registry.versions || [], registry.promotions || []);
+  const servingImports = await modelRegistryServingImportCandidates(registry.versions || [], registry.promotions || []);
   return {
     backend: registry.backend,
     source: registry.source,
+    storage: registry.storage || null,
     upstreamItems: registry.upstreamItems || [],
     upstream: registry.upstream || null,
     promotions: registry.promotions || [],
     approvalAudit: registry.approvalAudit || [],
     evaluationMetrics: registry.evaluationMetrics || [],
-    items: registry.versions,
+    servingImports,
+    items,
   };
 }
 
@@ -4665,6 +5734,7 @@ async function modelRegistryUpstream(reqUrl = '') {
     backend: registry.backend,
     info: registry.info,
     source: registry.source,
+    storage: registry.storage || null,
     upstream,
     summary: {
       phase: registry.backend?.phase || 'Unknown',
@@ -4730,9 +5800,43 @@ async function modelRegistryState(options = {}) {
   const cm = await k8sJson('/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions');
   const upstream = await upstreamModelRegistryResources(registryBackend.source);
   const upstreamItems = upstream.versions || [];
+  if (registryBackend.source.type !== 'odh-model-registry') {
+    try {
+      const pg = await readModelRegistryPgState();
+      const versions = pg.versions.length
+        ? pg.versions
+        : cm?.data?.versions
+          ? parseJsonArray(cm.data.versions)
+          : FALLBACK_DETAILS.modelVersions;
+      return {
+        ...registryBackend,
+        backend: {
+          ...registryBackend.backend,
+          mode: registryBackend.backend?.mode || 'opensphere',
+          phase: 'NativePostgresReady',
+          ready: true,
+          message: 'Using Backbone PostgreSQL-backed OpenSphere native model registry.',
+        },
+        source: pg.source,
+        upstream,
+        versions: upstreamItems.length ? mergeModelVersions(versions, upstreamItems) : versions.map((item) => ({
+          ...item,
+          backend: item.backend || pg.source.type,
+          registry: item.registry || `${pg.source.namespace}/${pg.source.name}`,
+        })),
+        upstreamItems,
+        promotions: pg.promotions.length ? pg.promotions : parseJsonArray(cm?.data?.promotions),
+        approvalAudit: pg.approvalAudit.length ? pg.approvalAudit : parseJsonArray(cm?.data?.approvalAudit),
+        evaluationMetrics: pg.evaluationMetrics.length ? pg.evaluationMetrics : parseJsonArray(cm?.data?.evaluationMetrics),
+        storage: { type: 'postgres', ready: true, message: pg.source.message },
+      };
+    } catch (e) {
+      registryBackend.source.storageFallbackReason = e.msg || String(e);
+    }
+  }
   if (!cm?.data?.versions) {
     const fallbackVersions = FALLBACK_DETAILS.modelVersions.map((item) => ({ ...item, backend: registryBackend.source.type, registry: `${registryBackend.source.namespace}/${registryBackend.source.name}` }));
-    return { ...registryBackend, upstream, versions: upstreamItems.length ? upstreamItems : fallbackVersions, upstreamItems, promotions: [], approvalAudit: [], evaluationMetrics: [] };
+    return { ...registryBackend, upstream, versions: upstreamItems.length ? upstreamItems : fallbackVersions, upstreamItems, promotions: [], approvalAudit: [], evaluationMetrics: [], storage: { type: 'configmap', ready: !!cm, message: registryBackend.source.storageFallbackReason || 'ConfigMap-backed native registry.' } };
   }
   try {
     const versions = parseJsonArray(cm.data.versions).map((item) => ({
@@ -4748,9 +5852,10 @@ async function modelRegistryState(options = {}) {
       promotions: parseJsonArray(cm.data.promotions),
       approvalAudit: parseJsonArray(cm.data.approvalAudit),
       evaluationMetrics: parseJsonArray(cm.data.evaluationMetrics),
+      storage: { type: 'configmap', ready: true, message: registryBackend.source.storageFallbackReason || 'ConfigMap-backed native registry.' },
     };
   } catch {
-    return { ...registryBackend, upstream, versions: upstreamItems.length ? upstreamItems : FALLBACK_DETAILS.modelVersions, upstreamItems, promotions: [], approvalAudit: [], evaluationMetrics: [] };
+    return { ...registryBackend, upstream, versions: upstreamItems.length ? upstreamItems : FALLBACK_DETAILS.modelVersions, upstreamItems, promotions: [], approvalAudit: [], evaluationMetrics: [], storage: { type: 'configmap', ready: false, message: 'ConfigMap registry data could not be parsed.' } };
   }
 }
 
@@ -4762,6 +5867,15 @@ function mergeModelVersions(localItems, upstreamItems) {
 }
 
 async function saveModelRegistryState(state, req, source) {
+  let pgSync = { attempted: false, synced: false };
+  if ((source?.type || '') !== 'odh-model-registry') {
+    try {
+      const result = await upsertModelRegistryPgState(state);
+      pgSync = { attempted: true, synced: true, source: result.source };
+    } catch (e) {
+      pgSync = { attempted: true, synced: false, error: e.msg || String(e) };
+    }
+  }
   const cm = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
@@ -4785,25 +5899,203 @@ async function saveModelRegistryState(state, req, source) {
   }
   const latest = (state.versions || [])[state.versions.length - 1];
   const upstreamSync = latest ? await mirrorModelVersionToUpstream(source || { type: 'opensphere-configmap' }, latest) : { attempted: false, synced: false };
-  return { cm, upstreamSync };
+  return { cm, upstreamSync, pgSync };
 }
 
 async function addModelVersion(req) {
   const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
   const registryBackend = await modelRegistryBackend('opensphere-system', body);
   if (!registryBackend.backend.ready && registryBackend.backend.requested === 'upstream') throw { code: 409, msg: registryBackend.backend.message };
+  const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+  const effectiveSource = current.source || registryBackend.source;
   const next = {
     name: optionalString(body.name || 'model'),
     version: optionalString(body.version || '0.1.0'),
     stage: optionalString(body.stage || 'development'),
     source: optionalString(body.source || body.sourceRef || 'manual-registration'),
-    backend: registryBackend.source.type,
-    registry: `${registryBackend.source.namespace}/${registryBackend.source.name}`,
+    backend: effectiveSource.type,
+    registry: `${effectiveSource.namespace}/${effectiveSource.name}`,
   };
-  const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
   const items = [...current.versions.filter((item) => !(item.name === next.name && item.version === next.version)), next];
-  const saved = await saveModelRegistryState({ ...current, versions: items }, req, registryBackend.source);
-  return { backend: registryBackend.backend, source: registryBackend.source, upstreamSync: saved.upstreamSync, items, registered: next };
+  const saved = await saveModelRegistryState({ ...current, versions: items }, null, effectiveSource);
+  return { backend: registryBackend.backend, source: saved.pgSync?.source || effectiveSource, upstreamSync: saved.upstreamSync, pgSync: saved.pgSync, items, registered: next };
+}
+
+async function importServingTargetAsModelVersion(req) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const namespace = requireDnsName(body.namespace || body.targetNamespace || 'opensphere-system', 'namespace');
+  const targetName = requireDnsName(body.target || body.name || body.servingTarget || '', 'serving target');
+  const claim = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/inferenceclaims/${targetName}`);
+  if (!claim) throw { code: 404, msg: `InferenceClaim ${namespace}/${targetName} was not found.` };
+  const spec = claim.spec || {};
+  const status = claim.status || {};
+  const registryBackend = await modelRegistryBackend('opensphere-system', body);
+  if (!registryBackend.backend.ready && registryBackend.backend.requested === 'upstream') throw { code: 409, msg: registryBackend.backend.message };
+  const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+  const effectiveSource = current.source || registryBackend.source;
+  const modelName = optionalString(body.modelName || status.modelName || spec.modelName || spec.modelRef?.name || targetName) || targetName;
+  const version = optionalString(body.version || spec.version || spec.modelVersion || targetName) || targetName;
+  const artifactUri = artifactUriFromObject(claim) || optionalString(body.source || spec.modelRef?.name || modelName);
+  const next = {
+    name: modelName,
+    version,
+    stage: optionalString(body.stage || (status.ready ? 'production' : 'staging')) || 'staging',
+    source: artifactUri || modelName,
+    artifactUri: /^(s3|https?):\/\//i.test(artifactUri) ? artifactUri : '',
+    modelUri: /^(s3|https?):\/\//i.test(artifactUri) ? artifactUri : '',
+    storageUri: /^s3:\/\//i.test(artifactUri) ? artifactUri : '',
+    backend: effectiveSource.type,
+    registry: `${effectiveSource.namespace}/${effectiveSource.name}`,
+    importedFromServingTarget: `${namespace}/${targetName}`,
+    servingTarget: {
+      namespace,
+      name: targetName,
+      kind: 'InferenceClaim',
+      phase: status.phase || (status.ready ? 'Ready' : 'Pending'),
+      ready: status.ready === true || (status.conditions || []).some((condition) => condition.type === 'Ready' && condition.status === 'True'),
+      url: status.url || status.predictUrl || '',
+      backendResource: status.backendResource || '',
+    },
+    importedAt: new Date().toISOString(),
+  };
+  const items = [...current.versions.filter((item) => !(item.name === next.name && item.version === next.version)), next];
+  const saved = await saveModelRegistryState({ ...current, versions: items }, null, effectiveSource);
+  return { backend: registryBackend.backend, source: saved.pgSync?.source || effectiveSource, upstreamSync: saved.upstreamSync, pgSync: saved.pgSync, registered: next, items };
+}
+
+function modelVersionArtifactStatus(version) {
+  const uri = optionalString(version.storageUri || version.modelUri || version.artifactUri || version.source);
+  if (!uri) {
+    return { uri: '', type: 'Missing', ready: false, phase: 'MissingArtifact', message: 'No model artifact URI or source reference is recorded.' };
+  }
+  if (/^s3:\/\//i.test(uri)) {
+    return { uri, type: 'S3', ready: true, phase: 'ObjectStorageReady', message: 'S3-compatible artifact URI is available for KServe storageUri handoff.' };
+  }
+  if (/^https?:\/\//i.test(uri)) {
+    return { uri, type: 'HTTP', ready: true, phase: 'ExternalUriReady', message: 'External model artifact URI is recorded.' };
+  }
+  return { uri, type: 'Reference', ready: false, phase: 'ReferenceOnly', message: 'Only a logical source reference is recorded; add an s3:// or http(s) artifact URI before production serving.' };
+}
+
+function modelVersionMatchesPromotion(version, promotion) {
+  return promotion?.modelName === version.name && (!promotion.version || promotion.version === version.version);
+}
+
+function modelVersionMatchesInference(version, inference, promotions) {
+  const spec = inference.spec || {};
+  const status = inference.status || {};
+  const artifact = modelVersionArtifactStatus(version).uri;
+  const promotionNames = promotions.filter((promotion) => modelVersionMatchesPromotion(version, promotion)).map((promotion) => promotion.name);
+  const candidates = [
+    spec.modelName,
+    spec.model,
+    spec.modelRef?.name,
+    status.modelName,
+    spec.storageUri,
+    spec.modelUri,
+    spec.artifactUri,
+    spec.sourceRef,
+    spec.promotionRef?.name,
+  ].filter(Boolean).map(String);
+  if (candidates.includes(version.name) || candidates.includes(version.version) || (artifact && candidates.includes(artifact))) return true;
+  return promotionNames.some((name) => candidates.includes(name));
+}
+
+async function modelRegistryServingTargets(versions, promotions) {
+  const [inferenceClaims, inferenceServices] = await Promise.all([
+    crdInstalled('inferenceclaims.ai.opensphere.io')
+      ? k8sJson('/apis/ai.opensphere.io/v1alpha1/inferenceclaims')
+      : Promise.resolve(null),
+    crdInstalled('inferenceservices.serving.kserve.io')
+      ? k8sJson('/apis/serving.kserve.io/v1beta1/inferenceservices')
+      : Promise.resolve(null),
+  ]);
+  const claims = inferenceClaims?.items || [];
+  const services = inferenceServices?.items || [];
+  return versions.map((version) => {
+    const artifact = modelVersionArtifactStatus(version);
+    const matchedClaims = claims.filter((claim) => modelVersionMatchesInference(version, claim, promotions));
+    const claimNames = new Set(matchedClaims.map((claim) => claim.metadata?.name).filter(Boolean));
+    const matchedServices = services.filter((service) => {
+      const labels = service.metadata?.labels || {};
+      const annotations = service.metadata?.annotations || {};
+      return claimNames.has(labels['ai.opensphere.io/inference-claim'])
+        || claimNames.has(annotations['ai.opensphere.io/inference-claim'])
+        || modelVersionMatchesInference(version, service, promotions);
+    });
+    const targets = [
+      ...matchedClaims.map((claim) => ({
+        namespace: claim.metadata?.namespace || '',
+        name: claim.metadata?.name || '',
+        kind: 'InferenceClaim',
+        phase: claim.status?.phase || (claim.status?.ready ? 'Ready' : 'Pending'),
+        ready: claim.status?.ready === true || (claim.status?.conditions || []).some((condition) => condition.type === 'Ready' && condition.status === 'True'),
+        url: claim.status?.url || claim.status?.predictUrl || '',
+        backendResource: claim.status?.backendResource || '',
+      })),
+      ...matchedServices.map((service) => ({
+        namespace: service.metadata?.namespace || '',
+        name: service.metadata?.name || '',
+        kind: 'InferenceService',
+        phase: service.status?.conditions?.find((condition) => condition.type === 'Ready')?.status === 'True' ? 'Ready' : 'Pending',
+        ready: (service.status?.conditions || []).some((condition) => condition.type === 'Ready' && condition.status === 'True'),
+        url: service.status?.url || service.status?.address?.url || '',
+        backendResource: `serving.kserve.io/InferenceService/${service.metadata?.namespace || ''}/${service.metadata?.name || ''}`,
+      })),
+    ];
+    const readyTargets = targets.filter((target) => target.ready);
+    const matchedPromotions = promotions.filter((promotion) => modelVersionMatchesPromotion(version, promotion));
+    return {
+      ...version,
+      artifact,
+      promotionCount: matchedPromotions.length,
+      promotionDecision: matchedPromotions[matchedPromotions.length - 1]?.approvalDecision || version.approvalDecision || '',
+      servingHandoff: {
+        phase: readyTargets.length ? 'ServingReady' : targets.length ? 'ServingConfigured' : 'NotServed',
+        ready: readyTargets.length > 0,
+        targets: targets.length,
+        message: readyTargets.length
+          ? `${readyTargets.length}/${targets.length} serving target(s) are ready.`
+          : targets.length
+            ? `${targets.length} serving target(s) found but not ready.`
+            : 'No serving target is linked to this model version yet.',
+      },
+      servingTargets: targets,
+    };
+  });
+}
+
+async function modelRegistryServingImportCandidates(versions, promotions) {
+  if (!(await crdInstalled('inferenceclaims.ai.opensphere.io'))) return [];
+  const list = await k8sJson('/apis/ai.opensphere.io/v1alpha1/inferenceclaims');
+  const items = list?.items || [];
+  const hasRegistryVersion = (claim) => versions.some((version) => modelVersionMatchesInference(version, claim, promotions));
+  return items
+    .filter((claim) => !hasRegistryVersion(claim))
+    .map((claim) => {
+      const spec = claim.spec || {};
+      const status = claim.status || {};
+      const name = status.modelName || spec.modelName || spec.modelRef?.name || claim.metadata?.name || 'served-model';
+      const source = artifactUriFromObject(claim) || spec.modelRef?.name || name;
+      return {
+        namespace: claim.metadata?.namespace || '',
+        name,
+        version: optionalString(spec.version || spec.modelVersion || claim.metadata?.name || 'served') || 'served',
+        stage: status.ready ? 'production' : 'staging',
+        source,
+        artifact: modelVersionArtifactStatus({ source }),
+        servingTarget: {
+          namespace: claim.metadata?.namespace || '',
+          name: claim.metadata?.name || '',
+          kind: 'InferenceClaim',
+          phase: status.phase || (status.ready ? 'Ready' : 'Pending'),
+          ready: status.ready === true || (status.conditions || []).some((condition) => condition.type === 'Ready' && condition.status === 'True'),
+          url: status.url || status.predictUrl || '',
+          backendResource: status.backendResource || '',
+        },
+        message: status.message || 'Serving target is not registered as a model version yet.',
+      };
+    });
 }
 
 async function patchPromotionStatus(claim, status) {
@@ -4949,6 +6241,60 @@ async function evaluationState(refObj, namespace) {
   return { found: true, passed, phase: phase || (passed ? 'Passed' : 'Pending'), job };
 }
 
+function artifactUriFromObject(obj) {
+  return optionalString(
+    obj?.spec?.storageUri
+    || obj?.spec?.modelUri
+    || obj?.spec?.artifactUri
+    || obj?.spec?.artifact?.uri
+    || obj?.spec?.outputUri
+    || obj?.status?.storageUri
+    || obj?.status?.modelUri
+    || obj?.status?.artifactUri
+    || obj?.status?.artifact?.uri
+    || obj?.status?.outputUri
+    || '',
+  );
+}
+
+async function promotionArtifactUri(spec, namespace, modelName, promotionName = '') {
+  const explicit = optionalString(spec.storageUri || spec.modelUri || spec.artifactUri || spec.sourceUri || spec.source);
+  if (/^(s3|https?):\/\//i.test(explicit)) return explicit;
+  const refs = [spec.modelRef, spec.artifactRef, spec.trainingJobRef, spec.sourceRef].filter((refObj) => refObj?.name);
+  for (const refObj of refs) {
+    const ns = refObj.namespace || namespace;
+    const kind = optionalString(refObj.kind || '').toLowerCase();
+    const name = requireDnsName(refObj.name, 'artifact reference');
+    const candidates = kind.includes('training')
+      ? [`/apis/ai.opensphere.io/v1alpha1/namespaces/${ns}/trainingjobclaims/${name}`]
+      : kind.includes('inference')
+        ? [`/apis/ai.opensphere.io/v1alpha1/namespaces/${ns}/inferenceclaims/${name}`]
+        : [
+          `/apis/ai.opensphere.io/v1alpha1/namespaces/${ns}/trainingjobclaims/${name}`,
+          `/apis/ai.opensphere.io/v1alpha1/namespaces/${ns}/inferenceclaims/${name}`,
+          `/apis/ai.opensphere.io/v1alpha1/namespaces/${ns}/datasetclaims/${name}`,
+        ];
+    for (const path of candidates) {
+      const obj = await k8sJson(path);
+      const uri = artifactUriFromObject(obj);
+      if (uri) return uri;
+    }
+  }
+  if (await crdInstalled('inferenceclaims.ai.opensphere.io')) {
+    const list = await k8sJson('/apis/ai.opensphere.io/v1alpha1/inferenceclaims');
+    const match = (list?.items || []).find((item) => {
+      const itemSpec = item.spec || {};
+      return itemSpec.promotionRef?.name === spec.promotionRef?.name
+        || itemSpec.promotionRef?.name === promotionName
+        || itemSpec.modelRef?.name === modelName
+        || item.status?.modelName === modelName;
+    });
+    const uri = artifactUriFromObject(match);
+    if (uri) return uri;
+  }
+  return explicit || optionalString(spec.modelRef?.name || modelName);
+}
+
 async function reconcileModelPromotionClaim(claim) {
   const namespace = claim.metadata?.namespace || 'default';
   const spec = claim.spec || {};
@@ -5013,9 +6359,10 @@ async function reconcileModelPromotionClaim(claim) {
     await saveModelRegistryState({
       ...registry,
       approvalAudit: appendUniqueById(registry.approvalAudit, auditRecord),
-    }, null, registryBackend.source);
+    }, null, registry.source || registryBackend.source);
     const status = {
       ...baseStatus,
+      registrySource: registry.source || registryBackend.source,
       ...normalizedStatus({
         phase: 'Rejected',
         ready: false,
@@ -5078,11 +6425,15 @@ async function reconcileModelPromotionClaim(claim) {
     backendMode: registryBackend.backend.mode,
     backendPhase: registryBackend.backend.phase,
   });
+  const artifactUri = await promotionArtifactUri(spec, namespace, modelName, name);
   const versionRecord = {
     name: modelName,
     version,
     stage,
-    source: spec.modelRef?.name || spec.source || 'promotion',
+    source: artifactUri || spec.modelRef?.name || spec.source || 'promotion',
+    artifactUri: /^(s3|https?):\/\//i.test(artifactUri) ? artifactUri : '',
+    modelUri: /^(s3|https?):\/\//i.test(artifactUri) ? artifactUri : '',
+    storageUri: /^s3:\/\//i.test(artifactUri) ? artifactUri : '',
     promotionRef: name,
     namespace,
     promotedAt: now,
@@ -5091,8 +6442,8 @@ async function reconcileModelPromotionClaim(claim) {
     evaluationPassed: evaluation.passed === true,
     metricCount: metricRecords.length,
     approvalDecision: auditRecord.decision,
-    backend: registryBackend.source.type,
-    registry: `${registryBackend.source.namespace}/${registryBackend.source.name}`,
+    backend: (registry.source || registryBackend.source).type,
+    registry: `${(registry.source || registryBackend.source).namespace}/${(registry.source || registryBackend.source).name}`,
   };
   const versions = [
     ...registry.versions.filter((item) => !(item.name === modelName && item.version === version)),
@@ -5123,9 +6474,10 @@ async function reconcileModelPromotionClaim(claim) {
     promotions,
     approvalAudit: appendUniqueById(registry.approvalAudit, auditRecord),
     evaluationMetrics: mergeMetrics(registry.evaluationMetrics, metricRecords),
-  }, null, registryBackend.source);
+  }, null, registry.source || registryBackend.source);
   const status = {
     ...baseStatus,
+    registrySource: saved.pgSync?.source || registry.source || registryBackend.source,
     ...normalizedStatus({
       phase: 'Promoted',
       ready: true,
@@ -5136,6 +6488,7 @@ async function reconcileModelPromotionClaim(claim) {
     promotedAt: now,
     registryConfigMap: 'opensphere-system/ai-model-registry-versions',
     upstreamSync: saved.upstreamSync,
+    pgSync: saved.pgSync,
     approvalDecision: auditRecord.decision,
     approvalAuditRef: auditRecord.id,
     evaluationMetricCount: metricRecords.length,
@@ -5467,7 +6820,13 @@ async function nativeCatalog() {
 const FALLBACK_BACKEND_CRDS = {
   'odh-platform': ['openspheredatascienceclusters.ai.opensphere.io'],
   workbenches: ['workbenchclaims.ai.opensphere.io'],
-  pipelines: ['pipelinerunclaims.ai.opensphere.io'],
+  pipelines: [
+    'pipelineclaims.ai.opensphere.io',
+    'pipelinerunclaims.ai.opensphere.io',
+    'experimentclaims.ai.opensphere.io',
+    'executionclaims.ai.opensphere.io',
+    'artifactclaims.ai.opensphere.io',
+  ],
   'model-serving': ['inferenceclaims.ai.opensphere.io'],
   'model-registry': ['modelpromotionclaims.ai.opensphere.io'],
   monitoring: ['monitoringtargets.ai.opensphere.io'],
@@ -5484,12 +6843,16 @@ async function backendCapability(def) {
       group,
       available: !!(await k8sJson(`/apis/${group}`)),
     }))),
-    Promise.all((FALLBACK_BACKEND_CRDS[def.id] || []).map((name) => crdInstalled(name))),
+    Promise.all((FALLBACK_BACKEND_CRDS[def.id] || []).map(async (name) => ({
+      name,
+      label: name.split('.')[0],
+      installed: await crdInstalled(name),
+    }))),
   ]);
   const required = crds.filter((crd) => !crd.optional);
   let requiredInstalled = required.length ? required.every((crd) => crd.installed) : crds.some((crd) => crd.installed);
   const anyUpstreamInstalled = crds.some((crd) => crd.installed) || apiGroups.some((api) => api.available);
-  const fallbackReady = fallbackChecks.length ? fallbackChecks.every(Boolean) : false;
+  const fallbackReady = fallbackChecks.length ? fallbackChecks.every((item) => item.installed) : false;
   if (def.id === 'pipelines') {
     const tektonReady = crds.some((crd) => crd.name === 'pipelineruns.tekton.dev' && crd.installed);
     const kfpReady = crds.some((crd) => crd.name.includes('datasciencepipelinesapplications') && crd.installed)
@@ -5515,6 +6878,7 @@ async function backendCapability(def) {
     fallbackReady,
     crds,
     apiGroups,
+    fallbackCrds: fallbackChecks,
     missing,
     message: requiredInstalled
       ? `${def.displayName} can use upstream backend.`
@@ -5867,6 +7231,117 @@ function minimalCrd(def) {
   };
 }
 
+function foundationCrdDefs(names) {
+  const wanted = new Set(names);
+  return FOUNDATION_CRDS.filter((def) => wanted.has(def.name));
+}
+
+async function ensureFoundationCrds(defs, req) {
+  const created = [];
+  const skipped = [];
+  for (const def of defs) {
+    if (await crdInstalled(def.name)) {
+      skipped.push(def.kind);
+    } else {
+      await writeK8s('/apis/apiextensions.k8s.io/v1/customresourcedefinitions', 'POST', minimalCrd(def), req);
+      created.push(def.kind);
+    }
+  }
+  return { created, skipped };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForCrd(crdName, timeoutMs = 20_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const crd = await k8sJson(`/apis/apiextensions.k8s.io/v1/customresourcedefinitions/${crdName}`);
+    const established = (crd?.status?.conditions || []).some((condition) => condition.type === 'Established' && condition.status === 'True');
+    if (established) return crd;
+    await delay(750);
+  }
+  throw { code: 504, msg: `Timed out waiting for CRD ${crdName}.` };
+}
+
+const PIPELINE_FALLBACK_CRDS = foundationCrdDefs(FALLBACK_BACKEND_CRDS.pipelines || []);
+const OBSERVABILITY_FALLBACK_CRDS = foundationCrdDefs(FALLBACK_BACKEND_CRDS.monitoring || []);
+const DISTRIBUTED_FALLBACK_CRDS = foundationCrdDefs(FALLBACK_BACKEND_CRDS['distributed-workloads'] || []);
+
+const INFERENCE_CLAIM_SERVING_FIELDS = {
+  backend: { type: 'string', enum: ['auto', 'opensphere', 'native', 'fallback', 'kubernetes', 'internal', 'upstream', 'kserve'] },
+  backendMode: { type: 'string', enum: ['auto', 'opensphere', 'native', 'fallback', 'kubernetes', 'internal', 'upstream', 'kserve'] },
+  backendType: { type: 'string', enum: ['auto', 'opensphere', 'native', 'fallback', 'kubernetes', 'internal', 'upstream', 'kserve'] },
+  modelUri: { type: 'string' },
+  storageUri: { type: 'string' },
+  artifactUri: { type: 'string' },
+  source: { type: 'string' },
+  modelFormat: { type: 'string' },
+  servingRuntime: { type: 'string' },
+  runtimeImage: { type: 'string' },
+  servingImage: { type: 'string' },
+  image: { type: 'string' },
+  serviceAccountName: { type: 'string' },
+  computeBackendRef: {
+    type: 'object',
+    required: ['name'],
+    properties: {
+      apiVersion: { type: 'string' },
+      kind: { type: 'string' },
+      name: { type: 'string' },
+      namespace: { type: 'string' },
+    },
+  },
+};
+
+function mutateInferenceClaimServingSchema(crd) {
+  const updated = JSON.parse(JSON.stringify(crd || {}));
+  const versions = updated.spec?.versions || [];
+  for (const version of versions) {
+    if (version.name !== 'v1alpha1') continue;
+    const root = version.schema?.openAPIV3Schema;
+    if (!root) continue;
+    root.properties = root.properties || {};
+    root.properties.spec = root.properties.spec || { type: 'object' };
+    root.properties.spec.type = root.properties.spec.type || 'object';
+    root.properties.spec.properties = {
+      ...(root.properties.spec.properties || {}),
+      ...INFERENCE_CLAIM_SERVING_FIELDS,
+    };
+    root.properties.status = root.properties.status || { type: 'object' };
+    root.properties.status.type = root.properties.status.type || 'object';
+    root.properties.status['x-kubernetes-preserve-unknown-fields'] = true;
+  }
+  delete updated.status;
+  delete updated.metadata?.managedFields;
+  return updated;
+}
+
+async function inferenceClaimServingSchemaStatus() {
+  const crd = await k8sJson('/apis/apiextensions.k8s.io/v1/customresourcedefinitions/inferenceclaims.ai.opensphere.io');
+  const specProperties = crd?.spec?.versions?.find((version) => version.name === 'v1alpha1')
+    ?.schema?.openAPIV3Schema?.properties?.spec?.properties || {};
+  const requiredFields = ['backend', 'modelUri', 'storageUri', 'runtimeImage', 'modelFormat', 'serviceAccountName'];
+  const missing = requiredFields.filter((field) => !specProperties[field]);
+  return {
+    installed: !!crd,
+    ready: !!crd && missing.length === 0,
+    missing,
+    total: requiredFields.length,
+  };
+}
+
+async function ensureInferenceClaimServingSchema(req) {
+  const def = FOUNDATION_CRDS.find((item) => item.name === 'inferenceclaims.ai.opensphere.io');
+  if (def) await ensureFoundationCrds([def], req);
+  const current = await k8sJson('/apis/apiextensions.k8s.io/v1/customresourcedefinitions/inferenceclaims.ai.opensphere.io');
+  if (!current) throw { code: 404, msg: 'InferenceClaim CRD is not installed' };
+  const patched = mutateInferenceClaimServingSchema(current);
+  await writeK8s('/apis/apiextensions.k8s.io/v1/customresourcedefinitions/inferenceclaims.ai.opensphere.io', 'PUT', patched, req);
+  return inferenceClaimServingSchemaStatus();
+}
+
 async function selfCan(req, verb, group, resource, namespace, name = '') {
   if (!req?.headers?.['x-os-id-token']) return false;
   const resourceAttributes = { verb, group, resource };
@@ -5943,6 +7418,7 @@ const ADMIN_READ_PATHS = new Set([
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
   '/admin/native/support-services/observability/preview',
+  '/admin/native/support-services/distributed/preview',
   '/admin/native/support-services/metadata/preview',
   '/admin/native/controller-metrics',
   '/admin/native/audit-log',
@@ -6011,6 +7487,8 @@ async function authorizeAiRequest(req, pathname) {
     '/admin/native/support-services/object-storage',
     '/admin/native/support-services/metadata/preview',
     '/admin/native/support-services/metadata',
+    '/admin/native/support-services/observability/configure',
+    '/admin/native/support-services/distributed/configure',
     '/admin/setup/install',
   ]);
   if (pathname.startsWith('/admin/native/reconcile/')) {
@@ -6037,9 +7515,17 @@ async function authorizeAiRequest(req, pathname) {
     await requireResourceAccess(req, pathname, operationTarget(pathname, body));
     return;
   }
-  if (pathname === '/models/registry/versions' && req.method === 'POST') {
-    await prepareJsonBody(req);
-    await requireResourceAccess(req, pathname, { verb: 'update', group: '', resource: 'configmaps', namespace: 'opensphere-system', kind: 'ConfigMap', name: 'ai-model-registry-versions' });
+  if ((pathname === '/models/registry/versions' || pathname === '/models/registry/import-serving') && req.method === 'POST') {
+    const body = await prepareJsonBody(req);
+    await requestActor(req);
+    await appendSecurityAudit(req, true, pathname, {
+      verb: 'use',
+      group: 'ai.opensphere.io',
+      resource: pathname === '/models/registry/import-serving' ? 'inferenceclaims' : 'modelversions',
+      namespace: body.namespace || body.targetNamespace || 'opensphere-system',
+      kind: pathname === '/models/registry/import-serving' ? 'InferenceClaim' : 'ModelVersion',
+      name: body.target || body.name || body.servingTarget || '',
+    }, 'authenticated OAH registry action');
   }
   if (pathname === '/models/registry/upstream/self-test' && req.method === 'POST') {
     await prepareJsonBody(req);
@@ -6142,6 +7628,33 @@ function resourceRefFor(obj, fallbackKind = '') {
 }
 
 const BACKBONE_NAMESPACE = 'opensphere-backbone';
+const BACKBONE_CLAIM_NAMESPACE = 'opensphere-system';
+const BACKBONE_CLAIM_NAME = 'ai-hub';
+const BACKBONE_POSTGRES_SECRET = 'ai-hub-backbone-postgres';
+const BACKBONE_RUSTFS_SECRET = 'ai-hub-backbone-rustfs';
+const BACKBONE_KSERVE_S3_SECRET = 'ai-hub-kserve-s3';
+const BACKBONE_OBJECT_CONNECTION = 'ai-hub-backbone-object-storage';
+const BACKBONE_POSTGRES_DATABASE = 'ai_hub';
+const BACKBONE_OBJECT_BUCKET = 'ai-hub';
+const DSPA_POSTGRES_SECRET = 'oah-dspa-postgres';
+const DSPA_POSTGRES_DATABASE = 'oah_dspa';
+const DSPA_POSTGRES_USER = 'oah_dspa';
+const DSPA_API_SERVER_IMAGE = 'localhost:5000/oah-ds-pipelines-api-server:pgx-dev-20260701-v5';
+const DSPA_MLMD_GRPC_IMAGE = 'localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1';
+const DSPA_SEED_PIPELINE_NAME = 'oah-kfp-smoke-pipeline';
+const OAH_RUNTIME_SERVICE_ACCOUNT = 'ai-runtime';
+const DSPO_NAMESPACE = 'opendatahub';
+const DSPO_OPERATOR_DEPLOYMENT = 'data-science-pipelines-operator-controller-manager';
+const DSPO_CONFIGMAP = 'data-science-pipelines-operator-dspo-config';
+const DSPO_PARAMETERS_CONFIGMAP = 'data-science-pipelines-operator-dspo-parameters';
+const DSPA_NAME = 'oah-dspa';
+const DSPA_POSTGRES_SERVER_CONFIG = `${DSPA_NAME}-postgres-server-config`;
+const OPENSPHERE_WILDCARD_TLS_SECRET = 'opensphere-wildcard-tls';
+const DSPO_PUBLIC_IMAGES = {
+  kubeRbacProxy: 'quay.io/openshift/origin-kube-rbac-proxy:latest',
+  mlmdEnvoy: 'docker.io/envoyproxy/envoy:v1.31-latest',
+  mariaDB: 'quay.io/sclorg/mariadb-105-c9s:c9s',
+};
 const BACKBONE_COMPONENTS = [
   {
     id: 'postgres',
@@ -6192,14 +7705,663 @@ function workloadDetail(workload) {
   return `${ready}/${desired} ready, ${image}`;
 }
 
+function backboneClaimManifest() {
+  return {
+    apiVersion: 'backbone.opensphere.io/v1alpha1',
+    kind: 'BackboneClaim',
+    metadata: {
+      name: BACKBONE_CLAIM_NAME,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'console-backbone',
+      },
+    },
+    spec: {
+      postgres: {
+        enabled: true,
+        database: BACKBONE_POSTGRES_DATABASE,
+      },
+      objectStore: {
+        enabled: true,
+        bucket: BACKBONE_OBJECT_BUCKET,
+      },
+    },
+  };
+}
+
+function secretKeyReady(secret, keys) {
+  if (!secret?.data) return false;
+  return keys.every((key) => !!secret.data[key]);
+}
+
+function secretItem(secret, name) {
+  return secret
+    ? resourceRefFor(secret, 'Secret')
+    : { kind: 'Secret', namespace: BACKBONE_CLAIM_NAMESPACE, name, phase: 'Missing' };
+}
+
+function backboneObjectStorageConfig(claim, secret) {
+  const endpoint = decodeSecretValue(secret?.data?.endpoint)
+    || claim?.status?.objectStore?.endpoint
+    || claim?.status?.objectStore?.s3Endpoint
+    || `http://backbone-rustfs.${BACKBONE_NAMESPACE}.svc.cluster.local:9000`;
+  const bucket = decodeSecretValue(secret?.data?.bucket)
+    || claim?.status?.objectStore?.bucket
+    || BACKBONE_OBJECT_BUCKET;
+  const region = decodeSecretValue(secret?.data?.region)
+    || claim?.status?.objectStore?.region
+    || 'us-east-1';
+  return {
+    name: BACKBONE_OBJECT_CONNECTION,
+    namespace: BACKBONE_CLAIM_NAMESPACE,
+    provider: 's3',
+    endpoint,
+    bucket,
+    region,
+    secretName: BACKBONE_RUSTFS_SECRET,
+    useTls: endpoint.startsWith('https://'),
+    insecureSkipTlsVerify: false,
+  };
+}
+
+function backboneObjectStorageClaimManifest(config) {
+  return objectStorageClaimManifest({
+    ...config,
+    accessKeyId: '',
+    secretAccessKey: '',
+  });
+}
+
+function kserveS3Endpoint(endpoint) {
+  return String(endpoint || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+}
+
+function endpointParts(endpoint) {
+  try {
+    const parsed = new URL(endpoint);
+    return {
+      scheme: parsed.protocol.replace(':', '') || 'http',
+      host: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? '443' : '80'),
+      secure: parsed.protocol === 'https:',
+    };
+  } catch {
+    const clean = kserveS3Endpoint(endpoint);
+    const [host, port = '80'] = clean.split(':');
+    return { scheme: 'http', host, port, secure: false };
+  }
+}
+
+function mergeEnv(existing, values) {
+  const byName = new Map((existing || []).map((entry) => [entry.name, { ...entry }]));
+  for (const [name, value] of Object.entries(values)) byName.set(name, { name, value });
+  return Array.from(byName.values());
+}
+
+function dspaPostgresServerConfigMap() {
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: DSPA_POSTGRES_SERVER_CONFIG,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+      },
+      annotations: {
+        'opensphere.io/source-database': DSPA_POSTGRES_SECRET,
+        'opensphere.io/database-driver': 'pgx',
+      },
+    },
+    data: {
+      'config.json': JSON.stringify({
+        DBConfig: {
+          MySQLConfig: {},
+          PostgreSQLConfig: {},
+          ConMaxLifeTime: '120s',
+        },
+        ObjectStoreConfig: {
+          PipelinePath: 'pipelines',
+        },
+        DBDriverName: 'pgx',
+        ARCHIVE_CONFIG_LOG_FILE_NAME: 'main.log',
+        ARCHIVE_CONFIG_LOG_PATH_PREFIX: '/artifacts',
+        InitConnectionTimeout: '6m',
+      }, null, 2),
+    },
+  };
+}
+
+function backboneDspaManifest(config, postgresConfig) {
+  const parts = endpointParts(config.endpoint);
+  const pg = postgresConfig || {
+    host: `backbone-postgres.${BACKBONE_NAMESPACE}.svc.cluster.local`,
+    port: 5432,
+    database: DSPA_POSTGRES_DATABASE,
+    user: DSPA_POSTGRES_USER,
+    secretName: DSPA_POSTGRES_SECRET,
+  };
+  return {
+    apiVersion: 'datasciencepipelinesapplications.opendatahub.io/v1',
+    kind: 'DataSciencePipelinesApplication',
+    metadata: {
+      name: DSPA_NAME,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+      },
+      annotations: {
+        'opensphere.io/source-object-storage': BACKBONE_RUSTFS_SECRET,
+        'opensphere.io/source-database': pg.secretName || DSPA_POSTGRES_SECRET,
+        'opensphere.io/database-driver': 'pgx',
+        'opensphere.io/dspa-api-server-image': DSPA_API_SERVER_IMAGE,
+        'opensphere.io/database-note': 'Development mode: DSPA/KFP is forced to Backbone PostgreSQL externalDB via pgx.',
+      },
+    },
+    spec: {
+      dspVersion: 'v2',
+      podToPodTLS: false,
+      apiServer: {
+        deploy: true,
+        image: DSPA_API_SERVER_IMAGE,
+        enableSamplePipeline: false,
+        pipelineStore: 'database',
+        cacheEnabled: true,
+        customServerConfigMap: {
+          name: DSPA_POSTGRES_SERVER_CONFIG,
+          key: 'config.json',
+        },
+      },
+      persistenceAgent: { deploy: true },
+      scheduledWorkflow: { deploy: true },
+      database: {
+        mariaDB: {
+          deploy: false,
+        },
+        disableHealthCheck: true,
+        externalDB: {
+          host: pg.host,
+          port: String(pg.port || 5432),
+          username: pg.user,
+          pipelineDBName: pg.database,
+          passwordSecret: {
+            name: pg.secretName || DSPA_POSTGRES_SECRET,
+            key: 'password',
+          },
+        },
+      },
+      objectStorage: {
+        externalStorage: {
+          bucket: config.bucket,
+          host: parts.host,
+          scheme: parts.scheme,
+          region: config.region,
+          basePath: 'pipelines',
+          port: parts.port,
+          secure: parts.secure,
+          s3CredentialsSecret: {
+            secretName: BACKBONE_RUSTFS_SECRET,
+            accessKey: 'access_key',
+            secretKey: 'secret_key',
+          },
+        },
+      },
+      mlmd: {
+        deploy: true,
+        grpc: {
+          image: DSPA_MLMD_GRPC_IMAGE,
+        },
+        envoy: {
+          image: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+          deployRoute: true,
+        },
+      },
+    },
+  };
+}
+
+function dspaProxyTlsSecretManifest(name, sourceSecret, redact = false) {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+        'opensphere.io/compatibility': 'openshift-service-ca',
+      },
+      annotations: {
+        'opensphere.io/source-secret': OPENSPHERE_WILDCARD_TLS_SECRET,
+        'opensphere.io/compatibility-note': 'Used when OpenShift service-ca is unavailable.',
+      },
+    },
+    type: 'kubernetes.io/tls',
+    data: {
+      'tls.crt': redact ? '<redacted-tls-crt>' : sourceSecret?.data?.['tls.crt'],
+      'tls.key': redact ? '<redacted-tls-key>' : sourceSecret?.data?.['tls.key'],
+    },
+  };
+}
+
+function dspaProxyTlsSecretNames() {
+  return [
+    `ds-pipelines-proxy-tls-${DSPA_NAME}`,
+    `ds-pipelines-envoy-proxy-tls-${DSPA_NAME}`,
+  ];
+}
+
+function dspoImageCompatibilityPreview() {
+  return {
+    apiVersion: 'apps/v1',
+    kind: 'Deployment',
+    metadata: {
+      name: DSPO_OPERATOR_DEPLOYMENT,
+      namespace: DSPO_NAMESPACE,
+      annotations: {
+        'opensphere.io/dspo-kube-rbac-proxy-image': DSPO_PUBLIC_IMAGES.kubeRbacProxy,
+        'opensphere.io/dspo-mlmd-envoy-image': DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+        'opensphere.io/dspo-mariadb-image': DSPO_PUBLIC_IMAGES.mariaDB,
+      },
+    },
+  };
+}
+
+function dspaMariadbCompatibilityNetworkPolicyManifest() {
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: `${DSPA_NAME}-allow-dspo-mariadb`,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+        'opensphere.io/compatibility': 'dspo-network',
+      },
+    },
+    spec: {
+      podSelector: {
+        matchLabels: {
+          app: `mariadb-${DSPA_NAME}`,
+          component: 'data-science-pipelines',
+        },
+      },
+      policyTypes: ['Ingress'],
+      ingress: [{
+        from: [
+          {
+            namespaceSelector: {
+              matchLabels: { 'kubernetes.io/metadata.name': DSPO_NAMESPACE },
+            },
+            podSelector: {
+              matchLabels: { 'app.kubernetes.io/name': 'data-science-pipelines-operator' },
+            },
+          },
+          {
+            namespaceSelector: {
+              matchLabels: { name: DSPO_NAMESPACE },
+            },
+            podSelector: {
+              matchLabels: { 'app.kubernetes.io/name': 'data-science-pipelines-operator' },
+            },
+          },
+        ],
+        ports: [{ protocol: 'TCP', port: 3306 }],
+      }],
+    },
+  };
+}
+
+function dspaMlmdCompatibilityNetworkPolicyManifest() {
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: `${DSPA_NAME}-allow-mlmd-grpc`,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+        'opensphere.io/compatibility': 'dspo-network',
+      },
+    },
+    spec: {
+      podSelector: {
+        matchLabels: {
+          app: `ds-pipeline-metadata-grpc-${DSPA_NAME}`,
+          component: 'data-science-pipelines',
+        },
+      },
+      policyTypes: ['Ingress'],
+      ingress: [{
+        ports: [{ protocol: 'TCP', port: 8080 }],
+      }],
+    },
+  };
+}
+
+async function ensureDspoImageCompatibility(req) {
+  const steps = [];
+  const deployment = await k8sJson(`/apis/apps/v1/namespaces/${DSPO_NAMESPACE}/deployments/${DSPO_OPERATOR_DEPLOYMENT}`);
+  if (!deployment) {
+    return [{
+      id: 'dspo-image-compatibility',
+      label: 'DSPO public image compatibility',
+      phase: 'Skipped',
+      detail: `DSPO operator deployment ${DSPO_NAMESPACE}/${DSPO_OPERATOR_DEPLOYMENT} is not installed.`,
+    }];
+  }
+
+  const overrides = {
+    IMAGES_KUBE_RBAC_PROXY: DSPO_PUBLIC_IMAGES.kubeRbacProxy,
+    IMAGES_MLMDENVOY: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+    IMAGES_MARIADB: DSPO_PUBLIC_IMAGES.mariaDB,
+  };
+  const containers = (deployment.spec?.template?.spec?.containers || []).map((container) => (
+    container.name === 'manager'
+      ? { ...container, env: mergeEnv(container.env || [], overrides) }
+      : container
+  ));
+  await patchK8s(`/apis/apps/v1/namespaces/${DSPO_NAMESPACE}/deployments/${DSPO_OPERATOR_DEPLOYMENT}`, {
+    spec: {
+      template: {
+        metadata: {
+          annotations: {
+            ...(deployment.spec?.template?.metadata?.annotations || {}),
+            'opensphere.io/dspo-image-overrides-at': new Date().toISOString(),
+          },
+        },
+        spec: { containers },
+      },
+    },
+  }, req);
+  steps.push({
+    id: 'dspo-operator-images',
+    label: 'DSPO operator image overrides',
+    phase: 'Configured',
+    detail: `Set DSPO public image overrides for kube-rbac-proxy, MLMD envoy, and MariaDB on ${DSPO_NAMESPACE}/${DSPO_OPERATOR_DEPLOYMENT}.`,
+  });
+
+  const params = await k8sJson(`/api/v1/namespaces/${DSPO_NAMESPACE}/configmaps/${DSPO_PARAMETERS_CONFIGMAP}`);
+  if (params) {
+    await patchK8s(`/api/v1/namespaces/${DSPO_NAMESPACE}/configmaps/${DSPO_PARAMETERS_CONFIGMAP}`, {
+      data: {
+        IMAGES_KUBE_RBAC_PROXY: DSPO_PUBLIC_IMAGES.kubeRbacProxy,
+        'kube-rbac-proxy': DSPO_PUBLIC_IMAGES.kubeRbacProxy,
+        IMAGES_MLMDENVOY: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+        IMAGES_MARIADB: DSPO_PUBLIC_IMAGES.mariaDB,
+      },
+    }, req);
+    steps.push({
+      id: 'dspo-parameters-images',
+      label: 'DSPO parameter image overrides',
+      phase: 'Configured',
+      detail: `Updated ${DSPO_NAMESPACE}/${DSPO_PARAMETERS_CONFIGMAP}.`,
+    });
+  }
+
+  const config = await k8sJson(`/api/v1/namespaces/${DSPO_NAMESPACE}/configmaps/${DSPO_CONFIGMAP}`);
+  const rawConfig = config?.data?.['config.yaml'];
+  if (rawConfig) {
+    const nextConfig = rawConfig
+      .replace(/registry\.redhat\.io\/openshift-service-mesh\/proxyv2-rhel9:2\.6/g, DSPO_PUBLIC_IMAGES.mlmdEnvoy)
+      .replace(/registry\.redhat\.io\/openshift4\/ose-kube-rbac-proxy-rhel9:latest/g, DSPO_PUBLIC_IMAGES.kubeRbacProxy)
+      .replace(/registry\.redhat\.io\/rhel9\/mariadb-105:latest/g, DSPO_PUBLIC_IMAGES.mariaDB);
+    await patchK8s(`/api/v1/namespaces/${DSPO_NAMESPACE}/configmaps/${DSPO_CONFIGMAP}`, {
+      data: { 'config.yaml': nextConfig },
+    }, req);
+    steps.push({
+      id: 'dspo-config-images',
+      label: 'DSPO config image overrides',
+      phase: 'Configured',
+      detail: `Updated ${DSPO_NAMESPACE}/${DSPO_CONFIGMAP}.`,
+    });
+  }
+
+  return steps;
+}
+
+async function ensureDspaTlsCompatibility(req) {
+  const existing = await Promise.all(dspaProxyTlsSecretNames().map((name) => (
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${name}`)
+  )));
+  if (existing.every(Boolean)) {
+    return {
+      phase: 'Ready',
+      detail: `${dspaProxyTlsSecretNames().join(', ')} already exist.`,
+      manifests: existing.map((secret) => resourceRefFor(secret, 'Secret')),
+    };
+  }
+
+  const sourceSecret = await k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${OPENSPHERE_WILDCARD_TLS_SECRET}`);
+  if (!sourceSecret?.data?.['tls.crt'] || !sourceSecret?.data?.['tls.key']) {
+    return {
+      phase: 'Warning',
+      detail: `${OPENSPHERE_WILDCARD_TLS_SECRET} is missing; OpenShift service-ca or a TLS source Secret must create DSPA proxy TLS Secrets.`,
+      manifests: dspaProxyTlsSecretNames().map((name) => ({
+        kind: 'Secret',
+        namespace: BACKBONE_CLAIM_NAMESPACE,
+        name,
+        phase: 'Missing',
+      })),
+    };
+  }
+
+  const results = [];
+  for (const name of dspaProxyTlsSecretNames()) {
+    const secret = dspaProxyTlsSecretManifest(name, sourceSecret);
+    const result = await upsertK8s(
+      `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets`,
+      `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${name}`,
+      secret,
+      { metadata: { labels: secret.metadata.labels, annotations: secret.metadata.annotations }, data: secret.data, type: secret.type },
+      req,
+    );
+    results.push(result);
+  }
+  return {
+    phase: 'Configured',
+    detail: `Created or updated DSPA proxy TLS Secrets from ${OPENSPHERE_WILDCARD_TLS_SECRET}.`,
+    manifests: results.map((secret) => resourceRefFor(secret, 'Secret')),
+  };
+}
+
+async function ensureDspaNetworkCompatibility(req) {
+  const policies = [
+    dspaMariadbCompatibilityNetworkPolicyManifest(),
+    dspaMlmdCompatibilityNetworkPolicyManifest(),
+  ];
+  const results = [];
+  for (const policy of policies) {
+    results.push(await upsertK8s(
+      `/apis/networking.k8s.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/networkpolicies`,
+      `/apis/networking.k8s.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/networkpolicies/${policy.metadata.name}`,
+      policy,
+      { metadata: { labels: policy.metadata.labels }, spec: policy.spec },
+      req,
+    ));
+  }
+  return {
+    phase: 'Configured',
+    detail: `Applied ${results.map((item) => `${BACKBONE_CLAIM_NAMESPACE}/${item.metadata?.name}`).join(', ')}.`,
+    manifests: results.map((item) => resourceRefFor(item, 'NetworkPolicy')),
+  };
+}
+
+async function ensureDspaMlmdPostgresCompatibility(req, postgresConfig) {
+  const dspaPath = `/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${DSPA_NAME}`;
+  const dspa = await k8sJson(dspaPath);
+  if (!dspa) {
+    return {
+      id: 'dspa-mlmd-postgres',
+      label: 'DSPA MLMD PostgreSQL compatibility',
+      phase: 'Skipped',
+      detail: `${DSPA_NAME} is not created yet; run this action after applying the DSPA runtime.`,
+    };
+  }
+  const currentImage = dspa.spec?.mlmd?.grpc?.image || '';
+  const alreadyPostgres = currentImage === DSPA_MLMD_GRPC_IMAGE;
+  const result = await patchK8s(dspaPath, {
+    metadata: {
+      annotations: {
+        ...(dspa.metadata?.annotations || {}),
+        'opensphere.io/mlmd-database-driver': 'postgresql',
+        'opensphere.io/mlmd-grpc-image': DSPA_MLMD_GRPC_IMAGE,
+        'opensphere.io/mlmd-patched-at': new Date().toISOString(),
+      },
+    },
+    spec: {
+      mlmd: {
+        deploy: true,
+        grpc: {
+          image: DSPA_MLMD_GRPC_IMAGE,
+        },
+        envoy: {
+          image: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+          deployRoute: true,
+        },
+      },
+    },
+  }, req);
+  return {
+    id: 'dspa-mlmd-postgres',
+    label: 'DSPA MLMD PostgreSQL compatibility',
+    phase: alreadyPostgres ? 'Ready' : 'Configured',
+    detail: alreadyPostgres
+      ? `${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} already uses the PostgreSQL MLMD wrapper image.`
+      : `Set ${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} MLMD gRPC image to PostgreSQL wrapper ${DSPA_MLMD_GRPC_IMAGE}.`,
+    resources: [resourceRefFor(result, 'DataSciencePipelinesApplication')],
+  };
+}
+
+function backboneKserveS3SecretManifest(config, secret, redact = false) {
+  const accessKeyId = decodeSecretValue(secret?.data?.access_key);
+  const secretAccessKey = decodeSecretValue(secret?.data?.secret_key);
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: BACKBONE_KSERVE_S3_SECRET,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'kserve-object-storage',
+      },
+      annotations: {
+        'opensphere.io/source-secret': BACKBONE_RUSTFS_SECRET,
+        'serving.kserve.io/s3-endpoint': kserveS3Endpoint(config.endpoint),
+        'serving.kserve.io/s3-usehttps': config.useTls ? '1' : '0',
+        'serving.kserve.io/s3-region': config.region,
+        'serving.kserve.io/s3-verifyssl': config.insecureSkipTlsVerify ? '0' : '1',
+        'serving.kserve.io/s3-usevirtualbucket': '0',
+      },
+    },
+    type: 'Opaque',
+    stringData: {
+      AWS_ACCESS_KEY_ID: redact ? '<redacted-access-key-id>' : accessKeyId,
+      AWS_SECRET_ACCESS_KEY: redact ? '<redacted-secret-access-key>' : secretAccessKey,
+    },
+  };
+}
+
+function kserveRuntimeServiceAccountPatchPreview() {
+  return {
+    apiVersion: 'v1',
+    kind: 'ServiceAccount',
+    metadata: {
+      name: OAH_RUNTIME_SERVICE_ACCOUNT,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      annotations: {
+        'serving.kserve.io/storageSecretName': BACKBONE_KSERVE_S3_SECRET,
+      },
+    },
+  };
+}
+
+function backbonePostgresSecretPatchPreview() {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: BACKBONE_POSTGRES_SECRET,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'metadata-store',
+      },
+      annotations: {
+        'opensphere.io/backbone-claim': BACKBONE_CLAIM_NAME,
+        'opensphere.io/metadata-purposes': 'native-pipelines,model-registry,trustyai',
+      },
+    },
+    type: 'Opaque',
+    stringData: {
+      provider: 'postgres',
+      host: '<issued-by-backbone>',
+      port: '<issued-by-backbone>',
+      database: '<issued-by-backbone>',
+      username: '<issued-by-backbone>',
+      password: '<redacted>',
+    },
+  };
+}
+
+async function backboneConsumerInventory() {
+  const [claim, pgSecret, rustfsSecret, dataConnection, shellToken] = await Promise.all([
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_SECRET}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_RUSTFS_SECRET}`),
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/dataconnectionclaims/${BACKBONE_OBJECT_CONNECTION}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/shell-service-token`),
+  ]);
+  const pgReady = secretKeyReady(pgSecret, ['host', 'port', 'database', 'username', 'password']);
+  const rustfsReady = secretKeyReady(rustfsSecret, ['endpoint', 'bucket', 'access_key', 'secret_key']);
+  const metadataBound = pgReady && pgSecret?.metadata?.labels?.['opensphere.io/support-service'] === 'metadata-store';
+  const dataConnectionReady = !!dataConnection && dataConnection?.spec?.secretRef?.name === BACKBONE_RUSTFS_SECRET;
+  return {
+    claim: {
+      name: BACKBONE_CLAIM_NAME,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      exists: !!claim,
+      phase: claim?.status?.phase || (claim ? 'Configured' : 'Missing'),
+      ready: claim?.status?.phase === 'Ready' || (pgReady && rustfsReady),
+      message: claim?.status?.message || '',
+      postgresSecretRef: `${BACKBONE_CLAIM_NAMESPACE}/${BACKBONE_POSTGRES_SECRET}`,
+      objectStoreSecretRef: `${BACKBONE_CLAIM_NAMESPACE}/${BACKBONE_RUSTFS_SECRET}`,
+      resources: [
+        claim ? resourceRefFor(claim, 'BackboneClaim') : { kind: 'BackboneClaim', namespace: BACKBONE_CLAIM_NAMESPACE, name: BACKBONE_CLAIM_NAME, phase: 'Missing' },
+        secretItem(pgSecret, BACKBONE_POSTGRES_SECRET),
+        secretItem(rustfsSecret, BACKBONE_RUSTFS_SECRET),
+      ],
+    },
+    bindings: {
+      postgresSecretReady: pgReady,
+      rustfsSecretReady: rustfsReady,
+      metadataBound,
+      dataConnectionReady,
+      eventTokenConfigured: !!process.env.SHELL_SERVICE_TOKEN || !!shellToken,
+      dataConnection: dataConnection ? resourceRefFor(dataConnection, 'DataConnectionClaim') : { kind: 'DataConnectionClaim', namespace: BACKBONE_CLAIM_NAMESPACE, name: BACKBONE_OBJECT_CONNECTION, phase: 'Missing' },
+    },
+  };
+}
+
 async function backboneInventory() {
-  const namespace = await k8sJson(`/api/v1/namespaces/${BACKBONE_NAMESPACE}`);
+  const [namespace, consumer] = await Promise.all([
+    k8sJson(`/api/v1/namespaces/${BACKBONE_NAMESPACE}`),
+    backboneConsumerInventory(),
+  ]);
   if (!namespace) {
     return {
       namespace: BACKBONE_NAMESPACE,
       phase: 'Missing',
       ready: false,
       installed: false,
+      consumer,
       components: BACKBONE_COMPONENTS.map((component) => ({
         ...component,
         phase: 'Missing',
@@ -6234,14 +8396,15 @@ async function backboneInventory() {
     phase: ready ? 'Ready' : installed ? 'Configured' : 'Missing',
     ready,
     installed,
+    consumer,
     components,
     defaults: {
       objectStorage: {
         provider: 's3',
         endpoint: `http://backbone-rustfs.${BACKBONE_NAMESPACE}.svc.cluster.local:9000`,
-        bucket: 'oah-artifacts',
+        bucket: BACKBONE_OBJECT_BUCKET,
         region: 'us-east-1',
-        secretName: 'oah-backbone-rustfs-credentials',
+        secretName: BACKBONE_RUSTFS_SECRET,
         useTls: false,
         insecureSkipTlsVerify: false,
       },
@@ -6249,8 +8412,8 @@ async function backboneInventory() {
         provider: 'postgres',
         host: `backbone-postgres.${BACKBONE_NAMESPACE}.svc.cluster.local`,
         port: '5432',
-        database: 'opensphere_metadata',
-        username: 'console',
+        database: BACKBONE_POSTGRES_DATABASE,
+        username: 'issued-by-backbone',
         sslMode: 'prefer',
       },
     },
@@ -6479,6 +8642,176 @@ async function objectStorageBootstrap(req) {
   };
 }
 
+async function backboneClaimPreview(req) {
+  const [crdInstalledNow, namespaceExists, claim] = await Promise.all([
+    crdInstalled('backboneclaims.backbone.opensphere.io'),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}`),
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+  ]);
+  const manifests = [];
+  if (!namespaceExists) {
+    manifests.push({
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: BACKBONE_CLAIM_NAMESPACE,
+        labels: { 'opensphere.io/support-services': 'true' },
+      },
+    });
+  }
+  manifests.push(backboneClaimManifest());
+  return {
+    phase: crdInstalledNow && namespaceExists ? 'ReadyToApply' : 'RequiresBootstrap',
+    summary: {
+      manifests: manifests.length,
+      crdInstalled: crdInstalledNow,
+      namespaceExists: !!namespaceExists,
+      claimExists: !!claim,
+      claimPhase: claim?.status?.phase || '',
+    },
+    target: {
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      claim: BACKBONE_CLAIM_NAME,
+      postgresSecret: BACKBONE_POSTGRES_SECRET,
+      objectStoreSecret: BACKBONE_RUSTFS_SECRET,
+      database: BACKBONE_POSTGRES_DATABASE,
+      bucket: BACKBONE_OBJECT_BUCKET,
+    },
+    manifests,
+  };
+}
+
+async function backboneClaimApply(req) {
+  if (!(await crdInstalled('backboneclaims.backbone.opensphere.io'))) {
+    throw { code: 409, msg: 'BackboneClaim CRD is not installed. Apply Console Backbone first.' };
+  }
+  const namespace = await ensureSupportNamespace(BACKBONE_CLAIM_NAMESPACE, req);
+  const claim = backboneClaimManifest();
+  const claimPath = `/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`;
+  const result = await upsertK8s(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims`, claimPath, claim, {
+    metadata: { labels: claim.metadata.labels },
+    spec: claim.spec,
+  }, req);
+  return {
+    phase: 'Configured',
+    namespace,
+    claim: itemFromK8s(result, 'BackboneClaim'),
+    supportServices: await supportServices(req),
+  };
+}
+
+async function backboneBindingsPreview(req) {
+  const [claim, pgSecret, rustfsSecret, crdInstalledNow, dataConnection] = await Promise.all([
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_SECRET}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_RUSTFS_SECRET}`),
+    crdInstalled('dataconnectionclaims.ai.opensphere.io'),
+    k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/dataconnectionclaims/${BACKBONE_OBJECT_CONNECTION}`),
+  ]);
+  const objectConfig = backboneObjectStorageConfig(claim, rustfsSecret);
+  const phase = dataConnection
+    ? 'Configured'
+    : pgSecret && rustfsSecret && crdInstalledNow
+      ? 'ReadyToApply'
+      : pgSecret || rustfsSecret ? 'PartialReady' : 'WaitingForIssuedSecrets';
+  return {
+    phase,
+    summary: {
+      claimExists: !!claim,
+      postgresSecretExists: !!pgSecret,
+      objectStoreSecretExists: !!rustfsSecret,
+      crdInstalled: crdInstalledNow,
+      dataConnectionExists: !!dataConnection,
+    },
+    target: {
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      postgresSecret: BACKBONE_POSTGRES_SECRET,
+      objectStoreSecret: BACKBONE_RUSTFS_SECRET,
+      kserveStorageSecret: BACKBONE_KSERVE_S3_SECRET,
+      dataConnection: BACKBONE_OBJECT_CONNECTION,
+      endpoint: objectConfig.endpoint,
+      bucket: objectConfig.bucket,
+    },
+    manifests: [
+      backbonePostgresSecretPatchPreview(),
+      backboneObjectStorageClaimManifest(objectConfig),
+      ...(rustfsSecret ? [backboneKserveS3SecretManifest(objectConfig, rustfsSecret, true), kserveRuntimeServiceAccountPatchPreview()] : []),
+    ],
+  };
+}
+
+async function backboneBindingsApply(req) {
+  const [claim, pgSecret, rustfsSecret] = await Promise.all([
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_SECRET}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_RUSTFS_SECRET}`),
+  ]);
+  if (!claim) throw { code: 409, msg: 'BackboneClaim opensphere-system/ai-hub is missing. Apply the OAH Backbone claim first.' };
+  if (!pgSecret && !rustfsSecret) throw { code: 409, msg: 'Backbone-issued PostgreSQL and RustFS Secrets are not issued yet.' };
+
+  let patchedSecret = null;
+  if (pgSecret) {
+    const pgPatch = {
+      metadata: {
+        labels: {
+          ...(pgSecret.metadata?.labels || {}),
+          'app.kubernetes.io/part-of': 'opensphere-ai',
+          'opensphere.io/support-service': 'metadata-store',
+        },
+        annotations: {
+          ...(pgSecret.metadata?.annotations || {}),
+          'opensphere.io/backbone-claim': BACKBONE_CLAIM_NAME,
+          'opensphere.io/metadata-purposes': 'native-pipelines,model-registry,trustyai',
+        },
+      },
+    };
+    patchedSecret = await patchK8s(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_SECRET}`, pgPatch, req);
+  }
+
+  let crd = null;
+  let dataConnection = null;
+  let kserveS3Secret = null;
+  let runtimeServiceAccount = null;
+  if (rustfsSecret) {
+    crd = await ensureDataConnectionClaimCrd(req);
+    await ensureSupportNamespace(BACKBONE_CLAIM_NAMESPACE, req);
+    const objectConfig = backboneObjectStorageConfig(claim, rustfsSecret);
+    const objectClaim = backboneObjectStorageClaimManifest(objectConfig);
+    const claimPath = `/apis/ai.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/dataconnectionclaims/${BACKBONE_OBJECT_CONNECTION}`;
+    dataConnection = await upsertK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/dataconnectionclaims`, claimPath, objectClaim, {
+      metadata: { labels: objectClaim.metadata.labels, annotations: objectClaim.metadata.annotations },
+      spec: objectClaim.spec,
+    }, req);
+    const kserveSecret = backboneKserveS3SecretManifest(objectConfig, rustfsSecret);
+    kserveS3Secret = await upsertK8s(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets`, `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_KSERVE_S3_SECRET}`, kserveSecret, {
+      metadata: { labels: kserveSecret.metadata.labels, annotations: kserveSecret.metadata.annotations },
+      type: 'Opaque',
+      stringData: kserveSecret.stringData,
+    }, req);
+    runtimeServiceAccount = await patchK8s(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/serviceaccounts/${OAH_RUNTIME_SERVICE_ACCOUNT}`, {
+      metadata: {
+        annotations: {
+          'serving.kserve.io/storageSecretName': BACKBONE_KSERVE_S3_SECRET,
+        },
+      },
+    }, req);
+  }
+
+  return {
+    phase: pgSecret && rustfsSecret ? 'Configured' : 'PartialConfigured',
+    crd,
+    metadataSecret: patchedSecret ? { namespace: BACKBONE_CLAIM_NAMESPACE, name: patchedSecret.metadata?.name || BACKBONE_POSTGRES_SECRET } : null,
+    kserveStorageSecret: kserveS3Secret ? { namespace: BACKBONE_CLAIM_NAMESPACE, name: kserveS3Secret.metadata?.name || BACKBONE_KSERVE_S3_SECRET } : null,
+    runtimeServiceAccount: runtimeServiceAccount ? { namespace: BACKBONE_CLAIM_NAMESPACE, name: runtimeServiceAccount.metadata?.name || OAH_RUNTIME_SERVICE_ACCOUNT } : null,
+    dataConnection: dataConnection ? itemFromK8s(dataConnection, 'DataConnectionClaim') : null,
+    missing: {
+      postgresSecret: !pgSecret,
+      objectStoreSecret: !rustfsSecret,
+    },
+    supportServices: await supportServices(req),
+  };
+}
+
 function metadataPayload(body, options = {}) {
   const requirePassword = options.requirePassword !== false;
   const name = requireDnsName(String(body.name || 'oah-metadata-credentials').trim(), 'name');
@@ -6598,11 +8931,12 @@ function servingPreviewStatus(ready, required = true, partial = false) {
 }
 
 async function servingFoundationPreview(req) {
-  const [support, backends, setup, nativeCatalogResult] = await Promise.all([
+  const [support, backends, setup, nativeCatalogResult, inferenceSchema] = await Promise.all([
     supportServices(req),
     nativeBackends(),
     setupStatus(req),
     nativeCatalog(),
+    inferenceClaimServingSchemaStatus(),
   ]);
   const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
   const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
@@ -6671,6 +9005,19 @@ async function servingFoundationPreview(req) {
       resources: kserveCrds,
     },
     {
+      id: 'inference-contract',
+      label: 'InferenceClaim serving contract',
+      status: servingPreviewStatus(inferenceSchema.ready, true, inferenceSchema.installed),
+      evidence: inferenceSchema.ready
+        ? `InferenceClaim accepts ${inferenceSchema.total}/${inferenceSchema.total} serving adapter field(s).`
+        : inferenceSchema.installed
+          ? `InferenceClaim is missing serving adapter field(s): ${inferenceSchema.missing.join(', ')}.`
+          : 'InferenceClaim CRD is not installed.',
+      nextStep: inferenceSchema.ready
+        ? 'Create InferenceClaim resources with storageUri/modelUri for KServe or native fallback validation.'
+        : 'Configure native serving to update the InferenceClaim schema before KServe e2e.',
+    },
+    {
       id: 'operator-path',
       label: 'ODH/RHOAI Operator path',
       status: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
@@ -6680,9 +9027,13 @@ async function servingFoundationPreview(req) {
     {
       id: 'native-path',
       label: 'OpenSphere-native serving path',
-      status: servingPreviewStatus(serving.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
-      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (serving.message || 'OpenSphere-native serving component is not cataloged yet.'),
-      nextStep: serving.fallbackReady ? 'Use InferenceClaim fallback runtime while upstream KServe is absent.' : 'Seed native catalog and create native DataScienceCluster.',
+      status: servingPreviewStatus((serving.fallbackReady && inferenceSchema.ready) || nativeComponent?.ready, true, !!nativeComponent || serving.fallbackReady),
+      evidence: nativeComponent
+        ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.`
+        : (serving.fallbackReady
+          ? `InferenceClaim fallback CRD is installed; schema ${inferenceSchema.ready ? 'is KServe-adapter ready' : 'needs serving adapter fields'}.`
+          : (serving.message || 'OpenSphere-native serving component is not cataloged yet.')),
+      nextStep: serving.fallbackReady && inferenceSchema.ready ? 'Use InferenceClaim fallback runtime while upstream KServe is absent.' : 'Configure native serving or prepare ODH/RHOAI KServe.',
     },
   ];
   return {
@@ -6716,12 +9067,133 @@ async function servingFoundationPreview(req) {
   };
 }
 
+async function configureServingFoundation(req) {
+  const schema = await ensureInferenceClaimServingSchema(req);
+  const preview = await servingFoundationPreview(req);
+  return {
+    phase: preview.phase,
+    generatedAt: new Date().toISOString(),
+    steps: [{
+      id: 'inference-claim-serving-contract',
+      label: 'InferenceClaim serving adapter schema',
+      phase: schema.ready ? 'Succeeded' : 'Warning',
+      detail: schema.ready
+        ? `InferenceClaim accepts ${schema.total}/${schema.total} serving adapter field(s).`
+        : `Still missing: ${schema.missing.join(', ') || 'unknown'}`,
+    }],
+    preview,
+  };
+}
+
+function kfpSeedPipelineJobManifest(name) {
+  const apiBase = `http://ds-pipeline-${DSPA_NAME}.${BACKBONE_CLAIM_NAMESPACE}.svc.cluster.local:8888`;
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'pipeline-foundation',
+        'opensphere.io/kfp-seed': 'true',
+      },
+    },
+    spec: {
+      backoffLimit: 2,
+      ttlSecondsAfterFinished: 3600,
+      template: {
+        metadata: {
+          labels: {
+            'app.kubernetes.io/part-of': 'opensphere-ai',
+            'opensphere.io/kfp-seed': 'true',
+          },
+        },
+        spec: {
+          restartPolicy: 'Never',
+          serviceAccountName: OAH_RUNTIME_SERVICE_ACCOUNT,
+          containers: [{
+            name: 'seed',
+            image: DSPA_API_SERVER_IMAGE,
+            imagePullPolicy: 'IfNotPresent',
+            command: ['sh', '-ec'],
+            args: [`
+api_base="\${KFP_API_BASE:-${apiBase}}"
+pipeline_name="\${KFP_SEED_PIPELINE_NAME:-${DSPA_SEED_PIPELINE_NAME}}"
+sample_path="\${KFP_SEED_PIPELINE_PATH:-/samples/iris-pipeline-compiled.yaml}"
+for i in $(seq 1 60); do
+  if curl -fsS "$api_base/apis/v1beta1/healthz" >/dev/null; then
+    break
+  fi
+  sleep 5
+done
+pipelines="$(curl -fsS "$api_base/apis/v2beta1/pipelines?page_size=100" || echo '{}')"
+if echo "$pipelines" | grep -q "\\"display_name\\":\\"$pipeline_name\\""; then
+  echo "KFP seed pipeline $pipeline_name already exists."
+  exit 0
+fi
+curl -fsS -X POST "$api_base/apis/v2beta1/pipelines/upload?name=$pipeline_name" -F "uploadfile=@$sample_path"
+`],
+            env: [
+              { name: 'KFP_API_BASE', value: apiBase },
+              { name: 'KFP_SEED_PIPELINE_NAME', value: DSPA_SEED_PIPELINE_NAME },
+              { name: 'KFP_SEED_PIPELINE_PATH', value: '/samples/iris-pipeline-compiled.yaml' },
+            ],
+          }],
+        },
+      },
+    },
+  };
+}
+
+async function ensureKfpSeedPipeline(req) {
+  const info = await kfpBackendInfo(BACKBONE_CLAIM_NAMESPACE);
+  const probe = await probeKfpApi(info).catch((e) => ({ ready: false, message: e.msg || String(e) }));
+  if (!probe.ready) {
+    return {
+      id: 'kfp-seed-pipeline',
+      label: 'KFP seed pipeline',
+      phase: 'Skipped',
+      detail: `KFP API is not ready for seed check: ${probe.message || 'probe failed'}`,
+    };
+  }
+  const pipelines = await kfpFetchJson(info, '/apis/v2beta1/pipelines?page_size=100').catch(() => ({}));
+  const existing = (pipelines.pipelines || []).find((pipeline) => (
+    [pipeline.display_name, pipeline.name].filter(Boolean).includes(DSPA_SEED_PIPELINE_NAME)
+  ));
+  if (existing) {
+    return {
+      id: 'kfp-seed-pipeline',
+      label: 'KFP seed pipeline',
+      phase: 'Ready',
+      detail: `KFP seed pipeline ${DSPA_SEED_PIPELINE_NAME} is already registered.`,
+      resources: [{ kind: 'KfpPipeline', namespace: BACKBONE_CLAIM_NAMESPACE, name: existing.pipeline_id || DSPA_SEED_PIPELINE_NAME, phase: 'Ready' }],
+    };
+  }
+  const jobName = `oah-kfp-seed-${Date.now().toString(36)}`;
+  const job = kfpSeedPipelineJobManifest(jobName);
+  const created = await writeK8s(`/apis/batch/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/jobs`, 'POST', job, req);
+  return {
+    id: 'kfp-seed-pipeline',
+    label: 'KFP seed pipeline',
+    phase: 'Started',
+    detail: `Started seed Job ${BACKBONE_CLAIM_NAMESPACE}/${jobName} to register ${DSPA_SEED_PIPELINE_NAME}.`,
+    resources: [resourceRefFor(created, 'Job')],
+  };
+}
+
 async function pipelinesFoundationPreview(req) {
-  const [support, backends, setup, nativeCatalogResult] = await Promise.all([
+  const [support, backends, setup, nativeCatalogResult, backboneClaim, rustfsSecret, dspa, wildcardTlsSecret, proxyTlsSecrets, dspoDeployment] = await Promise.all([
     supportServices(req),
     nativeBackends(),
     setupStatus(req),
     nativeCatalog(),
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_RUSTFS_SECRET}`),
+    k8sJson(`/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${DSPA_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${OPENSPHERE_WILDCARD_TLS_SECRET}`),
+    Promise.all(dspaProxyTlsSecretNames().map((name) => k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${name}`))),
+    k8sJson(`/apis/apps/v1/namespaces/${DSPO_NAMESPACE}/deployments/${DSPO_OPERATOR_DEPLOYMENT}`),
   ]);
   const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
   const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
@@ -6738,6 +9210,22 @@ async function pipelinesFoundationPreview(req) {
     { name: 'experiments.pipelines.kubeflow.org', label: 'Kubeflow Experiment', installed: await crdInstalled('experiments.pipelines.kubeflow.org') },
     { name: 'runs.pipelines.kubeflow.org', label: 'Kubeflow Run', installed: await crdInstalled('runs.pipelines.kubeflow.org') },
   ];
+  const nativePipelineCrds = await Promise.all(PIPELINE_FALLBACK_CRDS.map(async (def) => ({
+    name: def.name,
+    label: def.kind,
+    installed: await crdInstalled(def.name),
+  })));
+  const nativePipelineReady = nativePipelineCrds.length > 0 && nativePipelineCrds.every((item) => item.installed);
+  const dspaCrdInstalled = pipelineCrds.find((item) => item.name === 'datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io')?.installed;
+  const dspaManifest = rustfsSecret ? backboneDspaManifest(backboneObjectStorageConfig(backboneClaim, rustfsSecret)) : null;
+  const dspaReady = !!dspa?.status?.conditions?.find((c) => c.type === 'Ready' && c.status === 'True');
+  const dspaApiReady = !!dspa?.status?.conditions?.find((c) => c.type === 'APIServerReady' && c.status === 'True');
+  const tlsReady = (proxyTlsSecrets || []).every(Boolean);
+  const dspoImagesReady = !!dspoDeployment?.spec?.template?.spec?.containers?.some((container) => (
+    (container.env || []).some((env) => env.name === 'IMAGES_KUBE_RBAC_PROXY' && env.value === DSPO_PUBLIC_IMAGES.kubeRbacProxy)
+    && (container.env || []).some((env) => env.name === 'IMAGES_MLMDENVOY' && env.value === DSPO_PUBLIC_IMAGES.mlmdEnvoy)
+    && (container.env || []).some((env) => env.name === 'IMAGES_MARIADB' && env.value === DSPO_PUBLIC_IMAGES.mariaDB)
+  ));
   const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'pipelines' || item.name === 'datasciencepipelines');
   const nativeDsc = {
     apiVersion: 'ai.opensphere.io/v1alpha1',
@@ -6775,7 +9263,7 @@ async function pipelinesFoundationPreview(req) {
       label: 'Metadata DB/credential Secret',
       status: servingPreviewStatus(metadata.ready, true, metadata.configured),
       evidence: metadata.evidence || 'Metadata credential inventory is unavailable.',
-      nextStep: metadata.ready || metadata.configured ? 'Bind KFP, Model Registry, and TrustyAI to separate database/schema credentials.' : 'Prepare metadata DB credentials before upstream KFP/DSPA install.',
+      nextStep: metadata.ready || metadata.configured ? 'Use Backbone PostgreSQL for DSPA/KFP runtime metadata and PostgreSQL-capable OAH services.' : 'Prepare metadata DB credentials before DSPA/KFP, Model Registry, TrustyAI, or native pipeline metadata use.',
     },
     {
       id: 'storage-class',
@@ -6800,6 +9288,46 @@ async function pipelinesFoundationPreview(req) {
       resources: pipelineCrds,
     },
     {
+      id: 'dspa-runtime',
+      label: 'DSPA runtime instance',
+      status: servingPreviewStatus(dspaReady || dspaApiReady, true, !!dspa),
+      evidence: dspa
+        ? `DSPA ${BACKBONE_CLAIM_NAMESPACE}/${dspa.metadata?.name} Ready=${dspa.status?.conditions?.find((c) => c.type === 'Ready')?.status || 'Unknown'}, APIServerReady=${dspa.status?.conditions?.find((c) => c.type === 'APIServerReady')?.status || 'Unknown'}.`
+        : dspaCrdInstalled
+          ? `DSPA CRD is installed; OAH can apply ${DSPA_NAME} bound to Backbone RustFS.`
+          : 'DSPA CRD is not installed; install DSPO before upstream KFP runtime can be created.',
+      nextStep: dspa
+        ? 'Wait for APIServerReady=True, then submit a KFP v2 run.'
+        : dspaCrdInstalled
+          ? 'Apply the OAH DSPA manifest.'
+          : 'Install Data Science Pipelines Operator CRDs/controller.',
+      resources: dspa ? [resourceRefFor(dspa, 'DataSciencePipelinesApplication')] : [],
+    },
+    {
+      id: 'dspo-image-compatibility',
+      label: 'DSPO public image compatibility',
+      status: servingPreviewStatus(dspoImagesReady, false, !!dspoDeployment),
+      evidence: dspoDeployment
+        ? dspoImagesReady
+          ? 'DSPO operator uses public kube-rbac-proxy, MLMD envoy, and MariaDB image overrides.'
+          : 'DSPO operator is installed but still may reference registry.redhat.io defaults.'
+        : 'DSPO operator deployment is not installed.',
+      nextStep: dspoImagesReady ? 'Use DSPO-managed public images in local/Kubernetes clusters.' : 'Configure DSPO image overrides before creating DSPA resources outside OpenShift AI.',
+      resources: dspoDeployment ? [resourceRefFor(dspoDeployment, 'Deployment')] : [],
+    },
+    {
+      id: 'dspa-proxy-tls',
+      label: 'DSPA proxy TLS compatibility',
+      status: servingPreviewStatus(tlsReady, false, !!wildcardTlsSecret),
+      evidence: tlsReady
+        ? `${proxyTlsSecrets.filter(Boolean).length}/${dspaProxyTlsSecretNames().length} DSPA proxy TLS Secret(s) exist.`
+        : wildcardTlsSecret
+          ? `${OPENSPHERE_WILDCARD_TLS_SECRET} is available; OAH can copy it for DSPO proxy TLS compatibility.`
+          : `${OPENSPHERE_WILDCARD_TLS_SECRET} is missing and OpenShift service-ca may be required.`,
+      nextStep: tlsReady ? 'DSPA proxy pods can mount TLS Secret volumes.' : 'Create proxy TLS Secrets before waiting for APIServerReady/MLMDProxyReady.',
+      resources: (proxyTlsSecrets || []).filter(Boolean).map((secret) => resourceRefFor(secret, 'Secret')),
+    },
+    {
       id: 'operator-path',
       label: 'ODH/RHOAI Operator path',
       status: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
@@ -6809,9 +9337,16 @@ async function pipelinesFoundationPreview(req) {
     {
       id: 'native-path',
       label: 'OpenSphere-native pipeline path',
-      status: servingPreviewStatus(pipelines.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
-      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (pipelines.message || 'OpenSphere-native pipeline component is not cataloged yet.'),
-      nextStep: pipelines.fallbackReady ? 'Use PipelineRunClaim fallback runtime while upstream KFP/Tekton is absent.' : 'Seed native catalog and create native DataScienceCluster.',
+      status: servingPreviewStatus(nativePipelineReady || pipelines.fallbackReady || nativeComponent?.ready, true, !!nativeComponent),
+      evidence: nativePipelineReady
+        ? `${nativePipelineCrds.length}/${nativePipelineCrds.length} OpenSphere pipeline CRD(s) are installed.`
+        : nativeComponent
+          ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.`
+          : (pipelines.message || 'OpenSphere-native pipeline component is not cataloged yet.'),
+      nextStep: nativePipelineReady || pipelines.fallbackReady
+        ? 'Use PipelineRunClaim fallback runtime while upstream KFP/Tekton is absent.'
+        : 'Configure native pipelines or prepare ODH/RHOAI Data Science Pipelines.',
+      resources: nativePipelineCrds,
     },
   ];
   return {
@@ -6834,6 +9369,23 @@ async function pipelinesFoundationPreview(req) {
         manifests: [nativeDsc],
       },
       {
+        id: 'upstream-dspa-backbone',
+        label: 'DSPA bound to Backbone PostgreSQL + RustFS',
+        recommended: !!dspaCrdInstalled && !!dspaManifest,
+        phase: dspaReady ? 'Ready' : dspa ? 'Configured' : dspaCrdInstalled ? 'Required' : 'Blocked',
+        action: dspaCrdInstalled
+          ? 'Apply DataSciencePipelinesApplication oah-dspa using Backbone PostgreSQL externalDB and Backbone RustFS externalStorage.'
+          : 'Install Data Science Pipelines Operator first; DSPA CRD is missing.',
+        manifests: dspaManifest ? [
+          dspoImageCompatibilityPreview(),
+          ...dspaProxyTlsSecretNames().map((name) => dspaProxyTlsSecretManifest(name, wildcardTlsSecret, true)),
+          dspaMariadbCompatibilityNetworkPolicyManifest(),
+          dspaMlmdCompatibilityNetworkPolicyManifest(),
+          dspaPostgresServerConfigMap(),
+          dspaManifest,
+        ] : [],
+      },
+      {
         id: 'upstream-odh',
         label: 'ODH/RHOAI Data Science Pipelines upstream',
         recommended: false,
@@ -6842,6 +9394,112 @@ async function pipelinesFoundationPreview(req) {
         manifests: upstreamManifests,
       },
     ],
+  };
+}
+
+async function configurePipelinesFoundation(req) {
+  const { created, skipped } = await ensureFoundationCrds(PIPELINE_FALLBACK_CRDS, req);
+  const dspoCompatibilitySteps = await ensureDspoImageCompatibility(req);
+  const tlsCompatibility = await ensureDspaTlsCompatibility(req);
+  const networkCompatibility = await ensureDspaNetworkCompatibility(req).catch((e) => ({
+    phase: 'Warning',
+    detail: e.msg || String(e),
+    manifests: [
+      dspaMariadbCompatibilityNetworkPolicyManifest(),
+      dspaMlmdCompatibilityNetworkPolicyManifest(),
+    ],
+  }));
+  const [dspaCrdInstalled, backboneClaim, rustfsSecret, postgresConfig] = await Promise.all([
+    crdInstalled('datasciencepipelinesapplications.datasciencepipelinesapplications.opendatahub.io'),
+    k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`),
+    k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_RUSTFS_SECRET}`),
+    dspaPostgresConfig(),
+  ]);
+  let dspaResult = null;
+  let dspaStep = {
+    id: 'upstream-dspa',
+    label: 'DSPA upstream runtime',
+    phase: 'Skipped',
+    detail: 'DataSciencePipelinesApplication CRD is not installed.',
+  };
+  if (dspaCrdInstalled && rustfsSecret) {
+    const serverConfigManifest = dspaPostgresServerConfigMap();
+    await upsertK8s(
+      `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/configmaps`,
+      `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/configmaps/${serverConfigManifest.metadata.name}`,
+      serverConfigManifest,
+      { metadata: serverConfigManifest.metadata, data: serverConfigManifest.data },
+      req,
+    );
+    const dspaManifest = backboneDspaManifest(backboneObjectStorageConfig(backboneClaim, rustfsSecret), postgresConfig);
+    const dspaPath = `/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${dspaManifest.metadata.name}`;
+    dspaResult = await upsertK8s(`/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications`, dspaPath, dspaManifest, {
+      metadata: {
+        labels: dspaManifest.metadata.labels,
+        annotations: {
+          ...dspaManifest.metadata.annotations,
+          'opensphere.io/reconcile-at': new Date().toISOString(),
+        },
+      },
+      spec: dspaManifest.spec,
+    }, req);
+    dspaStep = {
+      id: 'upstream-dspa',
+      label: 'DSPA upstream runtime',
+      phase: 'Configured',
+      detail: `Applied DataSciencePipelinesApplication ${BACKBONE_CLAIM_NAMESPACE}/${dspaResult.metadata?.name || dspaManifest.metadata.name} with Backbone PostgreSQL externalDB.`,
+    };
+  } else if (dspaCrdInstalled && !rustfsSecret) {
+    dspaStep = {
+      id: 'upstream-dspa',
+      label: 'DSPA upstream runtime',
+      phase: 'Warning',
+      detail: `${BACKBONE_RUSTFS_SECRET} is missing; apply Backbone bindings before creating DSPA.`,
+    };
+  }
+  const mlmdPostgresCompatibility = await ensureDspaMlmdPostgresCompatibility(req, postgresConfig).catch((e) => ({
+    id: 'dspa-mlmd-postgres',
+    label: 'DSPA MLMD PostgreSQL compatibility',
+    phase: 'Warning',
+    detail: e.msg || String(e),
+  }));
+  const kfpSeedPipeline = await ensureKfpSeedPipeline(req).catch((e) => ({
+    id: 'kfp-seed-pipeline',
+    label: 'KFP seed pipeline',
+    phase: 'Warning',
+    detail: e.msg || String(e),
+  }));
+  const preview = await pipelinesFoundationPreview(req);
+  return {
+    phase: preview.phase,
+    generatedAt: new Date().toISOString(),
+    steps: [
+      {
+        id: 'pipeline-fallback-crds',
+        label: 'OpenSphere native pipeline CRDs',
+        phase: 'Succeeded',
+        detail: `created: ${created.join(', ') || 'none'}; skipped: ${skipped.join(', ') || 'none'}`,
+      },
+      ...dspoCompatibilitySteps,
+      {
+        id: 'dspa-proxy-tls',
+        label: 'DSPA proxy TLS compatibility',
+        phase: tlsCompatibility.phase,
+        detail: tlsCompatibility.detail,
+        resources: tlsCompatibility.manifests,
+      },
+      {
+        id: 'dspa-network',
+        label: 'DSPA NetworkPolicy compatibility',
+        phase: networkCompatibility.phase,
+        detail: networkCompatibility.detail,
+        resources: networkCompatibility.manifests || [],
+      },
+      dspaStep,
+      mlmdPostgresCompatibility,
+      kfpSeedPipeline,
+    ],
+    preview,
   };
 }
 
@@ -6864,6 +9522,7 @@ async function modelRegistryFoundationPreview(req) {
   ];
   const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'model-registry' || item.name === 'modelregistry');
   const fallbackConfigMap = await k8sJson('/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions');
+  const nativePgStore = await readModelRegistryPgState().catch((e) => ({ error: e.msg || String(e) }));
   const fallbackManifest = {
     apiVersion: 'v1',
     kind: 'ConfigMap',
@@ -6938,13 +9597,19 @@ async function modelRegistryFoundationPreview(req) {
     {
       id: 'native-path',
       label: 'OpenSphere-native registry path',
-      status: servingPreviewStatus(registry.fallbackReady || nativeComponent?.ready || !!fallbackConfigMap, true, !!nativeComponent),
-      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : fallbackConfigMap ? 'OpenSphere registry ConfigMap exists.' : (registry.message || 'OpenSphere-native registry component is not cataloged yet.'),
-      nextStep: registry.fallbackReady || fallbackConfigMap ? 'Use ConfigMap-backed registry for model versions and promotion audit.' : 'Seed native catalog and create native DataScienceCluster.',
+      status: servingPreviewStatus(!nativePgStore.error || registry.fallbackReady || nativeComponent?.ready || !!fallbackConfigMap, true, !!nativeComponent || !!fallbackConfigMap),
+      evidence: !nativePgStore.error
+        ? `Backbone PostgreSQL native registry is reachable at ${nativePgStore.source?.endpoint}.`
+        : nativeComponent
+          ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.`
+          : fallbackConfigMap ? `OpenSphere registry ConfigMap mirror exists; PostgreSQL unavailable: ${nativePgStore.error}.` : (registry.message || nativePgStore.error || 'OpenSphere-native registry component is not cataloged yet.'),
+      nextStep: !nativePgStore.error
+        ? 'Use Backbone PostgreSQL as the durable native registry store; keep ConfigMap as compatibility mirror.'
+        : registry.fallbackReady || fallbackConfigMap ? 'Repair Backbone PostgreSQL binding; ConfigMap mirror can keep compatibility temporarily.' : 'Seed native catalog and create native DataScienceCluster.',
     },
   ];
   return {
-    phase: registry.upstreamReady ? 'UpstreamReady' : registry.fallbackReady || fallbackConfigMap ? 'NativeFallbackReady' : 'NeedsModelRegistryFoundation',
+    phase: registry.upstreamReady ? 'UpstreamReady' : !nativePgStore.error ? 'NativePostgresReady' : registry.fallbackReady || fallbackConfigMap ? 'NativeFallbackReady' : 'NeedsModelRegistryFoundation',
     generatedAt: new Date().toISOString(),
     summary: {
       ready: checks.filter((item) => item.status === 'Ready').length,
@@ -6958,8 +9623,8 @@ async function modelRegistryFoundationPreview(req) {
         id: 'native',
         label: 'OpenSphere-native model registry',
         recommended: !registry.upstreamReady,
-        phase: registry.fallbackReady || fallbackConfigMap ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
-        action: 'Seed native catalog, subscribe model-registry, and keep ConfigMap-backed registry storage available.',
+        phase: !nativePgStore.error || registry.fallbackReady || fallbackConfigMap ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Use Backbone PostgreSQL as the durable model registry store and keep ConfigMap-backed registry data as compatibility mirror.',
         manifests: [fallbackManifest, nativeDsc],
       },
       {
@@ -6971,6 +9636,100 @@ async function modelRegistryFoundationPreview(req) {
         manifests: upstreamManifests,
       },
     ],
+  };
+}
+
+function oahMonitoringTargetManifest() {
+  return {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'MonitoringTarget',
+    metadata: {
+      name: 'oah-default-model-monitoring',
+      namespace: 'opensphere-system',
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'observability',
+      },
+    },
+    spec: {
+      backend: 'auto',
+      targetRef: {
+        apiVersion: 'ai.opensphere.io/v1alpha1',
+        kind: 'InferenceClaim',
+        name: 'oah-serving-smoke',
+        namespace: 'opensphere-system',
+      },
+      metrics: ['drift', 'bias', 'explainability'],
+      threshold: 0.8,
+      enforcement: 'audit',
+    },
+  };
+}
+
+function oahServiceMonitorManifest() {
+  return {
+    apiVersion: 'monitoring.coreos.com/v1',
+    kind: 'ServiceMonitor',
+    metadata: {
+      name: 'opensphere-ai-controller',
+      namespace: 'opensphere-system',
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'observability',
+      },
+    },
+    spec: {
+      selector: {
+        matchLabels: {
+          'opensphere.io/dupa-plugin': 'ai',
+        },
+      },
+      namespaceSelector: {
+        matchNames: ['opensphere-system'],
+      },
+      endpoints: [{
+        targetPort: 8080,
+        path: '/metrics',
+        interval: '30s',
+        scrapeTimeout: '10s',
+      }],
+    },
+  };
+}
+
+function oahPrometheusRuleManifest() {
+  return {
+    apiVersion: 'monitoring.coreos.com/v1',
+    kind: 'PrometheusRule',
+    metadata: {
+      name: 'opensphere-ai-controller',
+      namespace: 'opensphere-system',
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'observability',
+      },
+    },
+    spec: {
+      groups: [{
+        name: 'opensphere-ai-controller.rules',
+        rules: [
+          {
+            alert: 'OpenSphereAIControllerReconcileFailures',
+            expr: 'increase(opensphere_ai_controller_reconcile_failures_total[10m]) > 0',
+            for: '5m',
+            labels: { severity: 'warning' },
+            annotations: {
+              summary: 'OpenSphere AI Hub controller reconcile failures detected',
+              description: 'One or more OAH controller reconciliations failed during the last 10 minutes.',
+            },
+          },
+          {
+            record: 'opensphere_ai_controller_reconcile_success_ratio',
+            expr: 'sum(rate(opensphere_ai_controller_reconcile_total[5m])) / clamp_min(sum(rate(opensphere_ai_controller_reconcile_total[5m])) + sum(rate(opensphere_ai_controller_reconcile_failures_total[5m])), 1)',
+          },
+        ],
+      }],
+    },
   };
 }
 
@@ -7005,26 +9764,9 @@ async function observabilityFoundationPreview(req) {
       },
     },
   };
-  const sampleTarget = {
-    apiVersion: 'ai.opensphere.io/v1alpha1',
-    kind: 'MonitoringTarget',
-    metadata: {
-      name: 'sample-model-monitoring',
-      namespace: 'default',
-      labels: { 'app.kubernetes.io/part-of': 'opensphere-ai' },
-    },
-    spec: {
-      backend: 'auto',
-      targetRef: {
-        apiVersion: 'ai.opensphere.io/v1alpha1',
-        kind: 'InferenceClaim',
-        name: 'model-deployment',
-      },
-      metrics: ['drift', 'bias', 'explainability'],
-      threshold: 0.8,
-      enforcement: 'audit',
-    },
-  };
+  const sampleTarget = oahMonitoringTargetManifest();
+  const serviceMonitor = oahServiceMonitorManifest();
+  const prometheusRule = oahPrometheusRuleManifest();
   const upstreamPlan = setupPlanFrom({
     provider: 'opendatahub',
     namespace: 'opendatahub',
@@ -7099,8 +9841,13 @@ async function observabilityFoundationPreview(req) {
         label: 'OpenSphere-native monitoring fallback',
         recommended: !monitoring.upstreamReady,
         phase: monitoring.fallbackReady ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
-        action: 'Seed native catalog, subscribe monitoring, and reconcile MonitoringTarget resources.',
-        manifests: [nativeDsc, sampleTarget],
+        action: 'Seed native catalog, subscribe monitoring, reconcile MonitoringTarget resources, and expose controller metrics to Prometheus when CRDs are available.',
+        manifests: [
+          nativeDsc,
+          sampleTarget,
+          ...(observabilityCrds.find((item) => item.name === 'servicemonitors.monitoring.coreos.com')?.installed ? [serviceMonitor] : []),
+          ...(observabilityCrds.find((item) => item.name === 'prometheusrules.monitoring.coreos.com')?.installed ? [prometheusRule] : []),
+        ],
       },
       {
         id: 'upstream-odh',
@@ -7111,6 +9858,282 @@ async function observabilityFoundationPreview(req) {
         manifests: upstreamManifests,
       },
     ],
+  };
+}
+
+async function configureObservabilityFoundation(req) {
+  const { created, skipped } = await ensureFoundationCrds(OBSERVABILITY_FALLBACK_CRDS, req);
+  if (OBSERVABILITY_FALLBACK_CRDS.some((def) => def.name === 'monitoringtargets.ai.opensphere.io')) {
+    await waitForCrd('monitoringtargets.ai.opensphere.io');
+  }
+  const target = oahMonitoringTargetManifest();
+  const targetPath = `/apis/ai.opensphere.io/v1alpha1/namespaces/${target.metadata.namespace}/monitoringtargets/${target.metadata.name}`;
+  const targetResult = await upsertK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${target.metadata.namespace}/monitoringtargets`, targetPath, target, {
+    metadata: { labels: target.metadata.labels },
+    spec: target.spec,
+  }, req);
+  const reconcile = await reconcileMonitoringTarget(targetResult).catch((e) => ({ phase: 'Warning', error: e.msg || String(e) }));
+
+  const steps = [
+    {
+      id: 'monitoring-crds',
+      label: 'OpenSphere MonitoringTarget CRD',
+      phase: created.length ? 'Created' : 'Ready',
+      detail: created.length ? `Created ${created.join(', ')}.` : `Already installed: ${skipped.join(', ') || 'MonitoringTarget'}.`,
+    },
+    {
+      id: 'monitoring-target',
+      label: 'Default MonitoringTarget',
+      phase: targetResult?.metadata?.name ? 'Configured' : 'Warning',
+      detail: `Applied ${target.metadata.namespace}/${target.metadata.name}; reconcile phase ${reconcile.phase || 'Unknown'}.`,
+    },
+  ];
+
+  let serviceMonitor = null;
+  if (await crdInstalled('servicemonitors.monitoring.coreos.com')) {
+    const manifest = oahServiceMonitorManifest();
+    serviceMonitor = await upsertK8s(`/apis/monitoring.coreos.com/v1/namespaces/${manifest.metadata.namespace}/servicemonitors`, `/apis/monitoring.coreos.com/v1/namespaces/${manifest.metadata.namespace}/servicemonitors/${manifest.metadata.name}`, manifest, {
+      metadata: { labels: manifest.metadata.labels },
+      spec: manifest.spec,
+    }, req);
+    steps.push({
+      id: 'service-monitor',
+      label: 'Prometheus ServiceMonitor',
+      phase: 'Configured',
+      detail: `Applied ${manifest.metadata.namespace}/${manifest.metadata.name} for /metrics scraping.`,
+    });
+  } else {
+    steps.push({
+      id: 'service-monitor',
+      label: 'Prometheus ServiceMonitor',
+      phase: 'Skipped',
+      detail: 'ServiceMonitor CRD is not installed.',
+    });
+  }
+
+  let prometheusRule = null;
+  if (await crdInstalled('prometheusrules.monitoring.coreos.com')) {
+    const manifest = oahPrometheusRuleManifest();
+    prometheusRule = await upsertK8s(`/apis/monitoring.coreos.com/v1/namespaces/${manifest.metadata.namespace}/prometheusrules`, `/apis/monitoring.coreos.com/v1/namespaces/${manifest.metadata.namespace}/prometheusrules/${manifest.metadata.name}`, manifest, {
+      metadata: { labels: manifest.metadata.labels },
+      spec: manifest.spec,
+    }, req);
+    steps.push({
+      id: 'prometheus-rule',
+      label: 'Prometheus alert rule',
+      phase: 'Configured',
+      detail: `Applied ${manifest.metadata.namespace}/${manifest.metadata.name} for OAH controller reconcile failures.`,
+    });
+  } else {
+    steps.push({
+      id: 'prometheus-rule',
+      label: 'Prometheus alert rule',
+      phase: 'Skipped',
+      detail: 'PrometheusRule CRD is not installed.',
+    });
+  }
+
+  const preview = await observabilityFoundationPreview(req);
+  return {
+    phase: steps.some((step) => step.phase === 'Warning') ? 'ConfiguredWithWarnings' : 'Configured',
+    generatedAt: new Date().toISOString(),
+    steps,
+    resources: {
+      monitoringTarget: targetResult ? resourceRefFor(targetResult, 'MonitoringTarget') : null,
+      serviceMonitor: serviceMonitor ? resourceRefFor(serviceMonitor, 'ServiceMonitor') : null,
+      prometheusRule: prometheusRule ? resourceRefFor(prometheusRule, 'PrometheusRule') : null,
+    },
+    preview,
+  };
+}
+
+function oahDistributedWorkloadManifest() {
+  return {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'DistributedWorkloadClaim',
+    metadata: {
+      name: 'oah-distributed-smoke',
+      namespace: 'opensphere-system',
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'distributed-workloads',
+      },
+    },
+    spec: {
+      backend: 'auto',
+      workloadType: 'ray',
+      queue: 'default-ai-queue',
+      computeBackendRef: {
+        apiVersion: 'ai.opensphere.io/v1alpha1',
+        kind: 'ComputeBackendClaim',
+        name: 'local-docker-gpu-bridge',
+        namespace: 'opensphere-system',
+      },
+      datasetRef: {
+        apiVersion: 'ai.opensphere.io/v1alpha1',
+        kind: 'DatasetClaim',
+        name: 'oah-smoke-dataset',
+        namespace: 'opensphere-system',
+      },
+    },
+  };
+}
+
+async function distributedFoundationPreview(req) {
+  const [support, backends, setup, nativeCatalogResult, gpu, compute] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    nativeCatalog(),
+    gpuInventory(),
+    computeBackendResources(),
+  ]);
+  const supportById = Object.fromEntries((support.items || []).map((item) => [item.id, item]));
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const distributed = backendById['distributed-workloads'] || {};
+  const computeSupport = supportById['compute-backend'] || {};
+  const storage = supportById['storage-class'] || {};
+  const distributedCrds = [
+    { name: 'distributedworkloadclaims.ai.opensphere.io', label: 'DistributedWorkloadClaim', installed: await crdInstalled('distributedworkloadclaims.ai.opensphere.io') },
+    { name: 'workloads.kueue.x-k8s.io', label: 'Kueue Workload', installed: await crdInstalled('workloads.kueue.x-k8s.io') },
+    { name: 'localqueues.kueue.x-k8s.io', label: 'Kueue LocalQueue', installed: await crdInstalled('localqueues.kueue.x-k8s.io') },
+    { name: 'clusterqueues.kueue.x-k8s.io', label: 'Kueue ClusterQueue', installed: await crdInstalled('clusterqueues.kueue.x-k8s.io') },
+    { name: 'rayjobs.ray.io', label: 'RayJob', installed: await crdInstalled('rayjobs.ray.io') },
+    { name: 'rayclusters.ray.io', label: 'RayCluster', installed: await crdInstalled('rayclusters.ray.io') },
+  ];
+  const nativeComponent = (nativeCatalogResult.components || []).find((item) => item.name === 'distributed-workloads' || item.name === 'kueue' || item.name === 'ray');
+  const sampleWorkload = oahDistributedWorkloadManifest();
+  const nativeDsc = {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        'distributed-workloads': { managementState: 'Managed' },
+        kueue: { managementState: 'Managed' },
+        ray: { managementState: 'Managed' },
+      },
+    },
+  };
+  const upstreamPlan = setupPlanFrom({
+    provider: 'opendatahub',
+    namespace: 'opendatahub',
+    operatorPackage: 'opendatahub-operator',
+    channel: 'fast',
+    source: 'community-operators',
+    sourceNamespace: 'openshift-marketplace',
+    dataScienceClusterName: 'default-dsc',
+    components: ['kueue', 'ray'],
+  });
+  const upstreamManifests = setupManifests(upstreamPlan).filter((item) => ['Namespace', 'OperatorGroup', 'Subscription', 'DataScienceCluster'].includes(item.kind));
+  const nativeReady = distributed.fallbackReady || distributedCrds.find((item) => item.name === 'distributedworkloadclaims.ai.opensphere.io')?.installed;
+  const upstreamReady = ['workloads.kueue.x-k8s.io', 'localqueues.kueue.x-k8s.io', 'clusterqueues.kueue.x-k8s.io', 'rayjobs.ray.io'].some((name) => distributedCrds.find((item) => item.name === name)?.installed);
+  const checks = [
+    {
+      id: 'compute-backend',
+      label: 'Compute/GPU backend',
+      status: servingPreviewStatus(computeSupport.ready || compute.items?.length, true, computeSupport.configured || compute.items?.length),
+      evidence: computeSupport.evidence || `${compute.items?.length || 0} ComputeBackendClaim(s), GPU phase ${gpu.phase}.`,
+      nextStep: computeSupport.ready || compute.items?.length ? 'Route distributed workloads to an available compute backend.' : 'Register ComputeBackendClaim or expose Kubernetes GPU resources.',
+    },
+    {
+      id: 'storage-class',
+      label: 'Default StorageClass',
+      status: servingPreviewStatus(storage.ready, true, storage.configured),
+      evidence: storage.evidence || 'StorageClass inventory is unavailable.',
+      nextStep: storage.ready ? 'Distributed worker scratch PVCs can use the default StorageClass when needed.' : 'Configure a default StorageClass for PVC-backed worker jobs.',
+    },
+    {
+      id: 'native-crd',
+      label: 'OpenSphere DistributedWorkloadClaim CRD',
+      status: servingPreviewStatus(nativeReady, true, !!nativeComponent),
+      evidence: nativeReady ? 'DistributedWorkloadClaim CRD is installed or available through fallback readiness.' : (distributed.message || 'DistributedWorkloadClaim CRD is not installed.'),
+      nextStep: nativeReady ? 'Run a native distributed workload smoke.' : 'Configure native distributed workload foundation.',
+      resources: distributedCrds.filter((item) => item.name === 'distributedworkloadclaims.ai.opensphere.io'),
+    },
+    {
+      id: 'upstream-crds',
+      label: 'Kueue/Ray upstream CRDs',
+      status: upstreamReady ? 'Configured' : 'Optional',
+      evidence: `${distributedCrds.filter((item) => item.installed && item.name !== 'distributedworkloadclaims.ai.opensphere.io').length}/5 Kueue/Ray CRD(s) detected.`,
+      nextStep: upstreamReady ? 'Use backend=upstream to submit Kueue-managed Jobs or RayJobs.' : 'Install Kueue/Ray only when queue admission or Ray-native clusters are required.',
+      resources: distributedCrds.filter((item) => item.name !== 'distributedworkloadclaims.ai.opensphere.io'),
+    },
+    {
+      id: 'native-path',
+      label: 'OpenSphere-native distributed path',
+      status: servingPreviewStatus(distributed.fallbackReady || nativeReady || nativeComponent?.ready, true, !!nativeComponent),
+      evidence: nativeComponent ? `${nativeComponent.displayName || nativeComponent.name} is ${nativeComponent.phase}.` : (distributed.message || 'OpenSphere-native distributed component is not cataloged yet.'),
+      nextStep: distributed.fallbackReady || nativeReady ? 'Use Kubernetes Job fallback until Kueue/Ray upstream is installed.' : 'Seed native catalog and create native DataScienceCluster.',
+    },
+  ];
+  return {
+    phase: distributed.upstreamReady ? 'UpstreamReady' : nativeReady || distributed.fallbackReady ? 'NativeFallbackReady' : 'NeedsDistributedFoundation',
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ready: checks.filter((item) => item.status === 'Ready').length,
+      configured: checks.filter((item) => item.status === 'Configured').length,
+      required: checks.filter((item) => item.status === 'Required').length,
+      total: checks.length,
+    },
+    checks,
+    installOptions: [
+      {
+        id: 'native',
+        label: 'OpenSphere-native distributed fallback',
+        recommended: !distributed.upstreamReady,
+        phase: nativeReady || distributed.fallbackReady ? 'Ready' : nativeComponent ? 'Configured' : 'Required',
+        action: 'Install DistributedWorkloadClaim, submit a default workload, and reconcile it to a Kubernetes Job fallback.',
+        manifests: [nativeDsc, sampleWorkload],
+      },
+      {
+        id: 'upstream-odh',
+        label: 'Kueue/Ray upstream',
+        recommended: false,
+        phase: setup.operators?.olmAvailable ? 'Configured' : 'Optional',
+        action: 'Use Setup wizard when OKD/OpenShift OLM and ODH/RHOAI operator path are available, then validate Kueue admission and RayJob execution.',
+        manifests: upstreamManifests,
+      },
+    ],
+  };
+}
+
+async function configureDistributedFoundation(req) {
+  const { created, skipped } = await ensureFoundationCrds(DISTRIBUTED_FALLBACK_CRDS, req);
+  if (DISTRIBUTED_FALLBACK_CRDS.some((def) => def.name === 'distributedworkloadclaims.ai.opensphere.io')) {
+    await waitForCrd('distributedworkloadclaims.ai.opensphere.io');
+  }
+  const workload = oahDistributedWorkloadManifest();
+  const workloadPath = `/apis/ai.opensphere.io/v1alpha1/namespaces/${workload.metadata.namespace}/distributedworkloadclaims/${workload.metadata.name}`;
+  const workloadResult = await upsertK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${workload.metadata.namespace}/distributedworkloadclaims`, workloadPath, workload, {
+    metadata: { labels: workload.metadata.labels },
+    spec: workload.spec,
+  }, req);
+  const reconcile = await reconcileDistributedWorkloadClaim(workloadResult).catch((e) => ({ phase: 'Warning', error: e.msg || String(e) }));
+  const preview = await distributedFoundationPreview(req);
+  return {
+    phase: reconcile.phase === 'Retrying' || reconcile.phase === 'Warning' ? 'ConfiguredWithWarnings' : 'Configured',
+    generatedAt: new Date().toISOString(),
+    steps: [
+      {
+        id: 'distributed-crds',
+        label: 'OpenSphere DistributedWorkloadClaim CRD',
+        phase: created.length ? 'Created' : 'Ready',
+        detail: created.length ? `Created ${created.join(', ')}.` : `Already installed: ${skipped.join(', ') || 'DistributedWorkloadClaim'}.`,
+      },
+      {
+        id: 'distributed-workload',
+        label: 'Default distributed workload',
+        phase: workloadResult?.metadata?.name ? 'Configured' : 'Warning',
+        detail: `Applied ${workload.metadata.namespace}/${workload.metadata.name}; reconcile phase ${reconcile.phase || 'Unknown'}.`,
+      },
+    ],
+    resources: {
+      distributedWorkload: workloadResult ? resourceRefFor(workloadResult, 'DistributedWorkloadClaim') : null,
+      job: reconcile.jobName ? { kind: 'Job', namespace: workload.metadata.namespace, name: reconcile.jobName, phase: reconcile.phase || 'Unknown' } : null,
+    },
+    reconcile,
+    preview,
   };
 }
 
@@ -7155,6 +10178,7 @@ async function supportServices(req) {
   const monitoring = backendById.monitoring;
   const distributed = backendById['distributed-workloads'];
   const backboneById = Object.fromEntries((backbone.components || []).map((item) => [item.id, item]));
+  const backboneBindings = backbone.consumer?.bindings || {};
   const computeReady = (compute || []).some((item) => item.ready);
   const gpuReady = gpu.ready || (compute || []).some((item) => item.gpus?.length);
   const items = [
@@ -7192,20 +10216,25 @@ async function supportServices(req) {
       'Metadata database / Secret',
       'Metadata',
       true,
-      ['KFP metadata', 'Model Registry', 'TrustyAI storage'],
-      supportPhase(credentialSecrets.length > 0, backboneById.postgres?.ready || registry?.ready || pipelines?.ready || monitoring?.ready),
-      credentialSecrets.length
+      ['Native pipeline metadata', 'Model Registry', 'TrustyAI storage'],
+      supportPhase(credentialSecrets.length > 0 || backboneBindings.metadataBound, backboneById.postgres?.ready || registry?.ready || pipelines?.ready || monitoring?.ready),
+      backboneBindings.metadataBound
+        ? `Backbone PostgreSQL Secret ${BACKBONE_CLAIM_NAMESPACE}/${BACKBONE_POSTGRES_SECRET} is bound for OAH metadata.`
+        : credentialSecrets.length
         ? `${credentialSecrets.length} candidate credential Secret(s) exist in opensphere-system.`
         : backboneById.postgres?.ready
           ? 'Backbone PostgreSQL is ready; OAH metadata credentials still need an explicit Secret binding.'
           : 'No shared metadata/storage credential Secret candidate was found.',
-      credentialSecrets.length
+      backboneBindings.metadataBound
+        ? 'Bind DSPA/KFP, Model Registry, TrustyAI, and native pipeline metadata to the Backbone-issued PostgreSQL Secret.'
+        : credentialSecrets.length
         ? 'Bind each upstream component to its own DB/schema Secret before installation.'
         : backboneById.postgres?.ready
-          ? 'Use Backbone metadata defaults or create a dedicated database/schema Secret for KFP, Model Registry, and TrustyAI.'
-          : 'Prepare DB credentials for KFP, Model Registry, and TrustyAI before upstream install.',
+          ? 'Use Backbone metadata defaults or create dedicated database/schema Secrets for Model Registry, TrustyAI, and native pipeline metadata.'
+          : 'Prepare DB credentials for Model Registry, TrustyAI, and native pipeline metadata before upstream install.',
       [
         ...credentialSecrets.map((item) => resourceRefFor(item, 'Secret')),
+        ...(backboneBindings.metadataBound ? [{ kind: 'Secret', namespace: BACKBONE_CLAIM_NAMESPACE, name: BACKBONE_POSTGRES_SECRET, phase: 'Bound' }] : []),
         ...(backboneById.postgres?.resources || []),
       ],
     ),
@@ -7228,8 +10257,15 @@ async function supportServices(req) {
       ['PipelineRun', 'Experiments', 'Artifacts', 'Lineage'],
       pipelines?.upstreamReady ? 'Ready' : pipelines?.fallbackReady ? 'Configured' : 'Missing',
       pipelines?.message || 'KFP/DSPA APIs are not detected.',
-      pipelines?.upstreamReady ? 'Run PipelineRun upstream e2e with artifact store.' : 'Install DSPA/KFP and bind it to object storage artifact store.',
-      (pipelines?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+      pipelines?.upstreamReady
+        ? 'Run PipelineRun upstream e2e with artifact store.'
+        : pipelines?.fallbackReady
+          ? 'Use OpenSphere PipelineRunClaim fallback until DSPA/KFP is installed.'
+          : 'Configure native pipelines now, then install DSPA/KFP when upstream parity is required.',
+      [
+        ...(pipelines?.crds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+        ...(pipelines?.fallbackCrds || []).filter((item) => item.installed).map((item) => ({ kind: 'CRD', name: item.name, namespace: '', phase: 'Installed' })),
+      ],
     ),
     service(
       'compute-foundation',
@@ -7354,7 +10390,7 @@ async function supportServices(req) {
       title: 'Install Data Science Pipelines / KFP',
       menu: 'Cluster settings / Setup',
       status: supportStepStatus(byId['pipeline-foundation']),
-      action: 'Install DSPA/KFP and bind it to object storage and metadata credentials.',
+      action: 'Install DSPA/KFP with Backbone PostgreSQL for runtime metadata and Backbone RustFS for artifacts.',
       blocks: ['PipelineRun', 'Experiments', 'Artifacts', 'Lineage'],
     },
     {
@@ -7400,9 +10436,9 @@ async function supportServices(req) {
       service: 'Metadata database credentials',
       page: 'Cluster settings / Support services / Metadata credential bootstrap',
       route: '/ai/cluster-settings/support-services',
-      action: 'Preview metadata Secret, then configure the Secret for KFP, Model Registry, and TrustyAI.',
+      action: 'Preview metadata Secret, then configure the Secret for PostgreSQL-capable OAH metadata services.',
       mode: 'Apply',
-      requiredBefore: ['KFP metadata', 'Model Registry', 'TrustyAI storage'],
+      requiredBefore: ['Native pipeline metadata', 'Model Registry', 'TrustyAI storage'],
     },
     {
       id: 'compute-gpu',
@@ -7468,6 +10504,137 @@ async function supportServices(req) {
     configurationPages,
     backbone,
     setupPrerequisites: setup.prerequisites,
+  };
+}
+
+function foundationStatus(ready, configured = false, required = true) {
+  if (ready) return 'Ready';
+  if (configured) return 'Configured';
+  return required ? 'Required' : 'Optional';
+}
+
+async function foundationServices(req) {
+  const [support, backends, setup, gpu, compute, storageClasses, backbone] = await Promise.all([
+    supportServices(req),
+    nativeBackends(),
+    setupStatus(req),
+    gpuInventory(),
+    computeBackendResources(),
+    k8sJson('/apis/storage.k8s.io/v1/storageclasses'),
+    backboneInventory(),
+  ]);
+  const backendById = Object.fromEntries((backends.items || []).map((item) => [item.id, item]));
+  const hasDefaultStorageClass = (storageClasses?.items || []).some((sc) => sc.metadata?.annotations?.['storageclass.kubernetes.io/is-default-class'] === 'true');
+  const computeReady = (compute || []).some((item) => item.ready);
+  const gpuReady = gpu.ready || (compute || []).some((item) => item.gpus?.length);
+  const binding = backbone.consumer?.bindings || {};
+  const serving = backendById['model-serving'] || {};
+  const pipelines = backendById.pipelines || {};
+  const registry = backendById['model-registry'] || {};
+  const monitoring = backendById.monitoring || {};
+  const distributed = backendById['distributed-workloads'] || {};
+  const item = (id, label, category, required, source, phase, evidence, action, usedBy, resources = []) => ({
+    id,
+    label,
+    category,
+    required,
+    source,
+    phase,
+    ready: phase === 'Ready',
+    available: ['Ready', 'Configured'].includes(phase),
+    evidence,
+    action,
+    usedBy,
+    resources,
+  });
+  const items = [
+    item('backbone-provider', 'Console Backbone provider', 'Core substrate', true, 'Backbone',
+      foundationStatus(backbone.ready && backbone.consumer?.claim?.ready, backbone.installed),
+      `Claim ${backbone.consumer?.claim?.namespace || BACKBONE_CLAIM_NAMESPACE}/${backbone.consumer?.claim?.name || BACKBONE_CLAIM_NAME} is ${backbone.consumer?.claim?.phase || 'Missing'}.`,
+      'Apply or repair Console Backbone, then apply the OAH Backbone claim.',
+      ['Metadata DB', 'Object storage', 'Config-as-code'],
+      [...(backbone.consumer?.claim?.resources || []), ...(backbone.components || []).flatMap((component) => component.resources || [])]),
+    item('metadata-database', 'Metadata PostgreSQL database', 'Backbone binding', true, 'Backbone PostgreSQL',
+      foundationStatus(binding.metadataBound),
+      binding.metadataBound ? `${BACKBONE_POSTGRES_SECRET} is bound as metadata-store for native pipeline metadata, Model Registry, and TrustyAI.` : `${BACKBONE_POSTGRES_SECRET} is not bound as metadata-store.`,
+      'Bind the Backbone-issued PostgreSQL Secret from this page.',
+      ['Native pipeline metadata', 'Model Registry', 'TrustyAI storage'],
+      [{ kind: 'Secret', namespace: BACKBONE_CLAIM_NAMESPACE, name: BACKBONE_POSTGRES_SECRET, phase: binding.metadataBound ? 'Bound' : 'Missing' }]),
+    item('object-storage', 'S3-compatible object storage', 'Backbone binding', true, 'Backbone RustFS',
+      foundationStatus(binding.dataConnectionReady),
+      binding.dataConnectionReady ? `${BACKBONE_OBJECT_CONNECTION} is ready and references ${BACKBONE_RUSTFS_SECRET}.` : `${BACKBONE_RUSTFS_SECRET} is not connected through a DataConnectionClaim yet.`,
+      'Bind the Backbone-issued RustFS Secret as an OAH DataConnectionClaim.',
+      ['KServe storageUri', 'KFP artifact store', 'Model artifacts', 'Data connections'],
+      [binding.dataConnection || { kind: 'DataConnectionClaim', namespace: BACKBONE_CLAIM_NAMESPACE, name: BACKBONE_OBJECT_CONNECTION, phase: 'Missing' }]),
+    item('default-storage-class', 'Default StorageClass', 'Cluster storage', true, 'Cluster',
+      foundationStatus(hasDefaultStorageClass),
+      hasDefaultStorageClass ? 'A default StorageClass is available for PVC-backed workloads.' : 'No default StorageClass annotation was detected.',
+      'Mark one StorageClass as storageclass.kubernetes.io/is-default-class=true.',
+      ['Workbench PVCs', 'Pipeline temporary volumes'],
+      (storageClasses?.items || []).map((sc) => resourceRefFor(sc, 'StorageClass'))),
+    item('compute-gpu', 'Compute and GPU backends', 'Compute', true, 'Kubernetes GPU or external bridge',
+      foundationStatus(computeReady || gpuReady, (compute || []).length > 0),
+      computeReady || gpuReady ? `${(compute || []).length} ComputeBackendClaim(s); GPU phase ${gpu.phase}.` : 'No ready compute backend or GPU inventory was detected.',
+      'Expose Kubernetes GPUs or register an external ComputeBackendClaim, then set workload routing.',
+      ['Workbenches', 'Training jobs', 'Inference', 'Distributed workloads'],
+      (compute || []).map((entry) => ({ kind: entry.kind, namespace: entry.namespace, name: entry.name, phase: entry.phase }))),
+    item('serving-foundation', 'Knative Serving and KServe', 'Serving', true, 'ODH/RHOAI or native fallback',
+      serving.upstreamReady ? 'Ready' : serving.fallbackReady ? 'Configured' : 'Required',
+      serving.message || 'KServe/Knative APIs are not detected.',
+      'Install Knative Serving and KServe after object storage and compute are configured.',
+      ['InferenceService', 'ServingRuntime', 'Route/Revision/Traffic'],
+      (serving.crds || []).filter((crd) => crd.installed).map((crd) => ({ kind: 'CRD', name: crd.name, namespace: '', phase: 'Installed' }))),
+    item('pipeline-foundation', 'Data Science Pipelines / KFP', 'Pipelines', true, 'ODH/RHOAI or native fallback',
+      pipelines.upstreamReady ? 'Ready' : pipelines.fallbackReady ? 'Configured' : 'Required',
+      pipelines.message || 'KFP/DSPA APIs are not detected.',
+      'Install DSPA/KFP with Backbone PostgreSQL for runtime metadata and Backbone RustFS for artifacts.',
+      ['PipelineRun', 'Experiments', 'Artifacts', 'Lineage'],
+      (pipelines.crds || []).filter((crd) => crd.installed).map((crd) => ({ kind: 'CRD', name: crd.name, namespace: '', phase: 'Installed' }))),
+    item('model-registry', 'Model Registry', 'Metadata', false, 'ODH/RHOAI or native fallback',
+      registry.upstreamReady ? 'Ready' : registry.fallbackReady ? 'Configured' : 'Optional',
+      registry.message || 'Model Registry API is not detected.',
+      'Enable Model Registry when model versioning and promotion governance are required.',
+      ['Model versions', 'Promotion', 'Serving handoff'],
+      (registry.crds || []).filter((crd) => crd.installed).map((crd) => ({ kind: 'CRD', name: crd.name, namespace: '', phase: 'Installed' }))),
+    item('trustyai-monitoring', 'TrustyAI / model monitoring', 'Observability', false, 'ODH/RHOAI or native fallback',
+      monitoring.upstreamReady ? 'Ready' : monitoring.fallbackReady ? 'Configured' : 'Optional',
+      monitoring.message || 'TrustyAI/Monitoring APIs are not detected.',
+      'Enable TrustyAI/Monitoring for drift, bias, and explainability evidence.',
+      ['Model monitoring', 'Audit evidence', 'Explainability'],
+      (monitoring.crds || []).filter((crd) => crd.installed).map((crd) => ({ kind: 'CRD', name: crd.name, namespace: '', phase: 'Installed' }))),
+    item('distributed-scheduler', 'Kueue / Ray distributed scheduler', 'Distributed workloads', false, 'Cluster operators',
+      distributed.upstreamReady ? 'Ready' : distributed.fallbackReady ? 'Configured' : 'Optional',
+      distributed.message || 'Kueue/Ray APIs are not detected.',
+      'Install Kueue and Ray only when queueing or distributed workloads are required.',
+      ['Distributed workloads', 'Ray jobs', 'GPU queueing'],
+      (distributed.crds || []).filter((crd) => crd.installed).map((crd) => ({ kind: 'CRD', name: crd.name, namespace: '', phase: 'Installed' }))),
+  ];
+  const summary = {
+    total: items.length,
+    ready: items.filter((entry) => entry.phase === 'Ready').length,
+    configured: items.filter((entry) => entry.phase === 'Configured').length,
+    required: items.filter((entry) => entry.required).length,
+    requiredReady: items.filter((entry) => entry.required && entry.phase === 'Ready').length,
+    requiredMissing: items.filter((entry) => entry.required && !['Ready', 'Configured'].includes(entry.phase)).length,
+    optionalReady: items.filter((entry) => !entry.required && ['Ready', 'Configured'].includes(entry.phase)).length,
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    phase: summary.requiredMissing ? 'ActionRequired' : summary.configured ? 'Configured' : 'Ready',
+    summary,
+    backbone: { claim: backbone.consumer?.claim, bindings: binding },
+    items,
+    supportServices: support,
+    setupPrerequisites: setup.prerequisites || [],
+  };
+}
+
+async function configureFoundationServices(req) {
+  await backboneClaimApply(req);
+  const bindings = await backboneBindingsApply(req);
+  return {
+    phase: bindings.phase,
+    foundation: await foundationServices(req),
   };
 }
 
@@ -7744,16 +10911,7 @@ async function setupInstall(req) {
 
   if (body.installInternalCrds !== false) {
     await step('internal-crds', 'OpenSphere foundation CRDs', async () => {
-      const created = [];
-      const skipped = [];
-      for (const def of FOUNDATION_CRDS) {
-        if (await crdInstalled(def.name)) {
-          skipped.push(def.kind);
-        } else {
-          await writeK8s('/apis/apiextensions.k8s.io/v1/customresourcedefinitions', 'POST', minimalCrd(def), req);
-          created.push(def.kind);
-        }
-      }
+      const { created, skipped } = await ensureFoundationCrds(FOUNDATION_CRDS, req);
       return `created: ${created.join(', ') || 'none'}; skipped: ${skipped.join(', ') || 'none'}`;
     });
   }
@@ -10321,20 +13479,21 @@ async function oahDemoRun(req) {
   }
   const registryBackend = await modelRegistryBackend('opensphere-system', { backend: 'opensphere' });
   const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+  const registrySource = current.source || registryBackend.source;
   const demoVersion = {
     name: 'oah-demo-model',
     version: '0.1.0',
     stage: 'candidate',
     source: `${namespace}/oah-model-artifact`,
     artifactUri: `oci://opensphere/oah-demo-model:0.1.0`,
-    backend: registryBackend.source.type,
-    registry: `${registryBackend.source.namespace}/${registryBackend.source.name}`,
+    backend: registrySource.type,
+    registry: `${registrySource.namespace}/${registrySource.name}`,
   };
   let registry = null;
   try {
     const versions = [...current.versions.filter((item) => !(item.name === demoVersion.name && item.version === demoVersion.version)), demoVersion];
-    const saved = await saveModelRegistryState({ ...current, versions }, req, registryBackend.source);
-    registry = { phase: 'Registered', version: demoVersion, upstreamSync: saved.upstreamSync };
+    const saved = await saveModelRegistryState({ ...current, versions }, req, registrySource);
+    registry = { phase: 'Registered', version: demoVersion, source: saved.pgSync?.source || registrySource, upstreamSync: saved.upstreamSync, pgSync: saved.pgSync };
   } catch (e) {
     registry = { phase: 'Failed', reason: e.msg || String(e) };
   }
@@ -10388,9 +13547,10 @@ async function oahDemoRunReset(req) {
   try {
     const registryBackend = await modelRegistryBackend('opensphere-system', { backend: 'opensphere' });
     const current = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+    const registrySource = current.source || registryBackend.source;
     const versions = current.versions.filter((item) => !(item.name === 'oah-demo-model' && item.version === '0.1.0'));
-    const saved = await saveModelRegistryState({ ...current, versions }, req, registryBackend.source);
-    registry = { phase: 'Removed', upstreamSync: saved.upstreamSync };
+    const saved = await saveModelRegistryState({ ...current, versions }, req, registrySource);
+    registry = { phase: 'Removed', source: saved.pgSync?.source || registrySource, upstreamSync: saved.upstreamSync, pgSync: saved.pgSync };
   } catch (e) {
     registry = { phase: 'Failed', reason: e.msg || String(e) };
   }
@@ -10525,6 +13685,47 @@ async function nativeModelRegistryResources() {
   }];
 }
 
+async function nativeVectorMemoryResources() {
+  try {
+    const state = await vectorMemoryState();
+    if (!state.summary.collections) {
+      return [{
+        name: 'backbone-pgvector',
+        kind: 'OpenSphereVectorMemory',
+        namespace: 'opensphere-system',
+        phase: state.extension.ready ? 'ReadyEmpty' : 'NotReady',
+        ready: state.extension.ready,
+        description: state.extension.ready
+          ? `Backbone PostgreSQL pgvector ${state.extension.version || ''} is ready; no memory collections have been created yet.`
+          : 'Backbone PostgreSQL pgvector extension is not available.',
+        source: 'native',
+        reference: false,
+      }];
+    }
+    return state.collections.map((collection) => ({
+      name: collection.name,
+      kind: 'OpenSphereVectorMemory',
+      namespace: collection.namespace,
+      phase: collection.chunks > 0 ? 'Ready' : 'ReadyEmpty',
+      ready: state.extension.ready,
+      description: `${collection.chunks} vector chunk(s) stored in Backbone PostgreSQL pgvector ${state.extension.version || ''}.`,
+      source: 'native',
+      reference: false,
+    }));
+  } catch (e) {
+    return [{
+      name: 'backbone-pgvector',
+      kind: 'OpenSphereVectorMemory',
+      namespace: 'opensphere-system',
+      phase: 'Unavailable',
+      ready: false,
+      description: `Backbone PostgreSQL vector memory is unavailable: ${e.msg || String(e)}`,
+      source: 'native',
+      reference: false,
+    }];
+  }
+}
+
 async function nativeEnabledApplications() {
   const backends = await nativeBackends();
   return backends.items.map((item) => ({
@@ -10593,7 +13794,8 @@ async function nativeNotebookImages() {
     namespace: 'opensphere-system',
     phase: 'Available',
     ready: true,
-    description: `${item.description}. Provided by the installed OpenSphere Workbench runtime.`,
+    description: `${item.description}. ${item.runtime || 'JupyterLab'} ${item.version || ''}; packages: ${(item.packages || []).slice(0, 5).join(', ')}.`,
+    message: `Accelerator: ${item.accelerator || 'CPU/GPU optional'}. Provided by the installed OpenSphere Workbench runtime.`,
     source: 'native',
     reference: false,
   }));
@@ -10609,7 +13811,8 @@ async function aiResources(kind) {
       return [...llm, ...retrieval];
     }
     case 'retrieval':
-      return listK8s('/apis/ai.foundation.opensphere.io/v1alpha1/vectorretrievalclaims', 'VectorRetrievalClaim', FALLBACK_RESOURCES.routes.slice(1));
+      return (await listK8s('/apis/ai.foundation.opensphere.io/v1alpha1/vectorretrievalclaims', 'VectorRetrievalClaim', FALLBACK_RESOURCES.routes.slice(1)))
+        .concat(await nativeVectorMemoryResources());
     case 'workbenches':
       return listAnyK8s([
         { path: '/apis/ai.opensphere.io/v1alpha1/workbenchclaims', kind: 'WorkbenchClaim' },
@@ -10830,9 +14033,11 @@ async function summary(req) {
 const CONTROLLER = process.env.OSP_CONTROLLER || 'http://dupa-registry-controller.opensphere-system.svc.cluster.local:8080';
 async function publishNotify(ev) {
   try {
+    const headers = { 'content-type': 'application/json', 'x-opensphere-source': 'ai' };
+    if (process.env.SHELL_SERVICE_TOKEN) headers['x-shell-token'] = process.env.SHELL_SERVICE_TOKEN;
     await fetch(`${CONTROLLER}/api/admin/events`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-opensphere-source': 'ai' },
+      headers,
       body: JSON.stringify({ source: 'ai', ...ev }),
     });
   } catch (e) { /* 콘솔 알림은 best-effort */ }
@@ -10922,33 +14127,52 @@ const server = http.createServer(async (req, res) => {
     if (p === '/actions/delete' && req.method === 'DELETE') return jsonRes(res, 200, await deleteAction(req));
     if (p.startsWith('/workbenches/proxy/')) return workbenchProxy(req, res);
     if (p === '/workbenches/detail' && req.method === 'GET') return jsonRes(res, 200, await workbenchDetail(req));
+    if (p === '/workbenches/launch' && req.method === 'POST') return jsonRes(res, 200, await launchWorkbench(req));
     if (p === '/data-connections/detail' && req.method === 'GET') return jsonRes(res, 200, await dataConnectionDetail(req));
     if (p === '/operations/workbenches' && req.method === 'POST') return jsonRes(res, 200, await workbenchOperation(req));
     if (p === '/operations/inference' && req.method === 'POST') return jsonRes(res, 200, await inferenceUpdate(req));
     if (p === '/inference/detail' && req.method === 'GET') return jsonRes(res, 200, await inferenceDetail(req));
+    if (p === '/operations/training/lifecycle' && req.method === 'POST') return jsonRes(res, 200, await trainingLifecycleRun(req));
     if (p === '/operations/pipelines/run' && req.method === 'POST') return jsonRes(res, 200, await runPipeline(req));
     if (p === '/operations/claims' && req.method === 'POST') return jsonRes(res, 200, await patchClaimOperation(req));
     if (p === '/pipeline/runs/logs') return jsonRes(res, 200, await pipelineLogs(req.url));
     if (p === '/pipeline/runs/lineage') return jsonRes(res, 200, await pipelineLineage(req.url));
     if (p === '/pipelines/detail' && req.method === 'GET') return jsonRes(res, 200, await pipelineDetail(req));
+    if (p === '/pipelines/backend' && req.method === 'GET') return jsonRes(res, 200, await pipelineBackendStatus(req.url));
     if (p === '/monitoring/trustyai/metrics') return jsonRes(res, 200, await trustyaiMetrics(req.url));
     if (p === '/models/registry/versions' && req.method === 'GET') return jsonRes(res, 200, await modelVersions(req.url));
     if (p === '/models/registry/versions' && req.method === 'POST') return jsonRes(res, 200, await addModelVersion(req));
+    if (p === '/models/registry/import-serving' && req.method === 'POST') return jsonRes(res, 200, await importServingTargetAsModelVersion(req));
     if (p === '/models/registry/upstream' && req.method === 'GET') return jsonRes(res, 200, await modelRegistryUpstream(req.url));
     if (p === '/models/registry/upstream/self-test' && req.method === 'POST') return jsonRes(res, 200, await modelRegistryWriteSelfTest(req));
+    if (p === '/memory/vector' && req.method === 'GET') return jsonRes(res, 200, await vectorMemoryResponse(req.url));
+    if (p === '/memory/vector/bootstrap' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryBootstrap(req));
+    if (p === '/memory/vector/ingest' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryIngest(req));
+    if (p === '/memory/vector/query' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryQuery(req));
     if (p === '/admin/odh-components' && req.method === 'GET') return jsonRes(res, 200, await odhComponents());
     if (p === '/admin/odh-components/action' && req.method === 'POST') return jsonRes(res, 200, await odhComponentOperation(req));
     if (p === '/admin/native/catalog' && req.method === 'GET') return jsonRes(res, 200, await nativeCatalog());
     if (p === '/admin/native/backends' && req.method === 'GET') return jsonRes(res, 200, await nativeBackends());
     if (p === '/admin/native/support-services' && req.method === 'GET') return jsonRes(res, 200, await supportServices(req));
+    if (p === '/admin/native/foundation-services' && req.method === 'GET') return jsonRes(res, 200, await foundationServices(req));
+    if (p === '/admin/native/foundation-services/configure' && req.method === 'POST') return jsonRes(res, 200, await configureFoundationServices(req));
     if (p === '/admin/native/support-services/serving/preview' && req.method === 'GET') return jsonRes(res, 200, await servingFoundationPreview(req));
+    if (p === '/admin/native/support-services/serving/configure' && req.method === 'POST') return jsonRes(res, 200, await configureServingFoundation(req));
     if (p === '/admin/native/support-services/pipelines/preview' && req.method === 'GET') return jsonRes(res, 200, await pipelinesFoundationPreview(req));
+    if (p === '/admin/native/support-services/pipelines/configure' && req.method === 'POST') return jsonRes(res, 200, await configurePipelinesFoundation(req));
     if (p === '/admin/native/support-services/model-registry/preview' && req.method === 'GET') return jsonRes(res, 200, await modelRegistryFoundationPreview(req));
     if (p === '/admin/native/support-services/observability/preview' && req.method === 'GET') return jsonRes(res, 200, await observabilityFoundationPreview(req));
+    if (p === '/admin/native/support-services/observability/configure' && req.method === 'POST') return jsonRes(res, 200, await configureObservabilityFoundation(req));
+    if (p === '/admin/native/support-services/distributed/preview' && req.method === 'GET') return jsonRes(res, 200, await distributedFoundationPreview(req));
+    if (p === '/admin/native/support-services/distributed/configure' && req.method === 'POST') return jsonRes(res, 200, await configureDistributedFoundation(req));
     if (p === '/admin/native/support-services/metadata/preview' && req.method === 'POST') return jsonRes(res, 200, await metadataPreview(req));
     if (p === '/admin/native/support-services/metadata' && req.method === 'POST') return jsonRes(res, 200, await metadataBootstrap(req));
     if (p === '/admin/native/support-services/object-storage/preview' && req.method === 'POST') return jsonRes(res, 200, await objectStoragePreview(req));
     if (p === '/admin/native/support-services/object-storage' && req.method === 'POST') return jsonRes(res, 200, await objectStorageBootstrap(req));
+    if (p === '/admin/native/support-services/backbone/claim/preview' && req.method === 'POST') return jsonRes(res, 200, await backboneClaimPreview(req));
+    if (p === '/admin/native/support-services/backbone/claim' && req.method === 'POST') return jsonRes(res, 200, await backboneClaimApply(req));
+    if (p === '/admin/native/support-services/backbone/bindings/preview' && req.method === 'POST') return jsonRes(res, 200, await backboneBindingsPreview(req));
+    if (p === '/admin/native/support-services/backbone/bindings' && req.method === 'POST') return jsonRes(res, 200, await backboneBindingsApply(req));
     if (p === '/admin/native/controller-metrics' && req.method === 'GET') return jsonRes(res, 200, await nativeControllerMetricsWithAuditFallback());
     if (p === '/admin/native/audit-log' && req.method === 'GET') return jsonRes(res, 200, await nativeAuditLog());
     if (p === '/admin/native/final-readiness' && req.method === 'GET') return jsonRes(res, 200, await finalReadiness(req));

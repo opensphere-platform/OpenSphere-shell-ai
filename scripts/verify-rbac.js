@@ -42,6 +42,16 @@ function resources(rule) {
   return new Set(rule.resources || []);
 }
 
+function hasRule(target, apiGroup, resource, requiredVerbs) {
+  return (target?.rules || []).some((rule) => {
+    const groups = rule.apiGroups || [];
+    if (!groups.includes(apiGroup)) return false;
+    if (!resources(rule).has(resource)) return false;
+    const ruleVerbs = verbs(rule);
+    return requiredVerbs.every((verb) => ruleVerbs.has(verb));
+  });
+}
+
 const reader = role('ai-reader');
 if (!reader) fail('ai-reader ClusterRole is missing.');
 if (reader) {
@@ -58,6 +68,15 @@ if (reader) {
 
 const controller = role('ai-controller');
 if (!controller) fail('ai-controller ClusterRole is missing.');
+if (controller && !hasRule(controller, 'backbone.opensphere.io', 'backboneclaims', ['create', 'update', 'patch'])) {
+  fail('ai-controller must be able to create/update/patch BackboneClaim resources.');
+}
+if (controller && !hasRule(controller, 'datasciencepipelinesapplications.opendatahub.io', 'datasciencepipelinesapplications', ['create', 'update', 'patch'])) {
+  fail('ai-controller must be able to create/update/patch DataSciencePipelinesApplication resources.');
+}
+if (controller && !hasRule(controller, 'networking.k8s.io', 'networkpolicies', ['create', 'update', 'patch'])) {
+  fail('ai-controller must be able to create/update/patch NetworkPolicy resources for support-service compatibility.');
+}
 
 if (!serviceAccount('ai-runtime', 'opensphere-system')) fail('ai-runtime ServiceAccount is missing.');
 
@@ -72,9 +91,26 @@ if (bindingsTo('ai-admin').length) fail('ai-admin must not be bound by default.'
 const credentialReader = role('ai-credential-reader', 'Role');
 if (!credentialReader) fail('ai-credential-reader Role is missing.');
 if (credentialReader) {
+  const allowedSecrets = new Set([
+    'oah-external-gpu-credentials',
+    'ai-hub-backbone-postgres',
+    'ai-hub-backbone-rustfs',
+    'ai-hub-kserve-s3',
+    'ds-pipelines-proxy-tls-oah-dspa',
+    'ds-pipelines-envoy-proxy-tls-oah-dspa',
+    'opensphere-wildcard-tls',
+    'shell-service-token',
+  ]);
   for (const rule of credentialReader.rules || []) {
-    if (resources(rule).has('secrets') && !(rule.resourceNames || []).includes('oah-external-gpu-credentials')) {
-      fail('ai-credential-reader secret access must be restricted to oah-external-gpu-credentials.');
+    if (resources(rule).has('secrets')) {
+      const names = rule.resourceNames || [];
+      if (!names.length) fail('ai-credential-reader secret access must use resourceNames.');
+      for (const name of names) {
+        if (!allowedSecrets.has(name)) fail(`ai-credential-reader contains unexpected secret resourceName ${name}.`);
+      }
+      for (const name of allowedSecrets) {
+        if (!names.includes(name)) fail(`ai-credential-reader is missing secret resourceName ${name}.`);
+      }
     }
   }
 }
@@ -82,5 +118,22 @@ if (credentialReader) {
 if (!roleBoundToServiceAccount('ai-reader', 'ai-runtime', 'opensphere-system')) fail('ai-reader must be bound to ai-runtime.');
 if (!roleBoundToServiceAccount('ai-controller', 'ai-runtime', 'opensphere-system')) fail('ai-controller must be bound to ai-runtime.');
 if (!roleBoundToServiceAccount('ai-credential-reader', 'ai-runtime', 'opensphere-system')) fail('ai-credential-reader must be bound to ai-runtime.');
+if (!roleBoundToServiceAccount('ai-support-service-writer', 'ai-runtime', 'opensphere-system')) fail('ai-support-service-writer must be bound to ai-runtime.');
+
+const supportWriter = role('ai-support-service-writer', 'Role');
+if (!supportWriter) fail('ai-support-service-writer Role is missing.');
+if (supportWriter) {
+  if (!hasRule(supportWriter, '', 'secrets', ['create'])) fail('ai-support-service-writer must be able to create support Secrets.');
+  for (const secretName of ['ai-hub-kserve-s3', 'ds-pipelines-proxy-tls-oah-dspa', 'ds-pipelines-envoy-proxy-tls-oah-dspa']) {
+    const canPatchSecret = (supportWriter.rules || []).some((rule) => (
+      (rule.apiGroups || []).includes('')
+      && resources(rule).has('secrets')
+      && (rule.resourceNames || []).includes(secretName)
+      && ['get', 'update', 'patch'].every((verb) => verbs(rule).has(verb))
+    ));
+    if (!canPatchSecret) fail(`ai-support-service-writer must be able to get/update/patch ${secretName}.`);
+  }
+  if (!hasRule(supportWriter, '', 'serviceaccounts', ['get', 'update', 'patch'])) fail('ai-support-service-writer must be able to patch ai-runtime ServiceAccount.');
+}
 
 if (!process.exitCode) console.log('[rbac] regression checks passed');

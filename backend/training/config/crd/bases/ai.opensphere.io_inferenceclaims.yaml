@@ -76,12 +76,93 @@ spec:
                 - kserve
                 - vllm
                 type: string
+              backend:
+                description: Backend selects auto, OpenSphere native fallback, or an upstream serving backend.
+                enum:
+                - auto
+                - opensphere
+                - native
+                - fallback
+                - kubernetes
+                - internal
+                - upstream
+                - kserve
+                type: string
+              backendMode:
+                description: BackendMode is accepted as an alias for Backend for UI and API compatibility.
+                enum:
+                - auto
+                - opensphere
+                - native
+                - fallback
+                - kubernetes
+                - internal
+                - upstream
+                - kserve
+                type: string
+              backendType:
+                description: BackendType is accepted as an alias for Backend for create forms and automation.
+                enum:
+                - auto
+                - opensphere
+                - native
+                - fallback
+                - kubernetes
+                - internal
+                - upstream
+                - kserve
+                type: string
+              modelUri:
+                description: ModelURI is the model artifact URI used by KServe storageUri.
+                type: string
+              storageUri:
+                description: StorageURI is the KServe-compatible alias for ModelURI.
+                type: string
+              artifactUri:
+                description: ArtifactURI is an alternate model artifact URI accepted by OAH.
+                type: string
+              source:
+                description: Source is a compact alias for model artifact URI.
+                type: string
+              modelFormat:
+                description: ModelFormat is the KServe model format name, such as sklearn or pytorch.
+                type: string
+              servingRuntime:
+                description: ServingRuntime points to a KServe ServingRuntime when upstream serving is selected.
+                type: string
+              runtimeImage:
+                description: RuntimeImage overrides the OpenSphere-native fallback image.
+                type: string
+              servingImage:
+                description: ServingImage is accepted as an alias for RuntimeImage.
+                type: string
+              image:
+                description: Image is accepted as a compact runtime image alias.
+                type: string
+              serviceAccountName:
+                description: ServiceAccountName is passed to KServe predictor when required for storage credentials.
+                type: string
+              computeBackendRef:
+                description: ComputeBackendRef lets OAH route native serving fallback to a registered compute backend.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
             required:
             - modelRef
             - promotionRef
             type: object
           status:
             description: ClaimStatus 는 AI training lifecycle claim 공통 상태다.
+            x-kubernetes-preserve-unknown-fields: true
             properties:
               conditions:
                 items:

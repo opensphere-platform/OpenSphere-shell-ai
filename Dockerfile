@@ -11,7 +11,7 @@ WORKDIR /app
 COPY --chmod=0644 server.js /app/server.js
 COPY ui-shell/ /app/plugins/
 COPY --from=build /app/dist/ai/browser /app/www
-COPY --from=build /app/node_modules/ws /app/node_modules/ws
+COPY --from=build /app/node_modules /app/node_modules
 COPY kanidm-ca.crt /etc/kanidm-ca/ca.crt
 ENV PLUGINS_DIR=/app/plugins \
     WWW_DIR=/app/www \

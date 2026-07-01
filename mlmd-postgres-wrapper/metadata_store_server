@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+grpc_port="${METADATA_GRPC_SERVICE_PORT:-8080}"
+for arg in "$@"; do
+  case "$arg" in
+    --grpc_port=*) grpc_port="${arg#--grpc_port=}" ;;
+  esac
+done
+
+postgres_host="${POSTGRES_HOST:-${MYSQL_HOST:-}}"
+postgres_port="${POSTGRES_PORT:-${MYSQL_PORT:-5432}}"
+postgres_database="${POSTGRES_DATABASE:-${MYSQL_DATABASE:-${POSTGRES_DBNAME:-}}}"
+postgres_user="${POSTGRES_USER:-${DBCONFIG_USER:-}}"
+postgres_password="${POSTGRES_PASSWORD:-${DBCONFIG_PASSWORD:-}}"
+
+exec /bin/metadata_store_server.real \
+  --grpc_port="${grpc_port}" \
+  --metadata_source_config_type=postgresql \
+  --postgres_config_host="${postgres_host}" \
+  --postgres_config_port="${postgres_port}" \
+  --postgres_config_dbname="${postgres_database}" \
+  --postgres_config_user="${postgres_user}" \
+  --postgres_config_password="${postgres_password}" \
+  --postgres_config_skip_db_creation=true \
+  --enable_database_upgrade=true
