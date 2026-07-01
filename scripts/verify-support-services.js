@@ -28,6 +28,7 @@ function requirePattern(label, text, pattern) {
 const server = read('server.js');
 const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
+const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
 const packageJson = read('package.json');
@@ -211,7 +212,30 @@ requireText('package scripts', packageJson, 'test:browser-support-services');
 requireText('package scripts', packageJson, 'test:ui');
 requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm run test:contracts && npm run test:ui"/);
 requireText('package scripts', packageJson, 'test:upstream-parity');
+requireText('package scripts', packageJson, 'test:product-flow');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
+
+for (const productFlowText of [
+  'oah-product-flow',
+  'external-gpu-smoke-e2e',
+  'oah-kfp-smoke-run-v193',
+  'ospr-oah-kfp-smoke-run-v193-kfp-record',
+  '/pipelines/backend',
+  '/memory/vector',
+  '/models/registry/versions',
+  'oah-serving-contract-smoke',
+  'serving.kserve.io/storageSecretName',
+  'ai-hub-kserve-s3',
+  'oah-default-model-monitoring',
+  '/monitoring/trustyai/metrics',
+  'Stage "training"',
+  'Stage "vector-memory"',
+  'Stage "model-registry"',
+  'Stage "serving"',
+  'Stage "monitoring"',
+]) {
+  requireText('product-flow verifier', productFlowVerifier, productFlowText);
+}
 
 for (const upstreamVerifierText of [
   'DataScienceCluster',
