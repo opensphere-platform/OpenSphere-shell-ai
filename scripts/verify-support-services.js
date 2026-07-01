@@ -207,6 +207,8 @@ for (const upstreamVerifierText of [
   'Data Science Pipelines / KFP',
   'Knative Serving',
   'KServe inference',
+  'route/revision/traffic path',
+  'latestReadyRevision',
   'Upstream Model Registry',
   'TrustyAI monitoring',
   'RequireAll',

@@ -82,6 +82,11 @@ function ReadyCondition($Object) {
   return @($Object.status.conditions | Where-Object { $_.type -eq "Ready" })[0]
 }
 
+function IsReady($Object) {
+  $condition = ReadyCondition $Object
+  return $condition -and $condition.status -eq "True"
+}
+
 function AddCheck([System.Collections.Generic.List[object]]$Checks, [string]$Id, [string]$Label, [string]$Status, [string]$Evidence, [string]$NextAction, [bool]$Required = $true) {
   $Checks.Add([pscustomobject]@{
     id = $Id
@@ -152,8 +157,42 @@ $kservePods = PodsReady $KserveNamespace
 $inferenceServices = if ($kserveMissing.Count -eq 0) { KubeJson @("get", "inferenceservice", "-A") } else { $null }
 $isvcReady = if ($inferenceServices -and $inferenceServices.items) { @($inferenceServices.items | Where-Object { (ReadyCondition $_).status -eq "True" }).Count } else { 0 }
 $isvcTotal = if ($inferenceServices -and $inferenceServices.items) { @($inferenceServices.items).Count } else { 0 }
-if ($kserveMissing.Count -eq 0 -and $kservePods.Ready -and $isvcReady -gt 0) {
-  AddCheck $checks "kserve-serving" "KServe inference" "Ready" "KServe CRDs/control plane are ready and $isvcReady/$isvcTotal InferenceService resource(s) are Ready." "Keep storageUri, Route, Revision, and Traffic validation in e2e."
+
+$routeTrafficReady = 0
+$routeTrafficDetails = @()
+if ($inferenceServices -and $inferenceServices.items) {
+  foreach ($isvc in @($inferenceServices.items)) {
+    $ns = [string]$isvc.metadata.namespace
+    $name = [string]$isvc.metadata.name
+    $predictor = $isvc.status.components.predictor
+    $latestReadyRevision = [string]$predictor.latestReadyRevision
+    $traffic = @($predictor.traffic)
+    $trafficPercent = ($traffic | ForEach-Object {
+      if ($null -eq $_.percent) {
+        0
+      } else {
+        [int]$_.percent
+      }
+    } | Measure-Object -Sum).Sum
+    $ksvcName = if ($predictor.name) { [string]$predictor.name } else { "$name-predictor" }
+    $ksvc = KubeJson @("get", "ksvc", $ksvcName, "-n", $ns)
+    $revision = if ($latestReadyRevision) { KubeJson @("get", "revision", $latestReadyRevision, "-n", $ns) } else { $null }
+    $url = [string]$isvc.status.url
+    if (-not $url -and $ksvc) {
+      $url = [string]$ksvc.status.url
+    }
+    $ready = (IsReady $isvc) -and (IsReady $ksvc) -and (IsReady $revision) -and $url -and $trafficPercent -eq 100
+    if ($ready) {
+      $routeTrafficReady += 1
+    }
+    $routeTrafficDetails += "$ns/$name route=$([bool]$url) revision=$latestReadyRevision revisionReady=$((ReadyCondition $revision).status) traffic=$trafficPercent%"
+  }
+}
+
+if ($kserveMissing.Count -eq 0 -and $kservePods.Ready -and $isvcReady -gt 0 -and $routeTrafficReady -gt 0) {
+  AddCheck $checks "kserve-serving" "KServe inference" "Ready" "KServe CRDs/control plane are ready; $isvcReady/$isvcTotal InferenceService resource(s) Ready; $routeTrafficReady route/revision/traffic path(s) validated. $($routeTrafficDetails -join '; ')" "Keep storageUri, Route, Revision, and Traffic validation in e2e."
+} elseif ($kserveMissing.Count -eq 0 -and $kservePods.Ready -and $isvcReady -gt 0) {
+  AddCheck $checks "kserve-serving" "KServe inference" "Warning" "KServe has $isvcReady/$isvcTotal Ready InferenceService resource(s), but route/revision/traffic validation did not pass. $($routeTrafficDetails -join '; ')" "Repair Knative Route/Revision/Traffic status for the smoke InferenceService."
 } elseif ($kserveMissing.Count -eq 0 -and $kservePods.Ready) {
   AddCheck $checks "kserve-serving" "KServe inference" "Warning" "KServe CRDs/control plane are ready, but no Ready InferenceService was found." "Create or repair an upstream InferenceService smoke workload."
 } elseif ($kserveMissing.Count -eq 0) {
