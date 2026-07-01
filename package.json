@@ -12,7 +12,8 @@
     "test:browser-support-services": "node scripts/verify-support-services-browser.js",
     "test:live-support-services": "powershell -ExecutionPolicy Bypass -File scripts/verify-live-support-services.ps1",
     "test:rbac": "node scripts/verify-rbac.js",
-    "test:support-services": "node scripts/verify-support-services.js"
+    "test:support-services": "node scripts/verify-support-services.js",
+    "test:upstream-parity": "powershell -ExecutionPolicy Bypass -File scripts/verify-upstream-parity.ps1"
   },
   "dependencies": {
     "@angular/animations": "^22.0.0",

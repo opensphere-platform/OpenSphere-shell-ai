@@ -29,6 +29,7 @@ const server = read('server.js');
 const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
+const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
 const packageJson = read('package.json');
 const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-06-29.md');
 
@@ -177,5 +178,20 @@ for (const browserVerifierText of [
 }
 
 requireText('package scripts', packageJson, 'test:browser-support-services');
+requireText('package scripts', packageJson, 'test:upstream-parity');
+
+for (const upstreamVerifierText of [
+  'DataScienceCluster',
+  'Data Science Pipelines / KFP',
+  'Knative Serving',
+  'KServe inference',
+  'Upstream Model Registry',
+  'TrustyAI monitoring',
+  'RequireAll',
+  'requiredMissing',
+  'upstream-parity',
+]) {
+  requireText('upstream parity verifier', upstreamParityVerifier, upstreamVerifierText);
+}
 
 if (!process.exitCode) console.log('[support-services] regression checks passed');
