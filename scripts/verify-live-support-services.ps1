@@ -3,11 +3,13 @@ param(
   [string]$Deployment = "ai",
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
+  [string]$FinalReadinessApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/final-readiness",
   [string]$PackagePath = "uipluginpackage.yaml",
   [string]$DspaName = "oah-dspa",
   [string]$ExpectedMlmdImage = "localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1",
   [string]$SeedPipelineName = "oah-kfp-smoke-pipeline",
-  [string]$SmokeRunName = "ospr-oah-kfp-smoke-run-v193-kfp-record"
+  [string]$SmokeRunName = "ospr-oah-kfp-smoke-run-v193-kfp-record",
+  [string]$IdToken = $env:OAH_ID_TOKEN
 )
 
 $ErrorActionPreference = "Stop"
@@ -57,6 +59,37 @@ $apiBody = & curl.exe -k -s $Api
 Write-Output "[support-services-live] unauthenticated api response=$apiBody"
 if ($apiBody -notmatch "Authentication required") {
   Fail "Unauthenticated support-services API did not enforce authentication."
+}
+
+if ($IdToken) {
+  $tmp = New-TemporaryFile
+  try {
+    $finalStatus = & curl.exe -k -s -o $tmp.FullName -w "%{http_code}" -H "x-os-id-token: $IdToken" $FinalReadinessApi
+    $finalBody = Get-Content -Raw $tmp.FullName
+  } finally {
+    Remove-Item -LiteralPath $tmp.FullName -ErrorAction SilentlyContinue
+  }
+  Write-Output "[support-services-live] authenticated final-readiness status=$finalStatus"
+  if ($finalStatus -ne "200") {
+    Fail "Authenticated final-readiness API did not return HTTP 200. Body=$finalBody"
+  }
+  try {
+    $finalReadiness = $finalBody | ConvertFrom-Json
+  } catch {
+    Fail "Authenticated final-readiness API did not return valid JSON. $_"
+  }
+  $nativeReady = $finalReadiness.readinessModel.nativeReadiness.ready
+  $nativePhase = $finalReadiness.readinessModel.nativeReadiness.phase
+  $parityPhase = $finalReadiness.readinessModel.parityReadiness.phase
+  Write-Output "[support-services-live] final-readiness nativePhase=$nativePhase nativeReady=$nativeReady parityPhase=$parityPhase upstreamPhase=$($finalReadiness.upstreamPhase)"
+  if (-not $nativeReady) {
+    Fail "Final readiness nativeReadiness is not ready."
+  }
+  if (-not $finalReadiness.readinessModel.parityReadiness.evidence) {
+    Fail "Final readiness parity evidence is missing."
+  }
+} else {
+  Write-Output "[support-services-live] authenticated final-readiness skipped; set OAH_ID_TOKEN or pass -IdToken to enable it"
 }
 
 $podJson = kubectl get pods -n $Namespace -l app=$Deployment --field-selector=status.phase=Running -o json | ConvertFrom-Json

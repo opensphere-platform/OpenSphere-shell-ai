@@ -136,6 +136,11 @@ requirePattern('server shell token header', server, /headers\['x-shell-token'\]\
 requirePattern('server backbone response', server, /backbone,\s*\n\s*setupPrerequisites/);
 
 for (const verifierText of [
+  'OAH_ID_TOKEN',
+  'FinalReadinessApi',
+  'authenticated final-readiness',
+  'nativeReadiness',
+  'parityReadiness',
   'ExpectedMlmdImage',
   'DSPA MLMD image',
   '/pipelines/backend',
