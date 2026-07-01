@@ -1,10 +1,14 @@
 param(
   [switch]$RequireUpstream,
-  [switch]$SkipLocalBuild
+  [switch]$SkipLocalBuild,
+  [string]$ReportDir = "release-reports"
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$GeneratedAt = Get-Date
+$ReportStamp = $GeneratedAt.ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+$StepResults = New-Object System.Collections.Generic.List[object]
 
 function Fail([string]$Message) {
   Write-Error "[oah-release] $Message"
@@ -14,8 +18,13 @@ function Fail([string]$Message) {
 function Run-Step([string]$Name, [scriptblock]$Command) {
   $started = Get-Date
   Write-Output "[oah-release] step=$Name status=Running"
+  $output = @()
   try {
-    & $Command
+    $global:LASTEXITCODE = 0
+    $output = @(& $Command 2>&1)
+    foreach ($line in $output) {
+      Write-Output $line
+    }
     if ($LASTEXITCODE -ne 0) {
       Fail "Step '$Name' failed with exit code $LASTEXITCODE."
     }
@@ -23,7 +32,58 @@ function Run-Step([string]$Name, [scriptblock]$Command) {
     Fail "Step '$Name' failed. $_"
   }
   $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+  $StepResults.Add([pscustomobject]@{
+    name = $Name
+    status = "Passed"
+    seconds = $elapsed
+    output = @($output | ForEach-Object { "$_" })
+  })
   Write-Output "[oah-release] step=$Name status=Passed seconds=$elapsed"
+}
+
+function Write-ReleaseReport([string]$DesiredImage) {
+  $resolvedReportDir = if ([System.IO.Path]::IsPathRooted($ReportDir)) { $ReportDir } else { Join-Path $Root $ReportDir }
+  New-Item -ItemType Directory -Force -Path $resolvedReportDir | Out-Null
+  $summary = [pscustomobject][ordered]@{
+    generatedAt = $GeneratedAt.ToUniversalTime().ToString("o")
+    desiredImage = $DesiredImage
+    requireUpstream = [bool]$RequireUpstream
+    skipLocalBuild = [bool]$SkipLocalBuild
+    status = "Passed"
+    stepsPassed = [int]$StepResults.Count
+    steps = @($StepResults.ToArray())
+  }
+  $jsonPath = Join-Path $resolvedReportDir "oah-release-$ReportStamp.json"
+  $mdPath = Join-Path $resolvedReportDir "oah-release-$ReportStamp.md"
+  $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("# OAH Release Verification")
+  $lines.Add("")
+  $lines.Add("- Generated: $($summary.generatedAt)")
+  $lines.Add("- Desired image: ``$DesiredImage``")
+  $lines.Add("- Require upstream: $RequireUpstream")
+  $lines.Add("- Skip local build: $SkipLocalBuild")
+  $lines.Add("- Status: Passed")
+  $lines.Add("")
+  $lines.Add("| Step | Status | Seconds |")
+  $lines.Add("|---|---|---:|")
+  foreach ($step in $StepResults) {
+    $lines.Add("| $($step.name) | $($step.status) | $($step.seconds) |")
+  }
+  $lines.Add("")
+  $lines.Add("## Evidence")
+  foreach ($step in $StepResults) {
+    $lines.Add("")
+    $lines.Add("### $($step.name)")
+    $lines.Add("")
+    $lines.Add('```text')
+    $lines.Add(($step.output -join "`n"))
+    $lines.Add('```')
+  }
+  $lines | Set-Content -LiteralPath $mdPath -Encoding UTF8
+  Write-Output "[oah-release] reportJson=$jsonPath"
+  Write-Output "[oah-release] reportMarkdown=$mdPath"
 }
 
 Push-Location $Root
@@ -61,6 +121,7 @@ try {
   }
 
   Write-Output "[oah-release] checks passed"
+  Write-ReleaseReport $desiredImage
 } finally {
   Pop-Location
 }

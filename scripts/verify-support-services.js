@@ -34,6 +34,7 @@ const browserVerifier = read('scripts/verify-support-services-browser.js');
 const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
 const packageJson = read('package.json');
+const gitignore = read('.gitignore');
 const pluginPackage = read('uipluginpackage.yaml');
 const supportDoc = readRepo('_DOCS_/OAH-SUPPORT-SERVICES-INSTALLATION-MAP-2026-06-29.md');
 const dupaController = readRepo('OpenSphere-console/backend/dupa-control/controller.js');
@@ -249,6 +250,7 @@ requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
 requireText('package scripts', packageJson, 'test:release');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
+requireText('gitignore release reports', gitignore, 'release-reports/');
 
 for (const releaseText of [
   'oah-release',
@@ -260,6 +262,11 @@ for (const releaseText of [
   'verify-oah-product-flow.ps1',
   'test:live-browser-support-services',
   'verify-upstream-parity.ps1 -RequireAll',
+  'ReportDir',
+  'oah-release-$ReportStamp.json',
+  'oah-release-$ReportStamp.md',
+  'reportJson=',
+  'reportMarkdown=',
   'checks passed',
 ]) {
   requireText('OAH release verifier', releaseVerifier, releaseText);
