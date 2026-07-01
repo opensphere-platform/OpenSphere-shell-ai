@@ -30,6 +30,7 @@ const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
+const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
 const packageJson = read('package.json');
 const pluginPackage = read('uipluginpackage.yaml');
@@ -240,11 +241,30 @@ for (const browserVerifierText of [
 }
 
 requireText('package scripts', packageJson, 'test:browser-support-services');
+requireText('package scripts', packageJson, 'test:live-browser-support-services');
 requireText('package scripts', packageJson, 'test:ui');
 requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm run test:contracts && npm run test:ui"/);
 requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
+
+for (const liveBrowserText of [
+  'support-services-live-browser',
+  'OAH_ID_TOKEN',
+  'OAH_LIVE_ROUTE',
+  'Page.addScriptToEvaluateOnNewDocument',
+  '__OPENSPHERE_ID_TOKEN__',
+  'x-os-id-token',
+  '/api/plugins/ai/',
+  'oah product flow readiness',
+  'gpu training smoke',
+  'backbone pgvector memory',
+  'kserve / knative serving',
+  'traffic=100%',
+  'checks passed',
+]) {
+  requireText('live browser support-services verifier', liveBrowserVerifier, liveBrowserText);
+}
 
 for (const productFlowText of [
   'oah-product-flow',
