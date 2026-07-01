@@ -41,6 +41,7 @@ for (const endpoint of [
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
+  '/admin/native/support-services/model-registry/configure',
   '/admin/native/support-services/observability/preview',
   '/admin/native/support-services/metadata/preview',
   '/admin/native/support-services/metadata',
@@ -86,6 +87,7 @@ for (const uiText of [
   'Preview serving foundation',
   'Preview pipelines foundation',
   'Preview registry foundation',
+  'Configure registry foundation',
   'Preview observability foundation',
   'Object storage bootstrap',
   'Metadata credential bootstrap',
@@ -105,6 +107,7 @@ for (const method of [
   'previewServingFoundation',
   'previewPipelinesFoundation',
   'previewModelRegistryFoundation',
+  'configureModelRegistryFoundation',
   'previewObservabilityFoundation',
   'bootstrapMetadataStore',
   'bootstrapObjectStorage',
@@ -142,6 +145,7 @@ requirePattern('server DSPO image compatibility', server, /function ensureDspoIm
 requirePattern('server upstream parity inventory', server, /async function upstreamParityInventory/);
 requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
 requirePattern('server DSPA PostgreSQL runtime config verification', server, /async function verifyDspaPostgresRuntimeConfig/);
+requirePattern('server Model Registry foundation configure', server, /async function configureModelRegistryFoundation/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
 requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*setupPrerequisites/);
 
@@ -156,6 +160,7 @@ for (const verifierText of [
   'Configure Backbone foundation',
   'Bind issued Secrets',
   'Preview pipelines foundation',
+  'Configure registry foundation',
   'Unauthenticated upstream-parity API did not enforce authentication',
   'authenticated final-readiness',
   'nativeReadiness',
@@ -180,6 +185,7 @@ for (const browserVerifierText of [
   'Apply OAH claim',
   'Bind issued Secrets',
   'Preview pipelines foundation',
+  'configure registry foundation',
   'Pipelines foundation preview generated',
   'browser render and click-through checks passed',
 ]) {

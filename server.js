@@ -7488,6 +7488,7 @@ async function authorizeAiRequest(req, pathname) {
     '/admin/native/support-services/object-storage',
     '/admin/native/support-services/metadata/preview',
     '/admin/native/support-services/metadata',
+    '/admin/native/support-services/model-registry/configure',
     '/admin/native/support-services/observability/configure',
     '/admin/native/support-services/distributed/configure',
     '/admin/setup/install',
@@ -9675,6 +9676,150 @@ async function modelRegistryFoundationPreview(req) {
         manifests: upstreamManifests,
       },
     ],
+  };
+}
+
+function modelRegistryFallbackConfigMapManifest(state = {}) {
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: 'ai-model-registry-versions',
+      namespace: 'opensphere-system',
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'model-registry',
+      },
+    },
+    data: {
+      versions: JSON.stringify(state.versions || []),
+      promotions: JSON.stringify(state.promotions || []),
+      approvalAudit: JSON.stringify(state.approvalAudit || []),
+      evaluationMetrics: JSON.stringify(state.evaluationMetrics || []),
+    },
+  };
+}
+
+function modelRegistryNativeDscManifest() {
+  return {
+    apiVersion: 'ai.opensphere.io/v1alpha1',
+    kind: 'OpenSphereDataScienceCluster',
+    metadata: { name: 'default-ai', namespace: 'opensphere-system' },
+    spec: {
+      components: {
+        'model-registry': { managementState: 'Managed' },
+        modelregistry: { managementState: 'Managed' },
+      },
+    },
+  };
+}
+
+function modelRegistryStateFromConfigMap(configMap) {
+  return {
+    versions: parseJsonArray(configMap?.data?.versions),
+    promotions: parseJsonArray(configMap?.data?.promotions),
+    approvalAudit: parseJsonArray(configMap?.data?.approvalAudit),
+    evaluationMetrics: parseJsonArray(configMap?.data?.evaluationMetrics),
+  };
+}
+
+function mergeByKey(left, right, keyFn) {
+  const merged = new Map();
+  for (const item of left || []) {
+    const key = keyFn(item);
+    if (key) merged.set(key, item);
+  }
+  for (const item of right || []) {
+    const key = keyFn(item);
+    if (key) merged.set(key, item);
+  }
+  return [...merged.values()];
+}
+
+function mergeModelRegistryFoundationState(configMapState, pgState) {
+  return {
+    versions: mergeModelVersions(configMapState.versions || [], pgState.versions || []),
+    promotions: mergeByKey(configMapState.promotions, pgState.promotions, (item) => `${item?.namespace || 'default'}:${item?.name || ''}`),
+    approvalAudit: mergeByKey(configMapState.approvalAudit, pgState.approvalAudit, (item) => item?.id || ''),
+    evaluationMetrics: mergeByKey(configMapState.evaluationMetrics, pgState.evaluationMetrics, (item) => item?.id || ''),
+  };
+}
+
+async function configureModelRegistryFoundation(req) {
+  const [configMap, pgStateResult, hasNativeDscCrd] = await Promise.all([
+    k8sJson('/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions'),
+    readModelRegistryPgState().then((state) => ({ state })).catch((e) => ({ error: e.msg || String(e) })),
+    crdInstalled('openspheredatascienceclusters.ai.opensphere.io'),
+  ]);
+  const configMapState = modelRegistryStateFromConfigMap(configMap);
+  const pgState = pgStateResult.state || { versions: [], promotions: [], approvalAudit: [], evaluationMetrics: [] };
+  const mergedState = mergeModelRegistryFoundationState(configMapState, pgState);
+
+  const steps = [];
+  if (pgStateResult.error) {
+    steps.push({
+      id: 'native-registry-postgres',
+      label: 'Backbone PostgreSQL model registry schema',
+      phase: 'Warning',
+      detail: pgStateResult.error,
+    });
+  } else {
+    await upsertModelRegistryPgState(mergedState);
+    steps.push({
+      id: 'native-registry-postgres',
+      label: 'Backbone PostgreSQL model registry schema',
+      phase: 'Succeeded',
+      detail: `Backbone PostgreSQL model registry is ready with ${mergedState.versions.length} model version(s).`,
+    });
+  }
+
+  const cmManifest = modelRegistryFallbackConfigMapManifest(mergedState);
+  const cmResult = await upsertK8s(
+    '/api/v1/namespaces/opensphere-system/configmaps',
+    '/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions',
+    cmManifest,
+    { metadata: { labels: cmManifest.metadata.labels }, data: cmManifest.data },
+    req,
+  );
+  steps.push({
+    id: 'native-registry-configmap-mirror',
+    label: 'Model Registry compatibility ConfigMap',
+    phase: 'Succeeded',
+    detail: `ConfigMap mirror ${cmResult.metadata?.namespace || 'opensphere-system'}/${cmResult.metadata?.name || 'ai-model-registry-versions'} is configured.`,
+    resources: [resourceRefFor(cmResult, 'ConfigMap')],
+  });
+
+  if (hasNativeDscCrd) {
+    const dsc = modelRegistryNativeDscManifest();
+    const dscResult = await upsertK8s(
+      '/apis/ai.opensphere.io/v1alpha1/namespaces/opensphere-system/openspheredatascienceclusters',
+      '/apis/ai.opensphere.io/v1alpha1/namespaces/opensphere-system/openspheredatascienceclusters/default-ai',
+      dsc,
+      { spec: dsc.spec },
+      req,
+    );
+    steps.push({
+      id: 'native-registry-datasciencecluster',
+      label: 'OpenSphere native DataScienceCluster model registry component',
+      phase: 'Succeeded',
+      detail: `OpenSphereDataScienceCluster ${dscResult.metadata?.namespace || 'opensphere-system'}/${dscResult.metadata?.name || 'default-ai'} requests Model Registry management.`,
+      resources: [resourceRefFor(dscResult, 'OpenSphereDataScienceCluster')],
+    });
+  } else {
+    steps.push({
+      id: 'native-registry-datasciencecluster',
+      label: 'OpenSphere native DataScienceCluster model registry component',
+      phase: 'Warning',
+      detail: 'OpenSphereDataScienceCluster CRD is not installed; PG registry and ConfigMap mirror are ready, but native desired-state component management cannot be recorded yet.',
+    });
+  }
+
+  const preview = await modelRegistryFoundationPreview(req);
+  return {
+    phase: pgStateResult.error ? 'Warning' : preview.phase,
+    generatedAt: new Date().toISOString(),
+    steps,
+    preview,
   };
 }
 
@@ -14361,6 +14506,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/admin/native/support-services/pipelines/preview' && req.method === 'GET') return jsonRes(res, 200, await pipelinesFoundationPreview(req));
     if (p === '/admin/native/support-services/pipelines/configure' && req.method === 'POST') return jsonRes(res, 200, await configurePipelinesFoundation(req));
     if (p === '/admin/native/support-services/model-registry/preview' && req.method === 'GET') return jsonRes(res, 200, await modelRegistryFoundationPreview(req));
+    if (p === '/admin/native/support-services/model-registry/configure' && req.method === 'POST') return jsonRes(res, 200, await configureModelRegistryFoundation(req));
     if (p === '/admin/native/support-services/observability/preview' && req.method === 'GET') return jsonRes(res, 200, await observabilityFoundationPreview(req));
     if (p === '/admin/native/support-services/observability/configure' && req.method === 'POST') return jsonRes(res, 200, await configureObservabilityFoundation(req));
     if (p === '/admin/native/support-services/distributed/preview' && req.method === 'GET') return jsonRes(res, 200, await distributedFoundationPreview(req));

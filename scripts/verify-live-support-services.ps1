@@ -104,6 +104,7 @@ foreach ($uiText in @(
   "Apply OAH claim",
   "Bind issued Secrets",
   "Preview pipelines foundation",
+  "Configure registry foundation",
   "Metadata credential bootstrap",
   "Object storage bootstrap",
   "Upstream parity inventory"

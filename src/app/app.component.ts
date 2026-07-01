@@ -1345,6 +1345,18 @@ interface ModelRegistryFoundationPreviewResponse {
   }>;
 }
 
+interface ModelRegistryFoundationConfigureResponse {
+  phase: string;
+  generatedAt: string;
+  steps: Array<{
+    id: string;
+    label: string;
+    phase: string;
+    detail: string;
+  }>;
+  preview: ModelRegistryFoundationPreviewResponse;
+}
+
 interface ObservabilityFoundationPreviewResponse {
   phase: string;
   generatedAt: string;
@@ -3798,6 +3810,7 @@ function phaseClass(phase: string): string {
                           <span [class]="'label ' + statusClass(modelRegistryFoundationPreview()?.phase || 'Pending')">{{ modelRegistryFoundationPreview()?.phase }}</span>
                         }
                         <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="previewModelRegistryFoundation()">Preview registry foundation</button>
+                        <button type="button" class="btn btn-sm btn-primary" [disabled]="saving()" (click)="configureModelRegistryFoundation()">Configure registry foundation</button>
                       </div>
                     </div>
                     @if (modelRegistryFoundationPreview()) {
@@ -7868,6 +7881,29 @@ export class AppComponent implements OnInit, OnDestroy {
       this.modelRegistryFoundationPreview.set(result);
       this.modelRegistryFoundationManifestPreview.set(JSON.stringify(result.installOptions || [], null, 2));
       this.actionMessage.set({ type: 'info', message: `Model Registry foundation preview generated: ${result.summary?.required || 0} required item(s).` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async configureModelRegistryFoundation(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const res = await fetch(`${this.apiBase}/admin/native/support-services/model-registry/configure`, {
+        method: 'POST',
+        headers: this.actionHeaders(),
+        body: '{}',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Model Registry foundation configuration failed with HTTP ${res.status}`);
+      const result = data as ModelRegistryFoundationConfigureResponse;
+      this.modelRegistryFoundationPreview.set(result.preview);
+      this.modelRegistryFoundationManifestPreview.set(JSON.stringify(result.steps || [], null, 2));
+      this.actionMessage.set({ type: 'success', message: `Model Registry foundation configured: ${result.phase}.` });
     } catch (error) {
       this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
     } finally {

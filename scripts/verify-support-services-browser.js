@@ -201,6 +201,7 @@ function createHarnessServer(port) {
     if (url.pathname === '/admin/native/foundation-services/configure') return sendJson(res, 200, { phase: 'Configured', foundationServices: foundationPayload(), supportServices: supportServicesPayload() });
     if (url.pathname === '/admin/native/support-services/pipelines/preview') return sendJson(res, 200, foundationPreview('Data Science Pipelines / KFP'));
     if (url.pathname === '/admin/native/support-services/model-registry/preview') return sendJson(res, 200, foundationPreview('Model Registry'));
+    if (url.pathname === '/admin/native/support-services/model-registry/configure') return sendJson(res, 200, { phase: 'NativePostgresReady', steps: [{ id: 'native-registry-postgres', label: 'Backbone PostgreSQL model registry schema', phase: 'Succeeded', detail: 'Mock model registry configured.' }], preview: foundationPreview('Model Registry') });
     if (url.pathname === '/admin/native/support-services/observability/preview') return sendJson(res, 200, foundationPreview('TrustyAI / Monitoring'));
     if (url.pathname === '/admin/native/support-services/distributed/preview') return sendJson(res, 200, foundationPreview('Kueue / Ray distributed scheduler'));
     if (url.pathname.endsWith('/preview')) return sendJson(res, 200, { phase: 'ReadyToApply', summary: { manifests: 1, namespaceExists: true, passwordProvided: false, credentialsProvided: false, purposes: 3 }, manifests: [{ kind: 'Secret', metadata: { name: 'mock' } }] });
@@ -373,6 +374,7 @@ async function main() {
       'apply oah claim',
       'bind issued secrets',
       'preview pipelines foundation',
+      'configure registry foundation',
       'metadata credential bootstrap',
       'object storage bootstrap',
     ];
