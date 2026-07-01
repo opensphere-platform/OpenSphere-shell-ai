@@ -162,6 +162,7 @@ for (const verifierText of [
   'Preview pipelines foundation',
   'Configure registry foundation',
   'Unauthenticated upstream-parity API did not enforce authentication',
+  'Unauthenticated observability configure API did not enforce authentication',
   'authenticated final-readiness',
   'nativeReadiness',
   'parityReadiness',
@@ -172,6 +173,8 @@ for (const verifierText of [
   'KFP seed pipeline',
   '/memory/vector',
   'pgvector',
+  'monitoring target=',
+  '/monitoring/trustyai/metrics',
 ]) {
   requireText('live support-services verifier', liveVerifier, verifierText);
 }

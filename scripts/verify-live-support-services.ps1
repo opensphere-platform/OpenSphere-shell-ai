@@ -4,6 +4,7 @@ param(
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
   [string]$UpstreamParityApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/upstream-parity",
+  [string]$ObservabilityConfigureApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services/observability/configure",
   [string]$FinalReadinessApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/final-readiness",
   [string]$PluginManifest = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.manifest.json",
   [string]$PluginEntry = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.plugin.js",
@@ -127,6 +128,12 @@ if ($upstreamParityBody -notmatch "Authentication required") {
   Fail "Unauthenticated upstream-parity API did not enforce authentication."
 }
 
+$observabilityBody = & curl.exe -k -s -X POST -H "content-type: application/json" -d "{}" $ObservabilityConfigureApi
+Write-Output "[support-services-live] unauthenticated observability configure response=$observabilityBody"
+if ($observabilityBody -notmatch "Authentication required") {
+  Fail "Unauthenticated observability configure API did not enforce authentication."
+}
+
 if ($IdToken) {
   $tmp = New-TemporaryFile
   try {
@@ -228,6 +235,33 @@ $vector = $vectorRaw | ConvertFrom-Json
 Write-Output "[support-services-live] pgvector ready=$($vector.extension.ready) version=$($vector.extension.version) collections=$($vector.summary.collections) chunks=$($vector.summary.chunks)"
 if (-not $vector.extension.ready -or -not $vector.summary.ready) {
   Fail "Backbone pgvector memory is not ready."
+}
+
+try {
+  $monitoringTargets = kubectl get monitoringtargets.ai.opensphere.io -A -o json | ConvertFrom-Json
+} catch {
+  Fail "MonitoringTarget resources could not be read. $_"
+}
+$monitoringTarget = @($monitoringTargets.items | Where-Object { $_.metadata.name -eq "oah-default-model-monitoring" -and $_.metadata.namespace -eq $Namespace })[0]
+if (-not $monitoringTarget) {
+  Fail "Default MonitoringTarget $Namespace/oah-default-model-monitoring was not found."
+}
+$monitoringReady = @($monitoringTarget.status.conditions | Where-Object { $_.type -eq "Ready" })[0]
+$metricCount = @($monitoringTarget.status.metrics).Count
+$historySamples = [int]($monitoringTarget.status.historySamples)
+$metricSource = $monitoringTarget.status.metricSource.type
+Write-Output "[support-services-live] monitoring target=$($monitoringTarget.metadata.name) ready=$($monitoringReady.status) phase=$($monitoringTarget.status.phase) source=$metricSource metrics=$metricCount history=$historySamples"
+if ($monitoringReady.status -ne "True" -or $metricCount -lt 3 -or $historySamples -lt 1 -or -not $metricSource) {
+  Fail "MonitoringTarget does not expose ready fallback metrics and retained history."
+}
+
+$trustyRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/monitoring/trustyai/metrics"
+$trusty = $trustyRaw | ConvertFrom-Json
+$trustyItems = @($trusty.items)
+$trustyHistory = @($trusty.history)
+Write-Output "[support-services-live] monitoring metrics items=$($trustyItems.Count) alerts=$(@($trusty.alerts).Count) history=$($trustyHistory.Count) sources=$($trusty.sources -join ',')"
+if ($trustyItems.Count -lt 3 -or $trustyHistory.Count -lt 1) {
+  Fail "TrustyAI-compatible metrics endpoint did not return MonitoringTarget metrics and history."
 }
 
 Write-Output "[support-services-live] checks passed"
