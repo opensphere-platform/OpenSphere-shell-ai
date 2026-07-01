@@ -15,6 +15,7 @@
     "test:live-support-services": "powershell -ExecutionPolicy Bypass -File scripts/verify-live-support-services.ps1",
     "test:product-flow": "powershell -ExecutionPolicy Bypass -File scripts/verify-oah-product-flow.ps1",
     "test:rbac": "node scripts/verify-rbac.js",
+    "test:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-oah-release.ps1",
     "test:support-services": "node scripts/verify-support-services.js",
     "test:upstream-parity": "powershell -ExecutionPolicy Bypass -File scripts/verify-upstream-parity.ps1"
   },

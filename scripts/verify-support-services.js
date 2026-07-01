@@ -29,6 +29,7 @@ const server = read('server.js');
 const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
+const releaseVerifier = read('scripts/verify-oah-release.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
@@ -246,7 +247,23 @@ requireText('package scripts', packageJson, 'test:ui');
 requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm run test:contracts && npm run test:ui"/);
 requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
+requireText('package scripts', packageJson, 'test:release');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
+
+for (const releaseText of [
+  'oah-release',
+  'RequireUpstream',
+  'SkipLocalBuild',
+  'npm.cmd test',
+  'test:contracts',
+  'verify-live-support-services.ps1',
+  'verify-oah-product-flow.ps1',
+  'test:live-browser-support-services',
+  'verify-upstream-parity.ps1 -RequireAll',
+  'checks passed',
+]) {
+  requireText('OAH release verifier', releaseVerifier, releaseText);
+}
 
 for (const liveBrowserText of [
   'support-services-live-browser',
