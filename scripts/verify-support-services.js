@@ -156,6 +156,7 @@ for (const verifierText of [
   'Configure Backbone foundation',
   'Bind issued Secrets',
   'Preview pipelines foundation',
+  'Unauthenticated upstream-parity API did not enforce authentication',
   'authenticated final-readiness',
   'nativeReadiness',
   'parityReadiness',

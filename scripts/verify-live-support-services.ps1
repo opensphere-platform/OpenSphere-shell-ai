@@ -3,6 +3,7 @@ param(
   [string]$Deployment = "ai",
   [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
+  [string]$UpstreamParityApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/upstream-parity",
   [string]$FinalReadinessApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/final-readiness",
   [string]$PluginManifest = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.manifest.json",
   [string]$PluginEntry = "https://console.opensphere.dev/api/plugins/ai/plugins/ui-shell.plugin.js",
@@ -104,7 +105,8 @@ foreach ($uiText in @(
   "Bind issued Secrets",
   "Preview pipelines foundation",
   "Metadata credential bootstrap",
-  "Object storage bootstrap"
+  "Object storage bootstrap",
+  "Upstream parity inventory"
 )) {
   if ($pluginAppBundleBody -notmatch [regex]::Escape($uiText)) {
     Fail "Deployed Support services UI bundle is missing '$uiText'."
@@ -116,6 +118,12 @@ $apiBody = & curl.exe -k -s $Api
 Write-Output "[support-services-live] unauthenticated api response=$apiBody"
 if ($apiBody -notmatch "Authentication required") {
   Fail "Unauthenticated support-services API did not enforce authentication."
+}
+
+$upstreamParityBody = & curl.exe -k -s $UpstreamParityApi
+Write-Output "[support-services-live] unauthenticated upstream-parity response=$upstreamParityBody"
+if ($upstreamParityBody -notmatch "Authentication required") {
+  Fail "Unauthenticated upstream-parity API did not enforce authentication."
 }
 
 if ($IdToken) {

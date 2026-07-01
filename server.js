@@ -7414,6 +7414,7 @@ const ADMIN_READ_PATHS = new Set([
   '/admin/native/catalog',
   '/admin/native/backends',
   '/admin/native/support-services',
+  '/admin/native/upstream-parity',
   '/admin/native/support-services/serving/preview',
   '/admin/native/support-services/pipelines/preview',
   '/admin/native/support-services/model-registry/preview',
