@@ -14,6 +14,7 @@
     "test:live-browser-support-services": "node scripts/verify-live-support-services-browser.js",
     "test:live-support-services": "powershell -ExecutionPolicy Bypass -File scripts/verify-live-support-services.ps1",
     "release:promote-images": "powershell -ExecutionPolicy Bypass -File scripts/promote-oah-images.ps1",
+    "release:login-registry": "powershell -ExecutionPolicy Bypass -File scripts/login-release-registry.ps1",
     "test:product-flow": "powershell -ExecutionPolicy Bypass -File scripts/verify-oah-product-flow.ps1",
     "test:rbac": "node scripts/verify-rbac.js",
     "test:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-oah-release.ps1",

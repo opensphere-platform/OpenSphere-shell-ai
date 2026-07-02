@@ -32,6 +32,7 @@ const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const releaseVerifier = read('scripts/verify-oah-release.ps1');
 const productionPreflightVerifier = read('scripts/verify-production-preflight.ps1');
 const promotionVerifier = read('scripts/promote-oah-images.ps1');
+const registryLoginVerifier = read('scripts/login-release-registry.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
@@ -253,10 +254,27 @@ requireText('package scripts', packageJson, 'test:product-flow');
 requireText('package scripts', packageJson, 'test:release');
 requireText('package scripts', packageJson, 'test:production-preflight');
 requireText('package scripts', packageJson, 'release:promote-images');
+requireText('package scripts', packageJson, 'release:login-registry');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
 requireText('gitignore release reports', gitignore, 'release-reports/');
 
 
+
+for (const registryLoginText of [
+  'oah-registry-login',
+  'TargetRegistry',
+  'GHCR_TOKEN',
+  'GITHUB_TOKEN',
+  'REGISTRY_TOKEN',
+  'GHCR_USERNAME',
+  'GITHUB_ACTOR',
+  '--password-stdin',
+  'token=***',
+  'Docker-Registry-Auth',
+  'CheckOnly',
+]) {
+  requireText('OAH registry login verifier', registryLoginVerifier, registryLoginText);
+}
 for (const preflightText of [
   'oah-preflight',
   'RequireProductionReady',
