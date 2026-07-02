@@ -30,6 +30,7 @@ const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const releaseVerifier = read('scripts/verify-oah-release.ps1');
+const productionPreflightVerifier = read('scripts/verify-production-preflight.ps1');
 const promotionVerifier = read('scripts/promote-oah-images.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
@@ -250,10 +251,30 @@ requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm ru
 requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
 requireText('package scripts', packageJson, 'test:release');
+requireText('package scripts', packageJson, 'test:production-preflight');
 requireText('package scripts', packageJson, 'release:promote-images');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
 requireText('gitignore release reports', gitignore, 'release-reports/');
 
+
+for (const preflightText of [
+  'oah-preflight',
+  'RequireProductionReady',
+  'TargetRegistry',
+  'Docker-Registry-Auth',
+  'package-image-remote',
+  'registry-auth',
+  'local-image-',
+  'cluster-ai-deployment',
+  'cluster-controller-deployment',
+  'serving-contract',
+  'live-browser-token',
+  'OAH_ID_TOKEN',
+  'oah-production-preflight-$Stamp.json',
+  'phase=',
+]) {
+  requireText('OAH production preflight verifier', productionPreflightVerifier, preflightText);
+}
 for (const promotionText of [
   'oah-promote',
   'TargetRegistry',
