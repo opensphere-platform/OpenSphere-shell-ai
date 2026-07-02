@@ -152,11 +152,17 @@ requirePattern('server KServe storage annotation', server, /serving\.kserve\.io\
 requirePattern('server DSPA manifest helper', server, /function backboneDspaManifest/);
 requirePattern('server DSPA apiVersion', server, /datasciencepipelinesapplications\.opendatahub\.io\/v1/);
 requirePattern('server DSPA external storage', server, /externalStorage:\s*\{/);
+requirePattern('server DSPA API image digest', server, /DSPA_API_SERVER_IMAGE[\s\S]*ghcr\.io\/opensphere-platform\/oah-ds-pipelines-api-server@sha256:[a-f0-9]{64}/);
+requirePattern('server DSPA MLMD image digest', server, /DSPA_MLMD_GRPC_IMAGE[\s\S]*ghcr\.io\/opensphere-platform\/oah-mlmd-grpc-postgres-wrapper@sha256:[a-f0-9]{64}/);
 requirePattern('server DSPO public kube-rbac-proxy image', server, /quay\.io\/openshift\/origin-kube-rbac-proxy:latest/);
 requirePattern('server DSPO public MLMD envoy image', server, /docker\.io\/envoyproxy\/envoy:v1\.31-latest/);
 requirePattern('server DSPA TLS compatibility', server, /function ensureDspaTlsCompatibility/);
 requirePattern('server DSPA network compatibility', server, /function ensureDspaNetworkCompatibility/);
 requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
+requirePattern('server DSPA GHCR pull secret constant', server, /const GHCR_PULL_SECRET\s*=\s*'ghcr-pull'/);
+requirePattern('server DSPA runtime image pull secret repair', server, /async function ensureDspaRuntimeImagePullSecrets/);
+requirePattern('server pipelines configure admin path', server, /\/admin\/native\/support-services\/pipelines\/configure/);
+requirePattern('server pipelines configure controller apply', server, /async function configurePipelinesFoundation[\s\S]*const applyReq = null;[\s\S]*ensureDspaRuntimeImagePullSecrets\(applyReq\)/);
 requirePattern('server upstream parity inventory', server, /async function upstreamParityInventory/);
 requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
 requirePattern('server upstream parity operator precision', server, /namespaceMatchingPodsReady/);
@@ -178,6 +184,13 @@ for (const productFlowServerText of [
 requirePattern('server DSPA PostgreSQL runtime config verification', server, /async function verifyDspaPostgresRuntimeConfig/);
 requirePattern('server Model Registry foundation configure', server, /async function configureModelRegistryFoundation/);
 requirePattern('server shell token header', server, /headers\['x-shell-token'\]\s*=\s*process\.env\.SHELL_SERVICE_TOKEN/);
+requirePattern('server serving approval gate', server, /async function servingApprovalGate/);
+requirePattern('server inference approval enforcement', server, /UnapprovedModelArtifact/);
+requirePattern('server vector bootstrap authz', server, /pathname === '\/memory\/vector\/bootstrap'[\s\S]*requireAdminAccess/);
+requirePattern('server vector query authn', server, /pathname === '\/memory\/vector\/query'[\s\S]*requestActor\(req\)/);
+requirePattern('server append-only approval audit helper', server, /function appendApprovalAudit/);
+requirePattern('server approval audit insert-only', server, /oah_model_registry_approval_audit[\s\S]*on conflict \(id\) do nothing/);
+requirePattern('server monitoring synthetic fallback', server, /NoMeasuredMetricSource[\s\S]*syntheticMetrics/);
 requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*productFlow,\s*\n\s*setupPrerequisites/);
 requireText('AI plugin package KFP pod label', pluginPackage, 'podLabels:');
 requireText('AI plugin package KFP pod label', pluginPackage, 'pipelines.kubeflow.org/v2_component: "true"');
@@ -207,6 +220,7 @@ for (const verifierText of [
   'No active running',
   'deployment image',
   'ExpectedMlmdImage',
+  'ghcr.io/opensphere-platform/oah-mlmd-grpc-postgres-wrapper@sha256:',
   'DSPA MLMD image',
   '/pipelines/backend',
   'KFP smoke record',
@@ -222,9 +236,27 @@ for (const verifierText of [
   requireText('live support-services verifier', liveVerifier, verifierText);
 }
 
+for (const releaseVerifierText of [
+  'AllowUnsignedImages',
+  'RequireRemoteImages = $true',
+  'RequireLiveBrowser = $true',
+  'dspa-api-server',
+  'dspa-mlmd-grpc',
+]) {
+  requireText('release verifier strict gate', releaseVerifier, releaseVerifierText);
+}
+
+for (const preflightVerifierText of [
+  'dspa-api-server-image',
+  'dspa-mlmd-grpc-image',
+  'Add-Image-Check',
+]) {
+  requireText('production preflight DSPA image gate', productionPreflightVerifier, preflightVerifierText);
+}
+
 for (const browserVerifierText of [
   'osp-ai-shell',
-  '/ai/cluster-settings/support-services',
+  '/p/ai/cluster-settings/support-services',
   'OAH support services',
   'oah product flow readiness',
   'GPU training smoke',

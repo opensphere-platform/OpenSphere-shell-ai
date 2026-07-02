@@ -1,7 +1,7 @@
 param(
   [string]$Namespace = "opensphere-system",
   [string]$Deployment = "ai",
-  [string]$Route = "https://console.opensphere.dev/ai/overview",
+  [string]$Route = "https://console.opensphere.dev/p/ai/overview",
   [string]$PackagePath = "uipluginpackage.yaml",
   [string]$DspaName = "oah-dspa",
   [string]$TrainingJobName = "external-gpu-smoke-e2e",
@@ -9,6 +9,8 @@ param(
   [string]$SeedPipelineName = "oah-kfp-smoke-pipeline",
   [string]$SmokeRunRecordName = "ospr-oah-kfp-smoke-run-v193-kfp-record",
   [string]$InferenceClaimName = "oah-serving-contract-smoke",
+  [string]$ServingPromotionName = "oah-serving-smoke-promotion",
+  [string]$ServingPromotionEvaluationName = "oah-model-registry-pg-smoke",
   [string]$MonitoringTargetName = "oah-default-model-monitoring"
 )
 
@@ -59,6 +61,49 @@ function ExecJson([string]$PodName, [string]$Url) {
   }
 }
 
+function EnsureServingPromotionFixture() {
+  $promotion = KubeJson -ArgsList @("get", "modelpromotionclaim", $ServingPromotionName, "-n", $Namespace)
+  if ($promotion) {
+    return
+  }
+  $manifest = @"
+apiVersion: ai.opensphere.io/v1alpha1
+kind: ModelPromotionClaim
+metadata:
+  name: $ServingPromotionName
+  namespace: $Namespace
+  labels:
+    app.kubernetes.io/part-of: opensphere-ai
+spec:
+  evaluationRef:
+    apiVersion: eval.ai.opensphere.io/v1alpha1
+    kind: EvaluationJob
+    name: $ServingPromotionEvaluationName
+    namespace: $Namespace
+  modelRef:
+    apiVersion: ai.opensphere.io/v1alpha1
+    kind: TrainingJobClaim
+    name: $TrainingJobName
+    namespace: $Namespace
+  stage: production
+"@
+  $manifest | kubectl apply -f - | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    Fail "Could not create serving promotion fixture $Namespace/$ServingPromotionName."
+  }
+}
+
+function WaitForInferenceReady([string]$Name, [int]$Attempts = 12) {
+  for ($i = 0; $i -lt $Attempts; $i += 1) {
+    $item = KubeJson -ArgsList @("get", "inferenceclaim", $Name, "-n", $Namespace)
+    if ($item -and (IsReady $item) -and $item.status.backendMode -eq "upstream") {
+      return $item
+    }
+    Start-Sleep -Seconds 10
+  }
+  return KubeJson -ArgsList @("get", "inferenceclaim", $Name, "-n", $Namespace)
+}
+
 $deploy = KubeJson -ArgsList @("get", "deploy", $Deployment, "-n", $Namespace)
 if (-not $deploy) {
   Fail "Deployment $Namespace/$Deployment could not be read."
@@ -75,7 +120,8 @@ if (Test-Path $PackagePath) {
   $repositoryMatch = [regex]::Match($packageText, "(?m)^\s*repository:\s*(\S+)\s*$")
   $digestMatch = [regex]::Match($packageText, "(?m)^\s*digest:\s*(\S+)\s*$")
   if ($repositoryMatch.Success -and $digestMatch.Success) {
-    $desiredImage = "$($repositoryMatch.Groups[1].Value):$($digestMatch.Groups[1].Value)"
+    $digest = $digestMatch.Groups[1].Value
+    $desiredImage = if ($digest.StartsWith("sha256:")) { "$($repositoryMatch.Groups[1].Value)@$digest" } else { "$($repositoryMatch.Groups[1].Value):$digest" }
     if ($image -ne $desiredImage) {
       Fail "Deployment image $image does not match desired image $desiredImage."
     }
@@ -159,7 +205,9 @@ if ($registryPromotions.Count -lt 1 -or $registryAudit.Count -lt 1 -or $registry
 }
 Stage "model-registry" "storage=$($registry.storage.type) versions=$($registryItems.Count) promotions=$($registryPromotions.Count) audit=$($registryAudit.Count) metrics=$($registryMetrics.Count)"
 
-$inference = KubeJson -ArgsList @("get", "inferenceclaim", $InferenceClaimName, "-n", $Namespace)
+EnsureServingPromotionFixture
+kubectl annotate "inferenceclaim/$InferenceClaimName" -n $Namespace "opensphere.io/reconcile-at=$(Get-Date -Format o)" --overwrite | Out-Null
+$inference = WaitForInferenceReady $InferenceClaimName
 if (-not $inference -or -not (IsReady $inference) -or $inference.status.backendMode -ne "upstream") {
   Fail "InferenceClaim $Namespace/$InferenceClaimName is not Ready on the upstream KServe backend."
 }
@@ -192,8 +240,17 @@ if ($storageSecret -ne "ai-hub-kserve-s3") {
 Stage "serving" "inference=$runtimeName route=$([bool]$isvc.status.url) revision=$revisionName traffic=$trafficPercent% storageSecret=$storageSecret"
 
 $monitoring = KubeJson -ArgsList @("get", "monitoringtarget", $MonitoringTargetName, "-n", $Namespace)
-if (-not $monitoring -or -not (IsReady $monitoring) -or [int]$monitoring.status.summary.healthy -lt 3 -or [int]$monitoring.status.historySamples -lt 1) {
-  Fail "MonitoringTarget $Namespace/$MonitoringTargetName is not healthy with retained history."
+if (-not $monitoring -or [int]$monitoring.status.historySamples -lt 1) {
+  Fail "MonitoringTarget $Namespace/$MonitoringTargetName is missing retained history."
+}
+$monitoringSource = [string]$monitoring.status.metricSource.type
+$syntheticMetrics = @($monitoring.status.metrics | Where-Object { $_.synthetic -eq $true -or $_.status -eq "Unmeasured" })
+if ($monitoringSource -eq "opensphere-fallback") {
+  if ([string]$monitoring.status.phase -ne "Unmeasured" -or (IsReady $monitoring) -or $syntheticMetrics.Count -lt 3) {
+    Fail "Fallback MonitoringTarget $Namespace/$MonitoringTargetName must be Unmeasured/NotReady with synthetic metrics."
+  }
+} elseif (-not (IsReady $monitoring) -or [int]$monitoring.status.summary.healthy -lt 3) {
+  Fail "Measured MonitoringTarget $Namespace/$MonitoringTargetName is not healthy with retained history."
 }
 $trusty = ExecJson $podName "http://127.0.0.1:8080/monitoring/trustyai/metrics"
 $trustyItems = @($trusty.items)
@@ -201,6 +258,6 @@ $trustyHistory = @($trusty.history)
 if ($trustyItems.Count -lt 3 -or $trustyHistory.Count -lt 1) {
   Fail "TrustyAI-compatible metrics endpoint did not expose monitoring metrics and history."
 }
-Stage "monitoring" "target=$MonitoringTargetName metrics=$($trustyItems.Count) history=$($trustyHistory.Count) source=$($monitoring.status.metricSource.type)"
+Stage "monitoring" "target=$MonitoringTargetName metrics=$($trustyItems.Count) history=$($trustyHistory.Count) source=$monitoringSource phase=$($monitoring.status.phase)"
 
 Write-Output "[oah-product-flow] checks passed"

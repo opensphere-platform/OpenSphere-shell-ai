@@ -3,6 +3,7 @@ param(
   [switch]$RequireLiveBrowser,
   [switch]$RequireRemoteImages,
   [switch]$RequireSignedImages,
+  [switch]$AllowUnsignedImages,
   [switch]$SkipLocalBuild,
   [string]$ReportDir = "release-reports",
   [string]$Namespace = "opensphere-system",
@@ -10,7 +11,8 @@ param(
   [string]$CosignIdentity = "",
   [string]$CosignIssuer = "",
   [string]$AiDeployment = "ai",
-  [string]$ControllerDeployment = "dupa-registry-controller"
+  [string]$ControllerDeployment = "dupa-registry-controller",
+  [string]$DspaName = "oah-dspa"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +20,14 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $GeneratedAt = Get-Date
 $ReportStamp = $GeneratedAt.ToUniversalTime().ToString("yyyyMMdd-HHmmss")
 $StepResults = New-Object System.Collections.Generic.List[object]
+
+if (-not $PSBoundParameters.ContainsKey("RequireRemoteImages")) { $RequireRemoteImages = $true }
+if (-not $PSBoundParameters.ContainsKey("RequireLiveBrowser")) { $RequireLiveBrowser = $true }
+if ($AllowUnsignedImages) {
+  $RequireSignedImages = $false
+} elseif (-not $PSBoundParameters.ContainsKey("RequireSignedImages")) {
+  $RequireSignedImages = $true
+}
 
 function Fail([string]$Message) {
   Write-Error "[oah-release] $Message"
@@ -101,19 +111,38 @@ function Require-Cosign() {
   if (-not $cmd) {
     Fail "cosign was not found. Install cosign or run without -RequireSignedImages."
   }
+  return $cmd
 }
 
 function Invoke-Cosign([string[]]$ArgsList) {
   Write-Output "[oah-release] cosign $($ArgsList -join ' ')"
   $cosign = Require-Cosign
-  & $cosign @ArgsList
-  if ($LASTEXITCODE -ne 0) {
-    Fail "cosign $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $cosign
+  $psi.Arguments = (($ArgsList | ForEach-Object {
+    if ($_ -match '\s') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+  }) -join ' ')
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $process = [System.Diagnostics.Process]::Start($psi)
+  $stdout = $process.StandardOutput.ReadToEnd()
+  $stderr = $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+  $exit = $process.ExitCode
+  foreach ($line in (($stdout + "`n" + $stderr) -split "`r?`n")) {
+    if ($line) { Write-Output $line }
+  }
+  if ($exit -ne 0) {
+    Fail "cosign $($ArgsList -join ' ') failed with exit code $exit."
   }
 }
 
 function Verify-CosignSignature([string]$Image) {
   Require-Cosign
+  if (-not $CosignKeyRef -and (-not $CosignIdentity -or -not $CosignIssuer)) {
+    Fail "Signed image verification requires -CosignKeyRef or both -CosignIdentity and -CosignIssuer. Use -AllowUnsignedImages only for explicit non-production audit runs."
+  }
   $args = New-Object System.Collections.Generic.List[string]
   $args.Add("verify")
   if ($CosignKeyRef) {
@@ -136,10 +165,13 @@ function Verify-CosignSignature([string]$Image) {
 function Verify-ImagePolicy([string]$DesiredImage) {
   $ai = Kube-Json @("get", "deploy", $AiDeployment, "-n", $Namespace)
   $controller = Kube-Json @("get", "deploy", $ControllerDeployment, "-n", $Namespace)
+  $dspa = Kube-Json @("get", "dspa", $DspaName, "-n", $Namespace)
   $images = @(
     [pscustomobject]@{ id = "package"; image = $DesiredImage },
     [pscustomobject]@{ id = "ai-deployment"; image = "$($ai.spec.template.spec.containers[0].image)" },
-    [pscustomobject]@{ id = "dupa-controller"; image = "$($controller.spec.template.spec.containers[0].image)" }
+    [pscustomobject]@{ id = "dupa-controller"; image = "$($controller.spec.template.spec.containers[0].image)" },
+    [pscustomobject]@{ id = "dspa-api-server"; image = "$($dspa.spec.apiServer.image)" },
+    [pscustomobject]@{ id = "dspa-mlmd-grpc"; image = "$($dspa.spec.mlmd.grpc.image)" }
   )
 
   foreach ($entry in $images) {

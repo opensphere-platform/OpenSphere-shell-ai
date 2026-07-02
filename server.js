@@ -3082,6 +3082,23 @@ async function reconcileInferenceClaim(claim) {
   };
   try {
     if (!backend.ready) throw { code: 409, msg: backend.message };
+    const servingGate = await servingApprovalGate(claim, modelUri);
+    if (!servingGate.allowed) {
+      await cleanupInferenceResources(claim).catch(() => null);
+      const status = resetRetryFields({
+        ...baseStatus,
+        ...normalizedStatus({
+          phase: 'NonCompliant',
+          ready: false,
+          reason: 'UnapprovedModelArtifact',
+          message: servingGate.message,
+          upstreamConditions: [],
+          extra: { governance: servingGate },
+        }),
+      });
+      await patchInferenceStatus(claim, status);
+      return { name: claim.metadata?.name, namespace, runtimeName: name, phase: 'NonCompliant', governance: servingGate };
+    }
     if (backend.mode === 'upstream') {
       if (!modelUri) {
         if (backend.requested === 'upstream') throw { code: 400, msg: 'KServe upstream backend requires spec.modelUri, spec.storageUri, spec.artifactUri, spec.sourceRef, or spec.source' };
@@ -3422,10 +3439,10 @@ const FALLBACK_DETAILS = {
     { from: 'fraud-detector-model-v1', to: 'evaluate-groundedness-step', type: 'evaluation' },
   ],
   metrics: [
-    { metric: 'drift', value: 0.12, threshold: 0.3, status: 'Healthy' },
-    { metric: 'bias', value: 0.08, threshold: 0.2, status: 'Healthy' },
-    { metric: 'explainability', value: 0.91, threshold: 0.8, status: 'Ready' },
-    { metric: 'groundedness', value: 0.86, threshold: 0.8, status: 'Ready' },
+    { metric: 'drift', value: null, threshold: 0.3, status: 'Unmeasured', synthetic: true, measured: false },
+    { metric: 'bias', value: null, threshold: 0.2, status: 'Unmeasured', synthetic: true, measured: false },
+    { metric: 'explainability', value: null, threshold: 0.8, status: 'Unmeasured', synthetic: true, measured: false },
+    { metric: 'groundedness', value: null, threshold: 0.8, status: 'Unmeasured', synthetic: true, measured: false },
   ],
   modelVersions: [
     { name: 'fraud-detector', version: '1.0.0', stage: 'staging', source: 'fraud-detector-model-v1' },
@@ -4233,6 +4250,8 @@ async function patchClaimOperation(req) {
       },
     },
   };
+  const actor = await requestActor(req).catch(() => null);
+  if (actor?.username) patch.metadata.annotations['opensphere.io/last-actor'] = actor.username;
   if (action === 'approve' || action === 'promote') patch.spec = { stage: body.stage || 'production', approved: true };
   if (action === 'reject') patch.spec = { stage: body.stage || 'rejected', approved: false };
   if (action === 'suspend') patch.spec = { suspended: true };
@@ -4293,7 +4312,12 @@ async function trustyaiMetrics(reqUrl) {
       if (items.length) return { target: 'all-models', sources, alerts, history, items };
     }
   }
-  return { target: target || 'all-models', source: { type: 'opensphere-fallback' }, items: FALLBACK_DETAILS.metrics.map((metric) => ({ ...metric, source: 'opensphere-fallback' })) };
+  return {
+    target: target || 'all-models',
+    source: { type: 'opensphere-fallback', synthetic: true, measured: false },
+    items: FALLBACK_DETAILS.metrics.map((metric) => ({ ...metric, source: 'opensphere-fallback', synthetic: true, measured: false })),
+    message: 'TrustyAI is not installed or no MonitoringTarget metrics are available; fallback metrics are unmeasured synthetic placeholders.',
+  };
 }
 
 async function monitoringHistoryEntries() {
@@ -4454,17 +4478,20 @@ function monitoringMetricsFor(claim, source = { type: 'opensphere-fallback' }) {
   const name = claim.metadata?.name || 'monitoring-target';
   const metrics = Array.isArray(spec.metrics) && spec.metrics.length ? spec.metrics : ['drift', 'bias', 'explainability'];
   const defaultThreshold = numberOrUndefined(spec.threshold) ?? numberOrUndefined(spec.minimum) ?? 0.8;
+  const synthetic = source.type !== 'trustyai';
   return metrics.map((metric) => {
     const lowerBetter = ['drift', 'bias', 'toxicity', 'error-rate'].includes(String(metric).toLowerCase());
     const threshold = numberOrUndefined(spec.thresholds?.[metric]) ?? (lowerBetter ? Math.min(defaultThreshold, 0.3) : defaultThreshold);
-    const value = metricValueFor(name, metric, lowerBetter);
+    const value = synthetic ? null : metricValueFor(name, metric, lowerBetter);
     return {
       metric,
       value,
       threshold,
-      status: metricStatus(metric, value, threshold),
+      status: synthetic ? 'Unmeasured' : metricStatus(metric, value, threshold),
       source: source.type || 'opensphere-fallback',
       sourceName: source.name || '',
+      synthetic,
+      measured: !synthetic,
     };
   });
 }
@@ -4514,13 +4541,14 @@ async function reconcileMonitoringTarget(claim) {
   const alerts = monitoringAlertsFor(claim, metrics, history);
   const failing = metrics.filter((metric) => metric.status === 'Failing');
   const warnings = metrics.filter((metric) => metric.status === 'Warning');
-  const phase = failing.length ? 'Failing' : warnings.length ? 'Warning' : 'Healthy';
+  const synthetic = metricSource.type !== 'trustyai';
+  const phase = synthetic ? 'Unmeasured' : failing.length ? 'Failing' : warnings.length ? 'Warning' : 'Healthy';
   const now = new Date().toISOString();
   const normalized = normalizedStatus({
     phase,
-    ready: !failing.length,
-    reason: failing.length ? 'MetricThresholdFailed' : warnings.length ? 'MetricThresholdWarning' : 'MetricsHealthy',
-    message: failing.length ? `${failing.length} metric(s) are failing.` : warnings.length ? `${warnings.length} metric(s) have warnings.` : 'All monitoring metrics are healthy.',
+    ready: synthetic ? false : !failing.length,
+    reason: synthetic ? 'NoMeasuredMetricSource' : failing.length ? 'MetricThresholdFailed' : warnings.length ? 'MetricThresholdWarning' : 'MetricsHealthy',
+    message: synthetic ? 'No measured TrustyAI metric source is available; synthetic fallback metrics are not treated as healthy.' : failing.length ? `${failing.length} metric(s) are failing.` : warnings.length ? `${warnings.length} metric(s) have warnings.` : 'All monitoring metrics are healthy.',
     upstreamConditions: trustyaiInfo.conditions,
   });
   const status = resetRetryFields({
@@ -4528,6 +4556,8 @@ async function reconcileMonitoringTarget(claim) {
     ...normalized,
     metrics,
     metricSource,
+    syntheticMetrics: synthetic,
+    measured: !synthetic,
     alerts,
     alertSummary: {
       active: alerts.length,
@@ -5297,7 +5327,7 @@ async function upsertModelRegistryPgState(state) {
         await client.query(
           `insert into oah_model_registry_approval_audit (id, data, updated_at)
            values ($1, $2::jsonb, now())
-           on conflict (id) do update set data = excluded.data, updated_at = now()`,
+           on conflict (id) do nothing`,
           [item.id, JSON.stringify(item)],
         );
       }
@@ -5646,8 +5676,9 @@ function promotionAuditRecord(claim, context) {
   const annotations = claim.metadata?.annotations || {};
   const operation = optionalString(annotations['opensphere.io/last-operation'] || '');
   const operationAt = optionalString(annotations['opensphere.io/last-operation-at'] || '');
+  const actor = optionalString(context.actor || annotations['opensphere.io/last-actor'] || 'opensphere-controller');
   return {
-    id: shortHash(`${context.namespace}/${context.promotionRef}/${context.decision}/${context.generation}`),
+    id: shortHash(`${context.namespace}/${context.promotionRef}/${context.decision}/${context.generation}/${context.recordedAt}/${actor}`),
     recordedAt: context.recordedAt,
     namespace: context.namespace,
     promotionRef: context.promotionRef,
@@ -5661,15 +5692,15 @@ function promotionAuditRecord(claim, context) {
     generation: context.generation,
     operation: operation || context.decision,
     operationAt: operationAt || context.recordedAt,
-    actor: optionalString(annotations['opensphere.io/last-actor'] || 'opensphere-controller'),
+    actor,
     backendMode: context.backendMode,
     backendPhase: context.backendPhase,
   };
 }
 
-function appendUniqueById(items, next, limit = 200) {
-  if (!next) return (items || []).slice(-limit);
-  return [...(items || []).filter((item) => item.id !== next.id), next].slice(-limit);
+function appendApprovalAudit(items, next) {
+  if (!next) return items || [];
+  return [...(items || []), next];
 }
 
 function mergeMetrics(items, next, limit = 500) {
@@ -5979,6 +6010,107 @@ function modelVersionArtifactStatus(version) {
 
 function modelVersionMatchesPromotion(version, promotion) {
   return promotion?.modelName === version.name && (!promotion.version || promotion.version === version.version);
+}
+
+function normalizedArtifactCandidates(value) {
+  const raw = optionalString(value);
+  if (!raw) return [];
+  const candidates = new Set([raw, raw.replace(/\/+$/, '')]);
+  try {
+    const decoded = decodeURIComponent(raw);
+    candidates.add(decoded);
+    candidates.add(decoded.replace(/\/+$/, ''));
+  } catch {}
+  return [...candidates].filter(Boolean);
+}
+
+function promotionAllowsServing(promotion) {
+  const decision = optionalString(promotion?.approvalDecision || '').toLowerCase();
+  const stage = optionalString(promotion?.stage || '').toLowerCase();
+  return stage !== 'rejected'
+    && (
+      promotion?.approved === true
+      || promotion?.evaluationPassed === true
+      || ['approved', 'evaluationpassed', 'promoted'].includes(decision)
+    );
+}
+
+function versionArtifactCandidates(version) {
+  return [
+    version?.storageUri,
+    version?.modelUri,
+    version?.artifactUri,
+    version?.uri,
+    version?.source,
+    modelVersionArtifactStatus(version).uri,
+  ].flatMap(normalizedArtifactCandidates);
+}
+
+async function servingApprovalGate(claim, modelUri) {
+  const annotations = claim.metadata?.annotations || {};
+  const allowBreakGlass = annotations['opensphere.io/allow-unapproved-artifact'] === 'true'
+    || annotations['opensphere.io/break-glass'] === 'true';
+  const breakGlassReason = optionalString(annotations['opensphere.io/break-glass-reason'] || annotations['opensphere.io/approval-exception-reason']);
+  const artifactCandidates = normalizedArtifactCandidates(modelUri);
+  if (!artifactCandidates.length) return { allowed: true, mode: 'NoArtifactUri', message: 'No explicit model artifact URI is present.' };
+  if (allowBreakGlass && breakGlassReason) {
+    return {
+      allowed: true,
+      mode: 'BreakGlass',
+      artifactUri: modelUri,
+      reason: breakGlassReason,
+      message: `Unapproved model artifact is allowed by break-glass annotation: ${breakGlassReason}`,
+    };
+  }
+  const namespace = claim.metadata?.namespace || 'default';
+  const spec = claim.spec || {};
+  const registry = await modelRegistryState({ namespace }).catch((e) => ({ error: e.msg || String(e), versions: [], promotions: [] }));
+  const promotions = registry.promotions || [];
+  const versions = registry.versions || [];
+  const matchingVersions = versions.filter((version) => {
+    const values = [
+      version?.name,
+      version?.version,
+      version?.promotionRef,
+      spec.modelName,
+      spec.model,
+      spec.modelRef?.name,
+      spec.promotionRef?.name,
+      ...versionArtifactCandidates(version),
+    ].flatMap(normalizedArtifactCandidates);
+    return artifactCandidates.some((candidate) => values.includes(candidate));
+  });
+  const allowedPromotion = promotions.find((promotion) => {
+    if (!promotionAllowsServing(promotion)) return false;
+    const directPromotionMatch = [promotion.name, promotion.modelName, promotion.version]
+      .flatMap(normalizedArtifactCandidates)
+      .some((candidate) => artifactCandidates.includes(candidate)
+        || candidate === optionalString(spec.promotionRef?.name)
+        || candidate === optionalString(spec.modelName || spec.model || spec.modelRef?.name));
+    if (directPromotionMatch) return true;
+    return matchingVersions.some((version) => modelVersionMatchesPromotion(version, promotion));
+  });
+  if (allowedPromotion) {
+    return {
+      allowed: true,
+      mode: 'RegistryPromotion',
+      artifactUri: modelUri,
+      promotionRef: `${allowedPromotion.namespace || namespace}/${allowedPromotion.name}`,
+      modelName: allowedPromotion.modelName,
+      version: allowedPromotion.version,
+      approvalDecision: allowedPromotion.approvalDecision || '',
+      message: `Model artifact is approved by promotion ${allowedPromotion.namespace || namespace}/${allowedPromotion.name}.`,
+    };
+  }
+  return {
+    allowed: false,
+    mode: 'RegistryPromotionRequired',
+    artifactUri: modelUri,
+    registrySource: registry.source,
+    registryError: registry.error || '',
+    matchingVersions: matchingVersions.map((version) => ({ name: version.name, version: version.version, stage: version.stage || '' })).slice(0, 10),
+    message: 'InferenceClaim is blocked because its model artifact is not backed by an approved or evaluation-passed ModelPromotionClaim.',
+  };
 }
 
 function modelVersionMatchesInference(version, inference, promotions) {
@@ -6358,7 +6490,7 @@ async function reconcileModelPromotionClaim(claim) {
     });
     await saveModelRegistryState({
       ...registry,
-      approvalAudit: appendUniqueById(registry.approvalAudit, auditRecord),
+      approvalAudit: appendApprovalAudit(registry.approvalAudit, auditRecord),
     }, null, registry.source || registryBackend.source);
     const status = {
       ...baseStatus,
@@ -6472,7 +6604,7 @@ async function reconcileModelPromotionClaim(claim) {
     ...registry,
     versions,
     promotions,
-    approvalAudit: appendUniqueById(registry.approvalAudit, auditRecord),
+    approvalAudit: appendApprovalAudit(registry.approvalAudit, auditRecord),
     evaluationMetrics: mergeMetrics(registry.evaluationMetrics, metricRecords),
   }, null, registry.source || registryBackend.source);
   const status = {
@@ -7492,6 +7624,7 @@ async function authorizeAiRequest(req, pathname) {
     '/admin/native/support-services/model-registry/configure',
     '/admin/native/support-services/observability/configure',
     '/admin/native/support-services/distributed/configure',
+    '/admin/native/support-services/pipelines/configure',
     '/admin/setup/install',
   ]);
   if (pathname.startsWith('/admin/native/reconcile/')) {
@@ -7529,6 +7662,22 @@ async function authorizeAiRequest(req, pathname) {
       kind: pathname === '/models/registry/import-serving' ? 'InferenceClaim' : 'ModelVersion',
       name: body.target || body.name || body.servingTarget || '',
     }, 'authenticated OAH registry action');
+  }
+  if ((pathname === '/memory/vector/bootstrap' || pathname === '/memory/vector/ingest') && req.method === 'POST') {
+    await requireAdminAccess(req, pathname);
+    return;
+  }
+  if (pathname === '/memory/vector/query' && req.method === 'POST') {
+    const actor = await requestActor(req);
+    await appendSecurityAudit(req, true, pathname, {
+      verb: 'get',
+      group: 'ai.opensphere.io',
+      resource: 'vectormemory',
+      namespace: 'opensphere-system',
+      kind: 'VectorMemory',
+      name: actor.username,
+    }, 'authenticated vector memory query');
+    return;
   }
   if (pathname === '/models/registry/upstream/self-test' && req.method === 'POST') {
     await prepareJsonBody(req);
@@ -7642,9 +7791,10 @@ const BACKBONE_OBJECT_BUCKET = 'ai-hub';
 const DSPA_POSTGRES_SECRET = 'oah-dspa-postgres';
 const DSPA_POSTGRES_DATABASE = 'oah_dspa';
 const DSPA_POSTGRES_USER = 'oah_dspa';
-const DSPA_API_SERVER_IMAGE = 'localhost:5000/oah-ds-pipelines-api-server:pgx-dev-20260701-v5';
-const DSPA_MLMD_GRPC_IMAGE = 'localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1';
+const DSPA_API_SERVER_IMAGE = process.env.DSPA_API_SERVER_IMAGE || 'ghcr.io/opensphere-platform/oah-ds-pipelines-api-server@sha256:42c562e85a24034884683547fcb6ef8140365a22374c435e91ee504ffc4d97dc';
+const DSPA_MLMD_GRPC_IMAGE = process.env.DSPA_MLMD_GRPC_IMAGE || 'ghcr.io/opensphere-platform/oah-mlmd-grpc-postgres-wrapper@sha256:499ad663426a4eeb06ec16cfaee71649e9da54d167f4d691ca92b2105243f5ec';
 const DSPA_SEED_PIPELINE_NAME = 'oah-kfp-smoke-pipeline';
+const GHCR_PULL_SECRET = 'ghcr-pull';
 const OAH_RUNTIME_SERVICE_ACCOUNT = 'ai-runtime';
 const DSPO_NAMESPACE = 'opendatahub';
 const DSPO_OPERATOR_DEPLOYMENT = 'data-science-pipelines-operator-controller-manager';
@@ -7652,6 +7802,8 @@ const DSPO_CONFIGMAP = 'data-science-pipelines-operator-dspo-config';
 const DSPO_PARAMETERS_CONFIGMAP = 'data-science-pipelines-operator-dspo-parameters';
 const DSPA_NAME = 'oah-dspa';
 const DSPA_POSTGRES_SERVER_CONFIG = `${DSPA_NAME}-postgres-server-config`;
+const DSPA_API_DEPLOYMENT = `ds-pipeline-${DSPA_NAME}`;
+const DSPA_MLMD_GRPC_DEPLOYMENT = `ds-pipeline-metadata-grpc-${DSPA_NAME}`;
 const OPENSPHERE_WILDCARD_TLS_SECRET = 'opensphere-wildcard-tls';
 const DSPO_PUBLIC_IMAGES = {
   kubeRbacProxy: 'quay.io/openshift/origin-kube-rbac-proxy:latest',
@@ -8270,6 +8422,63 @@ async function ensureDspaMlmdPostgresCompatibility(req, postgresConfig) {
       ? `${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} already uses the PostgreSQL MLMD wrapper image.`
       : `Set ${BACKBONE_CLAIM_NAMESPACE}/${DSPA_NAME} MLMD gRPC image to PostgreSQL wrapper ${DSPA_MLMD_GRPC_IMAGE}.`,
     resources: [resourceRefFor(result, 'DataSciencePipelinesApplication')],
+  };
+}
+
+async function ensureDeploymentImagePullSecret(req, namespace, name, secretName) {
+  const path = `/apis/apps/v1/namespaces/${namespace}/deployments/${name}`;
+  const deployment = await k8sJson(path);
+  if (!deployment) {
+    return {
+      kind: 'Deployment',
+      namespace,
+      name,
+      phase: 'Pending',
+      detail: `${namespace}/${name} is not created yet.`,
+    };
+  }
+  const existing = deployment.spec?.template?.spec?.imagePullSecrets || [];
+  const hasSecret = existing.some((item) => item?.name === secretName);
+  if (hasSecret) {
+    return {
+      ...resourceRefFor(deployment, 'Deployment'),
+      phase: 'Ready',
+      detail: `${namespace}/${name} already references ${secretName}.`,
+    };
+  }
+  const next = [...existing.map((item) => ({ name: item.name })), { name: secretName }];
+  const patched = await patchK8s(path, {
+    spec: {
+      template: {
+        spec: {
+          imagePullSecrets: next,
+        },
+      },
+    },
+  }, req);
+  return {
+    ...resourceRefFor(patched, 'Deployment'),
+    phase: 'Configured',
+    detail: `Added ${secretName} to ${namespace}/${name}.`,
+  };
+}
+
+async function ensureDspaRuntimeImagePullSecrets(req) {
+  const deployments = [DSPA_API_DEPLOYMENT, DSPA_MLMD_GRPC_DEPLOYMENT];
+  const resources = [];
+  for (const name of deployments) {
+    resources.push(await ensureDeploymentImagePullSecret(req, BACKBONE_CLAIM_NAMESPACE, name, GHCR_PULL_SECRET));
+  }
+  const configured = resources.some((item) => item.phase === 'Configured');
+  const pending = resources.some((item) => item.phase === 'Pending');
+  return {
+    id: 'dspa-runtime-image-pull-secrets',
+    label: 'DSPA runtime image pull secrets',
+    phase: pending ? 'Pending' : configured ? 'Configured' : 'Ready',
+    detail: pending
+      ? `${GHCR_PULL_SECRET} will be attached after DSPO creates ${deployments.join(', ')}.`
+      : `${GHCR_PULL_SECRET} is attached to ${deployments.join(', ')}.`,
+    resources,
   };
 }
 
@@ -9432,10 +9641,11 @@ async function pipelinesFoundationPreview(req) {
 }
 
 async function configurePipelinesFoundation(req) {
-  const { created, skipped } = await ensureFoundationCrds(PIPELINE_FALLBACK_CRDS, req);
-  const dspoCompatibilitySteps = await ensureDspoImageCompatibility(req);
-  const tlsCompatibility = await ensureDspaTlsCompatibility(req);
-  const networkCompatibility = await ensureDspaNetworkCompatibility(req).catch((e) => ({
+  const applyReq = null;
+  const { created, skipped } = await ensureFoundationCrds(PIPELINE_FALLBACK_CRDS, applyReq);
+  const dspoCompatibilitySteps = await ensureDspoImageCompatibility(applyReq);
+  const tlsCompatibility = await ensureDspaTlsCompatibility(applyReq);
+  const networkCompatibility = await ensureDspaNetworkCompatibility(applyReq).catch((e) => ({
     phase: 'Warning',
     detail: e.msg || String(e),
     manifests: [
@@ -9463,7 +9673,7 @@ async function configurePipelinesFoundation(req) {
       `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/configmaps/${serverConfigManifest.metadata.name}`,
       serverConfigManifest,
       { metadata: serverConfigManifest.metadata, data: serverConfigManifest.data },
-      req,
+      applyReq,
     );
     const dspaManifest = backboneDspaManifest(backboneObjectStorageConfig(backboneClaim, rustfsSecret), postgresConfig);
     const dspaPath = `/apis/datasciencepipelinesapplications.opendatahub.io/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/datasciencepipelinesapplications/${dspaManifest.metadata.name}`;
@@ -9476,7 +9686,7 @@ async function configurePipelinesFoundation(req) {
         },
       },
       spec: dspaManifest.spec,
-    }, req);
+    }, applyReq);
     dspaStep = {
       id: 'upstream-dspa',
       label: 'DSPA upstream runtime',
@@ -9497,13 +9707,19 @@ async function configurePipelinesFoundation(req) {
     phase: 'Warning',
     detail: e.msg || String(e),
   }));
-  const mlmdPostgresCompatibility = await ensureDspaMlmdPostgresCompatibility(req, postgresConfig).catch((e) => ({
+  const mlmdPostgresCompatibility = await ensureDspaMlmdPostgresCompatibility(applyReq, postgresConfig).catch((e) => ({
     id: 'dspa-mlmd-postgres',
     label: 'DSPA MLMD PostgreSQL compatibility',
     phase: 'Warning',
     detail: e.msg || String(e),
   }));
-  const kfpSeedPipeline = await ensureKfpSeedPipeline(req).catch((e) => ({
+  const dspaRuntimeImagePullSecrets = await ensureDspaRuntimeImagePullSecrets(applyReq).catch((e) => ({
+    id: 'dspa-runtime-image-pull-secrets',
+    label: 'DSPA runtime image pull secrets',
+    phase: 'Warning',
+    detail: e.msg || String(e),
+  }));
+  const kfpSeedPipeline = await ensureKfpSeedPipeline(applyReq).catch((e) => ({
     id: 'kfp-seed-pipeline',
     label: 'KFP seed pipeline',
     phase: 'Warning',
@@ -9538,6 +9754,7 @@ async function configurePipelinesFoundation(req) {
       dspaStep,
       dspaPostgresRuntime,
       mlmdPostgresCompatibility,
+      dspaRuntimeImagePullSecrets,
       kfpSeedPipeline,
     ],
     preview,

@@ -94,6 +94,7 @@ if (credentialReader) {
   const allowedSecrets = new Set([
     'oah-external-gpu-credentials',
     'ai-hub-backbone-postgres',
+    'oah-dspa-postgres',
     'ai-hub-backbone-rustfs',
     'ai-hub-kserve-s3',
     'ds-pipelines-proxy-tls-oah-dspa',

@@ -6,7 +6,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const WebSocket = require('ws');
 
-const route = process.env.OAH_LIVE_ROUTE || 'https://console.opensphere.dev/ai/cluster-settings/support-services';
+const route = process.env.OAH_LIVE_ROUTE || 'https://console.opensphere.dev/p/ai/cluster-settings/support-services';
 const token = process.env.OAH_ID_TOKEN || '';
 
 function log(message) {
@@ -225,7 +225,7 @@ async function main() {
     });
 
     await client.send('Page.navigate', { url: route });
-    await waitForRuntime(client, `location.href.includes('/ai/cluster-settings/support-services')`, 'support-services route');
+    await waitForRuntime(client, `location.href.includes('/p/ai/cluster-settings/support-services')`, 'support-services route');
     await waitForRuntime(client, `((document.body.innerText || '') + ' ' + (document.body.textContent || '')).toLowerCase().includes('oah product flow readiness')`, 'product flow panel');
 
     const requiredTexts = [

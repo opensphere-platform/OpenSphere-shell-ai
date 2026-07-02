@@ -4,6 +4,7 @@ param(
   [string]$AiDeployment = "ai",
   [string]$ControllerDeployment = "dupa-registry-controller",
   [string]$InferenceService = "osinf-oah-serving-contract-smoke",
+  [string]$DspaName = "oah-dspa",
   [string]$TargetRegistry = "ghcr.io",
   [switch]$RequireProductionReady
 )
@@ -70,6 +71,18 @@ function Test-DigestImage([string]$Image) {
   return $Image -match '@sha256:[a-fA-F0-9]{64}$'
 }
 
+function Add-Image-Check([string]$Id, [string]$Image, [string]$NextAction) {
+  if (-not $Image) {
+    Add-Check $Id "Blocked" "Image is missing." $NextAction
+  } elseif (Test-LocalImage $Image) {
+    Add-Check $Id "Blocked" "Image uses local registry: $Image" $NextAction
+  } elseif (Test-DigestImage $Image) {
+    Add-Check $Id "Ready" "Image is remote digest pinned: $Image"
+  } else {
+    Add-Check $Id "Blocked" "Image is not digest pinned: $Image" $NextAction
+  }
+}
+
 function Docker-Image-Exists([string]$Image) {
   Invoke-Text { docker image inspect $Image } | Out-Null
   return $LASTEXITCODE -eq 0
@@ -113,13 +126,7 @@ try {
     $desiredImage = if ($digest.StartsWith("sha256:")) { "$repo@$digest" } else { "$repo`:$digest" }
   }
 
-  if (Test-LocalImage $desiredImage) {
-    Add-Check "package-image-remote" "Blocked" "UIPluginPackage image is local: $desiredImage" "Promote the image with release:promote-images and update manifests to a remote digest."
-  } elseif (Test-DigestImage $desiredImage) {
-    Add-Check "package-image-remote" "Ready" "UIPluginPackage image is remote digest pinned: $desiredImage"
-  } else {
-    Add-Check "package-image-remote" "Blocked" "UIPluginPackage image is not digest pinned: $desiredImage" "Use repo@sha256 digest references for production."
-  }
+  Add-Image-Check "package-image-remote" $desiredImage "Promote the image with release:promote-images and update manifests to a remote digest."
 
   if (Docker-Registry-Auth $TargetRegistry) {
     Add-Check "registry-auth" "Ready" "Docker config has an auth entry for $TargetRegistry."
@@ -147,6 +154,14 @@ try {
     Add-Check "cluster-controller-deployment" "Ready" "$Namespace/$ControllerDeployment ready=$($controller.status.readyReplicas)/$($controller.spec.replicas) image=$($controller.spec.template.spec.containers[0].image)"
   } else {
     Add-Check "cluster-controller-deployment" "Blocked" "$Namespace/$ControllerDeployment is not ready." "Restore the DUPA registry controller before release verification."
+  }
+
+  $dspa = Kube-Json @("get", "dspa", $DspaName, "-n", $Namespace)
+  if ($dspa) {
+    Add-Image-Check "dspa-api-server-image" "$($dspa.spec.apiServer.image)" "Promote the DSPA API server image to a remote sha256 digest and reapply the DSPA manifest."
+    Add-Image-Check "dspa-mlmd-grpc-image" "$($dspa.spec.mlmd.grpc.image)" "Promote the DSPA MLMD gRPC wrapper image to a remote sha256 digest and reapply the DSPA manifest."
+  } else {
+    Add-Check "dspa-runtime" "Blocked" "$Namespace/$DspaName was not found." "Apply the OAH DSPA runtime before production release."
   }
 
   $isvc = Kube-Json @("get", "inferenceservice", $InferenceService, "-n", $Namespace)

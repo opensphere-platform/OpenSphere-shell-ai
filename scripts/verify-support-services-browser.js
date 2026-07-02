@@ -98,7 +98,7 @@ function supportServicesPayload() {
     setupPrerequisites: [],
     configurationPages: [
       { id: 'backbone', service: 'Console Backbone provider', page: 'Console / Backbone', mode: 'external', action: 'Open Backbone', requiredBefore: ['Metadata DB', 'Object storage'], route: '/backbone' },
-      { id: 'pipelines', service: 'Data Science Pipelines / KFP', page: 'Cluster settings / Support services', mode: 'native fallback', action: 'Preview pipelines foundation', requiredBefore: ['Metadata DB', 'Object storage'], route: '/ai/cluster-settings/support-services' },
+      { id: 'pipelines', service: 'Data Science Pipelines / KFP', page: 'Cluster settings / Support services', mode: 'native fallback', action: 'Preview pipelines foundation', requiredBefore: ['Metadata DB', 'Object storage'], route: '/p/ai/cluster-settings/support-services' },
     ],
     installPlan: [
       { order: 1, id: 'backbone', title: 'Console Backbone provider', menu: 'Console / Backbone', status: 'Ready', action: 'Consume Backbone contract', blocks: ['Metadata DB', 'Object storage'] },
@@ -211,7 +211,7 @@ function createHarnessServer(port) {
       } catch {}
       return response;
     };
-    window.history.replaceState({}, '', '/ai/cluster-settings/support-services');
+    window.history.replaceState({}, '', '/p/ai/cluster-settings/support-services');
   </script>
   <link rel="stylesheet" href="/app/styles.css">
 </head>
@@ -224,7 +224,7 @@ function createHarnessServer(port) {
   return http.createServer((req, res) => {
     const url = new URL(req.url || '/', `http://127.0.0.1:${port}`);
     if (req.method === 'OPTIONS') return sendJson(res, 204, {});
-    if (url.pathname === '/ai/cluster-settings/support-services' || url.pathname === '/') {
+    if (url.pathname === '/p/ai/cluster-settings/support-services' || url.pathname === '/') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(html);
       return;
@@ -421,7 +421,7 @@ async function main() {
     '--disable-extensions',
     `--remote-debugging-port=${cdpPort}`,
     `--user-data-dir=${userDataDir}`,
-    `http://127.0.0.1:${harnessPort}/ai/cluster-settings/support-services`,
+    `http://127.0.0.1:${harnessPort}/p/ai/cluster-settings/support-services`,
   ], { stdio: 'ignore' });
 
   let client;

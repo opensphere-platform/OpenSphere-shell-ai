@@ -1,7 +1,7 @@
 param(
   [string]$Namespace = "opensphere-system",
   [string]$Deployment = "ai",
-  [string]$Route = "https://console.opensphere.dev/ai/cluster-settings/support-services",
+  [string]$Route = "https://console.opensphere.dev/p/ai/cluster-settings/support-services",
   [string]$Api = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services",
   [string]$UpstreamParityApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/upstream-parity",
   [string]$ModelRegistryConfigureApi = "https://console.opensphere.dev/api/plugins/ai/admin/native/support-services/model-registry/configure",
@@ -13,7 +13,7 @@ param(
   [string]$PluginStyles = "https://console.opensphere.dev/api/plugins/ai/app/styles.css",
   [string]$PackagePath = "uipluginpackage.yaml",
   [string]$DspaName = "oah-dspa",
-  [string]$ExpectedMlmdImage = "localhost:5000/oah-mlmd-grpc-postgres-wrapper:v1",
+  [string]$ExpectedMlmdImage = "ghcr.io/opensphere-platform/oah-mlmd-grpc-postgres-wrapper@sha256:499ad663426a4eeb06ec16cfaee71649e9da54d167f4d691ca92b2105243f5ec",
   [string]$SeedPipelineName = "oah-kfp-smoke-pipeline",
   [string]$SmokeRunName = "ospr-oah-kfp-smoke-run-v193-kfp-record",
   [string]$IdToken = $env:OAH_ID_TOKEN
@@ -325,9 +325,17 @@ $monitoringReady = @($monitoringTarget.status.conditions | Where-Object { $_.typ
 $metricCount = @($monitoringTarget.status.metrics).Count
 $historySamples = [int]($monitoringTarget.status.historySamples)
 $metricSource = $monitoringTarget.status.metricSource.type
-Write-Output "[support-services-live] monitoring target=$($monitoringTarget.metadata.name) ready=$($monitoringReady.status) phase=$($monitoringTarget.status.phase) source=$metricSource metrics=$metricCount history=$historySamples"
-if ($monitoringReady.status -ne "True" -or $metricCount -lt 3 -or $historySamples -lt 1 -or -not $metricSource) {
-  Fail "MonitoringTarget does not expose ready fallback metrics and retained history."
+$syntheticMetrics = @($monitoringTarget.status.metrics | Where-Object { $_.synthetic -eq $true -or $_.status -eq "Unmeasured" })
+Write-Output "[support-services-live] monitoring target=$($monitoringTarget.metadata.name) ready=$($monitoringReady.status) phase=$($monitoringTarget.status.phase) source=$metricSource metrics=$metricCount synthetic=$($syntheticMetrics.Count) history=$historySamples"
+if ($metricCount -lt 3 -or $historySamples -lt 1 -or -not $metricSource) {
+  Fail "MonitoringTarget does not expose monitoring metrics and retained history."
+}
+if ($metricSource -eq "opensphere-fallback") {
+  if ($monitoringReady.status -ne "False" -or $monitoringTarget.status.phase -ne "Unmeasured" -or $syntheticMetrics.Count -lt 3) {
+    Fail "Fallback MonitoringTarget must be Unmeasured/NotReady with synthetic metrics, not Healthy."
+  }
+} elseif ($monitoringReady.status -ne "True") {
+  Fail "Measured MonitoringTarget source $metricSource is not Ready."
 }
 
 $trustyRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/monitoring/trustyai/metrics"

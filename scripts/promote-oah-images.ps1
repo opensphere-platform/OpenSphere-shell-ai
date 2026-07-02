@@ -87,14 +87,30 @@ function Require-Cosign() {
   if (-not $cmd) {
     Fail "cosign was not found. Install cosign or run without -SignImages/-VerifySignatures."
   }
+  return $cmd
 }
 
 function Invoke-Cosign([string[]]$ArgsList) {
   Write-Output "[oah-promote] cosign $($ArgsList -join ' ')"
   $cosign = Require-Cosign
-  & $cosign @ArgsList
-  if ($LASTEXITCODE -ne 0) {
-    Fail "cosign $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $cosign
+  $psi.Arguments = (($ArgsList | ForEach-Object {
+    if ($_ -match '\s') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+  }) -join ' ')
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.UseShellExecute = $false
+  $process = [System.Diagnostics.Process]::Start($psi)
+  $stdout = $process.StandardOutput.ReadToEnd()
+  $stderr = $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+  $exit = $process.ExitCode
+  foreach ($line in (($stdout + "`n" + $stderr) -split "`r?`n")) {
+    if ($line) { Write-Output $line }
+  }
+  if ($exit -ne 0) {
+    Fail "cosign $($ArgsList -join ' ') failed with exit code $exit."
   }
 }
 

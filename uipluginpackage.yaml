@@ -18,7 +18,7 @@ spec:
       value: "https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk"
   image:
     repository: ghcr.io/opensphere-platform/ai
-    digest: sha256:1b399ca73510d4b563235a578c601d26da5ef5e6b80e478f30085427d55b46cd
+    digest: sha256:dbf04b3579d00cae3747560a069b2e42dd33d185b39a8a9aa488da5abc061ba4
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"
