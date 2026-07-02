@@ -16,6 +16,7 @@ param(
   [string]$ExpectedMlmdImage = "ghcr.io/opensphere-platform/oah-mlmd-grpc-postgres-wrapper@sha256:499ad663426a4eeb06ec16cfaee71649e9da54d167f4d691ca92b2105243f5ec",
   [string]$SeedPipelineName = "oah-kfp-smoke-pipeline",
   [string]$SmokeRunName = "ospr-oah-kfp-smoke-run-v193-kfp-record",
+  [string]$SodSmokePromotionName = "oah-sod-self-approval-smoke",
   [string]$IdToken = $env:OAH_ID_TOKEN
 )
 
@@ -249,9 +250,10 @@ if ($mlmdReady -ne "1/1") {
 
 $pipelineBackendRaw = kubectl exec -n $Namespace $podName -- wget -qO- http://127.0.0.1:8080/pipelines/backend
 $pipelineBackend = $pipelineBackendRaw | ConvertFrom-Json
-Write-Output "[support-services-live] pipelines phase=$($pipelineBackend.phase) kfpReady=$($pipelineBackend.summary.kfpReady) kfpApiReady=$($pipelineBackend.summary.kfpApiReady) records=$($pipelineBackend.summary.runRecords)"
+$kfpApiProbeMessage = $pipelineBackend.backend.apiProbe.message
+Write-Output "[support-services-live] pipelines phase=$($pipelineBackend.phase) kfpReady=$($pipelineBackend.summary.kfpReady) kfpApiReady=$($pipelineBackend.summary.kfpApiReady) records=$($pipelineBackend.summary.runRecords) apiProbe='$kfpApiProbeMessage'"
 if ($pipelineBackend.phase -ne "Ready" -or -not $pipelineBackend.summary.kfpReady -or -not $pipelineBackend.summary.kfpApiReady) {
-  Fail "Pipeline backend is not Ready with KFP API access."
+  Fail "Pipeline backend is not Ready with KFP API access. apiProbe=$kfpApiProbeMessage"
 }
 
 $smokeRecord = @($pipelineBackend.records | Where-Object { $_.name -eq $SmokeRunName })[0]
@@ -263,7 +265,7 @@ if ($smokeRecord.state -ne "SUCCEEDED" -or -not $smokeRecord.runId) {
   Fail "KFP smoke record $SmokeRunName is not Succeeded."
 }
 
-$seedRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://ds-pipeline-$DspaName.$Namespace.svc.cluster.local:8888/apis/v2beta1/pipelines?page_size=100"
+$seedRaw = kubectl exec -n $Namespace $podName -- node -e "const fs=require('fs'); const {Agent}=require('undici'); const token=fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token','utf8').trim(); const dispatcher=new Agent({connect:{rejectUnauthorized:false}}); fetch('https://ds-pipeline-$DspaName.$Namespace.svc.cluster.local:8443/apis/v2beta1/pipelines?page_size=100',{dispatcher,signal:AbortSignal.timeout(10000),headers:{Authorization:'Bearer '+token,Accept:'application/json'}}).then(async r=>{const text=await r.text(); if(!r.ok){console.error(text || ('HTTP '+r.status)); process.exit(1);} console.log(text);}).catch(e=>{console.error(e.name+': '+(e.message || String(e))); process.exit(1);})"
 $seed = $seedRaw | ConvertFrom-Json
 $seedPipeline = @($seed.pipelines | Where-Object { $_.display_name -eq $SeedPipelineName -or $_.name -eq $SeedPipelineName })[0]
 Write-Output "[support-services-live] kfp seed pipeline=$($seedPipeline.display_name) id=$($seedPipeline.pipeline_id)"
@@ -277,6 +279,58 @@ Write-Output "[support-services-live] pgvector ready=$($vector.extension.ready) 
 if (-not $vector.extension.ready -or -not $vector.summary.ready) {
   Fail "Backbone pgvector memory is not ready."
 }
+$vectorCollection = @($vector.collections | Where-Object { $_.namespace -eq $Namespace })[0]
+if (-not $vectorCollection) {
+  Fail "No pgvector memory collection was returned for namespace $Namespace."
+}
+Write-Output "[support-services-live] vector central policy source=$($vectorCollection.access.policySource.kind)/$($vectorCollection.access.policySource.name) owner=$($vectorCollection.access.owner) groups=$($vectorCollection.access.groups -join ',')"
+if (-not $vectorCollection.access.policySource -or $vectorCollection.access.policySource.kind -ne "BackboneVectorAccessPolicy") {
+  Fail "Backbone pgvector memory did not report the BackboneVectorAccessPolicy central policy source."
+}
+$vectorPolicyCrd = kubectl get crd vectorretrievalclaims.ai.foundation.opensphere.io -o name 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $vectorPolicyCrd) {
+  Fail "VectorRetrievalClaim CRD is required as the declarative vector ACL policy source."
+}
+$vectorPolicyOwner = "vector-policy-smoke-owner"
+$vectorPolicyGroup = "vector-policy-smoke-group"
+$vectorPolicyName = $vectorCollection.name
+$vectorPolicyManifest = @"
+apiVersion: ai.foundation.opensphere.io/v1alpha1
+kind: VectorRetrievalClaim
+metadata:
+  name: $vectorPolicyName
+  namespace: $Namespace
+  labels:
+    app.kubernetes.io/part-of: opensphere-ai
+    app.kubernetes.io/component: vector-memory
+    opensphere.io/vector-collection: $vectorPolicyName
+spec:
+  collection: $vectorPolicyName
+  backend: backbone-pgvector
+  access:
+    owner: $vectorPolicyOwner
+    groups:
+    - $vectorPolicyGroup
+"@
+$vectorPolicyManifest | kubectl apply -f - | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Fail "Could not apply VectorRetrievalClaim vector ACL policy smoke resource."
+}
+try {
+  Start-Sleep -Seconds 2
+  $vectorPolicyRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/memory/vector?namespace=$Namespace"
+  $vectorPolicyState = $vectorPolicyRaw | ConvertFrom-Json
+  $vectorPolicyCollection = @($vectorPolicyState.collections | Where-Object { $_.name -eq $vectorPolicyName })[0]
+  Write-Output "[support-services-live] vector policy source=$($vectorPolicyCollection.access.policySource.kind)/$($vectorPolicyCollection.access.policySource.name) owner=$($vectorPolicyCollection.access.owner) groups=$($vectorPolicyCollection.access.groups -join ',')"
+  if (-not $vectorPolicyCollection.access.policySource -or $vectorPolicyCollection.access.policySource.kind -ne "VectorRetrievalClaim") {
+    Fail "Vector memory ACL did not report VectorRetrievalClaim as policySource."
+  }
+  if ($vectorPolicyCollection.access.owner -ne $vectorPolicyOwner -or @($vectorPolicyCollection.access.groups) -notcontains $vectorPolicyGroup) {
+    Fail "Vector memory ACL did not honor VectorRetrievalClaim owner/group policy."
+  }
+} finally {
+  kubectl delete vectorretrievalclaim $vectorPolicyName -n $Namespace --ignore-not-found=true | Out-Null
+}
 
 $registryRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/models/registry/versions?namespace=$Namespace"
 $registry = $registryRaw | ConvertFrom-Json
@@ -286,9 +340,12 @@ $registryAudit = @($registry.approvalAudit)
 $registryMetrics = @($registry.evaluationMetrics)
 $registryPgItems = @($registryItems | Where-Object { $_.backend -eq "opensphere-postgres" -and $_.registry -match "ai-hub-backbone-postgres" })
 $registrySmoke = @($registryItems | Where-Object { $_.name -eq "oah-pg-smoke-model" -and $_.version -eq "oah-model-registry-pg-smoke" })[0]
-Write-Output "[support-services-live] model registry storage=$($registry.storage.type) ready=$($registry.storage.ready) source=$($registry.source.type) versions=$($registryItems.Count) postgresVersions=$($registryPgItems.Count) promotions=$($registryPromotions.Count) audit=$($registryAudit.Count) metrics=$($registryMetrics.Count)"
+Write-Output "[support-services-live] model registry storage=$($registry.storage.type) ready=$($registry.storage.ready) source=$($registry.source.type) sourceRole=$($registry.source.role) versions=$($registryItems.Count) postgresVersions=$($registryPgItems.Count) promotions=$($registryPromotions.Count) audit=$($registryAudit.Count) metrics=$($registryMetrics.Count)"
 if ($registry.storage.type -ne "postgres" -or -not $registry.storage.ready -or $registry.source.type -ne "opensphere-postgres") {
   Fail "Model Registry is not using the Backbone PostgreSQL store."
+}
+if ($registry.source.role -ne "app") {
+  Fail "Model Registry PostgreSQL runtime is not using the restricted app role."
 }
 if ($registryItems.Count -lt 1 -or $registryPgItems.Count -lt 1 -or -not $registrySmoke) {
   Fail "Backbone PostgreSQL model registry does not expose the expected registered model versions."
@@ -296,6 +353,61 @@ if ($registryItems.Count -lt 1 -or $registryPgItems.Count -lt 1 -or -not $regist
 if ($registryPromotions.Count -lt 1 -or $registryAudit.Count -lt 1 -or $registryMetrics.Count -lt 1) {
   Fail "Backbone PostgreSQL model registry does not expose promotion, audit, and evaluation evidence."
 }
+
+$sodPromotionName = "$SodSmokePromotionName-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+$sodUser = "oah-sod-smoke@example.com"
+$sodManifest = @"
+apiVersion: ai.opensphere.io/v1alpha1
+kind: ModelPromotionClaim
+metadata:
+  name: $sodPromotionName
+  namespace: $Namespace
+  annotations:
+    opensphere.io/requested-by: $sodUser
+    opensphere.io/approved: "true"
+    opensphere.io/approval-decision: Approved
+    opensphere.io/approved-by: $sodUser
+    opensphere.io/approved-at: "2026-07-02T00:00:00Z"
+    opensphere.io/model-name: external-gpu-smoke-e2e
+    opensphere.io/model-version: sod-smoke
+spec:
+  modelRef:
+    apiVersion: ai.opensphere.io/v1alpha1
+    kind: TrainingJobClaim
+    name: external-gpu-smoke-e2e
+    namespace: $Namespace
+  evaluationRef:
+    apiVersion: eval.ai.opensphere.io/v1alpha1
+    kind: EvaluationJob
+    name: oah-model-registry-pg-smoke
+    namespace: $Namespace
+  stage: production
+"@
+$sodManifest | kubectl apply -f - | Out-Null
+if ($LASTEXITCODE -ne 0) {
+  Fail "Could not apply SoD self-approval smoke promotion."
+}
+$sodBlocked = $false
+for ($i = 0; $i -lt 18; $i += 1) {
+  $sodClaim = kubectl get modelpromotionclaim $sodPromotionName -n $Namespace -o json | ConvertFrom-Json
+  $sodReady = @($sodClaim.status.conditions | Where-Object { $_.type -eq "Ready" })[0]
+  if ($sodClaim.status.phase -eq "Blocked" -and $sodReady.reason -eq "ApprovalSoDViolation") {
+    $sodBlocked = $true
+    break
+  }
+  Start-Sleep -Seconds 5
+}
+if (-not $sodBlocked) {
+  Fail "SoD self-approval smoke promotion was not blocked with ApprovalSoDViolation."
+}
+$sodRegistryRaw = kubectl exec -n $Namespace $podName -- wget -qO- "http://127.0.0.1:8080/models/registry/versions?namespace=$Namespace"
+$sodRegistry = $sodRegistryRaw | ConvertFrom-Json
+$sodAuditRecord = @($sodRegistry.approvalAudit | Where-Object { $_.promotionRef -eq $sodPromotionName -and $_.decision -eq "ApprovalSoDViolation" })[-1]
+if (-not $sodAuditRecord -or $sodAuditRecord.separationOfDuties.reason -ne "SelfApprovalDenied") {
+  Fail "SoD self-approval audit record was not persisted to the model registry."
+}
+Write-Output "[support-services-live] sod self-approval blocked promotion=$sodPromotionName requester=$($sodAuditRecord.requester) approver=$($sodAuditRecord.approver) reason=$($sodAuditRecord.separationOfDuties.reason)"
+kubectl delete modelpromotionclaim $sodPromotionName -n $Namespace --ignore-not-found | Out-Null
 
 try {
   $registryCm = kubectl get cm ai-model-registry-versions -n $Namespace -o json | ConvertFrom-Json

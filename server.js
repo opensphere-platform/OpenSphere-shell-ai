@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer, WebSocket } = require('ws');
 const { Pool: PgPool } = require('pg');
+const { Agent: UndiciAgent } = require('undici');
 const COOKIE = 'osng_token'; // 브라우저 WS는 커스텀 헤더를 못 실음 → 신원 토큰을 HttpOnly 쿠키로 전달
 function tokenFromCookie(cookieHeader) {
   if (!cookieHeader) return null;
@@ -42,7 +43,7 @@ const ADMIN_GROUPS = (process.env.OSP_ADMIN_GROUPS || 'opensphere-console-admins
 
 // ── 쓰기 인가: 호출자 토큰을 검증 → Impersonate-User (SA 광범위 write 금지) ──
 // Kanidm 콘솔 id_token(ES256) 전용 — cutover 완료, 레거시 Keycloak RS256 dual-accept 경로는 제거됨.
-const { createHash, createPublicKey, verify: cryptoVerify } = require('crypto');
+const { createHash, createPublicKey, randomBytes, verify: cryptoVerify } = require('crypto');
 // Kanidm 콘솔 IdP — split-horizon: 토큰 iss는 브라우저값(localhost:8444), JWKS는 in-cluster svc.
 const DEFAULT_KANIDM_ISSUERS = [
   'https://localhost:8444/oauth2/openid/opensphere-console',
@@ -57,6 +58,7 @@ const KANIDM_TLS_SERVERNAME = process.env.KANIDM_TLS_SERVERNAME || 'kanidm.opens
 const KANIDM_AZP = process.env.KANIDM_AZP || 'opensphere-console';
 const KANIDM_CA_PATH = process.env.KANIDM_CA_PATH || '/etc/kanidm-ca/ca.crt';
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const IDENTITY_GROUP_CLAIM_KEYS = ['groups', 'groups_name', 'group_names', 'roles'];
 // Kanidm JWKS — 자체서명 CA를 명시적 'ca' 옵션으로 신뢰(TLS 검증 비활성화 금지, NODE_EXTRA_CA_CERTS 미접촉).
 let _kjwks = null, _kjwksAt = 0;
 const KJWKS_TTL = 5 * 60 * 1000;
@@ -99,7 +101,10 @@ async function verifyToken(idToken) {
   const now = Date.now();
   if (c.exp && c.exp * 1000 < now) throw { code: 401, msg: 'token expired' };
   if (c.nbf && c.nbf * 1000 > now + 30000) throw { code: 401, msg: 'token not yet valid' };
-  return { username: c.preferred_username || 'unknown', groups: c.groups || [] };
+  return {
+    username: identityUsernameFromClaims(c),
+    groups: identityGroupsFromClaims(c),
+  };
 }
 const readBody = (req) => {
   if (req._cachedBody) return Promise.resolve(Buffer.from(req._cachedBody));
@@ -898,6 +903,9 @@ async function capabilityStatus() {
 async function writeK8s(apiPath, method, body, req) {
   const headers = { Authorization: `Bearer ${tok()}`, Accept: 'application/json', 'Content-Type': req?.contentType || 'application/json' };
   let actor = internalK8sActor();
+  if (req?._internal && req?._actor?.username) {
+    actor = `${req._actor.username} via ${internalK8sActor()}`;
+  }
   if (req && !req._internal && !req.headers?.['x-os-id-token']) {
     throw { code: 401, msg: 'Authentication required for Kubernetes write action.' };
   }
@@ -962,8 +970,13 @@ async function requestActor(req) {
 }
 
 function actorIsAdmin(actor) {
-  const groups = actor?.groups || [];
-  return groups.some((group) => ADMIN_GROUPS.includes(group));
+  const groups = new Set(identityGroupAliases(actor?.groups || []));
+  return identityGroupAliases(ADMIN_GROUPS).some((group) => groups.has(group));
+}
+
+function requestIsLoopback(req) {
+  const address = req?.socket?.remoteAddress || '';
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
 function bodyJson(req) {
@@ -1026,6 +1039,17 @@ async function requireAdminAccess(req, action) {
   throw { code: 403, msg: `Forbidden: ${reason}` };
 }
 
+async function requireBreakGlassAccess(req, action = 'break-glass') {
+  const actor = await requestActor(req);
+  if (actorIsAdmin(actor)) {
+    await appendSecurityAudit(req, true, action, { kind: 'BreakGlass', resource: 'break-glass' }, `admin group matched: ${ADMIN_GROUPS.join(', ')}`);
+    return actor;
+  }
+  const reason = `requires OpenSphere admin group (${ADMIN_GROUPS.join(', ')})`;
+  await appendSecurityAudit(req, false, action, { kind: 'BreakGlass', resource: 'break-glass' }, reason);
+  throw { code: 403, msg: `Forbidden: ${reason}` };
+}
+
 async function prepareJsonBody(req) {
   if (req._jsonBody) return req._jsonBody;
   const raw = (await readBody(req)).toString('utf8') || '{}';
@@ -1041,7 +1065,8 @@ async function patchK8s(apiPath, patch, req) {
   const patchReq = {
     headers: req?.headers || {},
     contentType: 'application/merge-patch+json',
-    _internal: !req,
+    _internal: !req || req?._internal,
+    _actor: req?._actor,
   };
   return writeK8s(apiPath, 'PATCH', patch, patchReq);
 }
@@ -1050,7 +1075,8 @@ async function patchK8sJson(apiPath, operations, req) {
   const patchReq = {
     headers: req?.headers || {},
     contentType: 'application/json-patch+json',
-    _internal: !req,
+    _internal: !req || req?._internal,
+    _actor: req?._actor,
   };
   return writeK8s(apiPath, 'PATCH', operations, patchReq);
 }
@@ -2469,6 +2495,33 @@ function kfpApiBase(info) {
   return String(info.apiEndpoint || info.internalEndpoint || info.endpoint || '').replace(/\/+$/, '');
 }
 
+let kfpProxyAgent = null;
+function kfpProxyFetchOptions(base) {
+  if (!String(base || '').startsWith('https://ds-pipeline-')) return {};
+  if (!kfpProxyAgent) {
+    // DSPO creates an in-cluster service certificate for the kube-rbac-proxy path.
+    // Local clusters do not always publish that CA to Node, so constrain the relaxed
+    // TLS verification to this authenticated in-cluster KFP proxy only.
+    kfpProxyAgent = new UndiciAgent({ connect: { rejectUnauthorized: false } });
+  }
+  return {
+    dispatcher: kfpProxyAgent,
+    headers: { Authorization: `Bearer ${tok()}` },
+  };
+}
+
+function kfpApiBases(info) {
+  const bases = [];
+  const namespace = info.namespace || 'opensphere-system';
+  const name = info.name || '';
+  if (name) bases.push(`https://ds-pipeline-${name}.${namespace}.svc.cluster.local:8443`);
+  for (const item of [info.apiEndpoint, info.internalEndpoint, info.endpoint]) {
+    const base = String(item || '').replace(/\/+$/, '');
+    if (base && !bases.includes(base)) bases.push(base);
+  }
+  return bases;
+}
+
 async function probeKfpApi(info) {
   const probes = [
     { path: '/apis/v1beta1/healthz', success: 'Kubeflow Pipelines API health endpoint is reachable.' },
@@ -2494,33 +2547,40 @@ async function probeKfpApi(info) {
 }
 
 async function kfpFetchJson(info, pathName, options = {}) {
-  const base = kfpApiBase(info);
-  if (!base) throw { code: 409, msg: 'Kubeflow Pipelines API endpoint is not available from DSPA status.' };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 10000);
-  try {
-    const r = await fetch(`${base}${pathName}`, {
-      method: options.method || 'GET',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal,
-    });
-    const text = await r.text();
-    let data = {};
-    if (text) {
-      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  const bases = kfpApiBases(info);
+  if (!bases.length) throw { code: 409, msg: 'Kubeflow Pipelines API endpoint is not available from DSPA status.' };
+  let lastError = null;
+  for (const base of bases) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 10000);
+    try {
+      const proxyOptions = kfpProxyFetchOptions(base);
+      const r = await fetch(`${base}${pathName}`, {
+        method: options.method || 'GET',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(proxyOptions.headers || {}), ...(options.headers || {}) },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+        signal: controller.signal,
+        dispatcher: proxyOptions.dispatcher,
+      });
+      const text = await r.text();
+      let data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      }
+      if (!r.ok) {
+        const message = data?.message || data?.error || data?.raw || `KFP API HTTP ${r.status}`;
+        throw { code: r.status, msg: message, data, endpoint: base };
+      }
+      return data;
+    } catch (e) {
+      lastError = e.name === 'AbortError'
+        ? { code: 504, msg: `Timed out while calling Kubeflow Pipelines API at ${base}.`, endpoint: base }
+        : e;
+    } finally {
+      clearTimeout(timeout);
     }
-    if (!r.ok) {
-      const message = data?.message || data?.error || data?.raw || `KFP API HTTP ${r.status}`;
-      throw { code: r.status, msg: message, data };
-    }
-    return data;
-  } catch (e) {
-    if (e.name === 'AbortError') throw { code: 504, msg: 'Timed out while calling Kubeflow Pipelines API.' };
-    throw e;
-  } finally {
-    clearTimeout(timeout);
   }
+  throw lastError;
 }
 
 function kfpRecordName(resources) {
@@ -3124,9 +3184,10 @@ async function reconcileInferenceClaim(claim) {
           url,
           predictUrl: `${String(url).replace(/\/$/, '')}/v1/models/${modelName}/predict`,
           backendResource: `serving.kserve.io/v1beta1/InferenceService/${namespace}/${name}`,
+          governance: servingGate,
           ...normalized,
         }));
-        return { name: claim.metadata?.name, namespace, runtimeName: name, backend: 'upstream', phase: normalized.phase };
+        return { name: claim.metadata?.name, namespace, runtimeName: name, backend: 'upstream', phase: normalized.phase, governance: servingGate };
       }
     }
     await upsertK8s(
@@ -3151,14 +3212,14 @@ async function reconcileInferenceClaim(claim) {
       reason: suspended ? 'Suspended' : available > 0 ? 'RuntimeAvailable' : 'WaitingForDeployment',
       message: suspended ? 'Inference endpoint is suspended by spec.suspended.' : available > 0 ? 'Inference endpoint is available.' : 'Deployment exists but is not available yet.',
       upstreamConditions: deployed?.status?.conditions,
-      extra: { availableReplicas: available },
+      extra: { availableReplicas: available, governance: servingGate },
     });
     await patchInferenceStatus(claim, resetRetryFields({
       ...baseStatus,
       backendResource: `apps/v1/Deployment/${namespace}/${name}`,
       ...normalized,
     }));
-    return { name: claim.metadata?.name, namespace, runtimeName: name, phase: normalized.phase };
+    return { name: claim.metadata?.name, namespace, runtimeName: name, phase: normalized.phase, governance: servingGate };
   } catch (e) {
     const status = retryStatus(claim, baseStatus, e);
     await patchInferenceStatus(claim, status);
@@ -3299,6 +3360,23 @@ async function upsertLifecycleResource(page, body, req) {
     metadata: objectMeta(name, namespace, body.description || ''),
     spec: buildSpec(page, body, namespace),
   };
+  const actor = await requestActor(req).catch(() => null);
+  const creator = actor?.username || internalK8sActor();
+  obj.metadata.annotations = {
+    ...(obj.metadata.annotations || {}),
+    'opensphere.io/created-by': creator,
+    'opensphere.io/created-at': new Date().toISOString(),
+  };
+  if (def.kind === 'ModelPromotionClaim') {
+    obj.metadata.annotations['opensphere.io/requested-by'] = optionalString(body.requestedBy || body.requester) || creator;
+    obj.metadata.annotations['opensphere.io/requested-at'] = obj.metadata.annotations['opensphere.io/created-at'];
+    if (optionalString(body.modelName)) obj.metadata.annotations['opensphere.io/model-name'] = optionalString(body.modelName);
+    if (optionalString(body.version || body.modelVersion)) obj.metadata.annotations['opensphere.io/model-version'] = optionalString(body.version || body.modelVersion);
+    if (body.approved === true) {
+      obj.metadata.annotations['opensphere.io/approved'] = 'true';
+      obj.metadata.annotations['opensphere.io/approval-decision'] = 'Approved';
+    }
+  }
   const raw = await upsertK8s(
     `/apis/${def.group}/v1alpha1/namespaces/${namespace}/${def.plural}`,
     `/apis/${def.group}/v1alpha1/namespaces/${namespace}/${def.plural}/${name}`,
@@ -3366,8 +3444,23 @@ async function trainingLifecycleRun(req) {
     approved: true,
   }, req);
   if (promotion.raw) {
-    promotion.raw.spec = { ...(promotion.raw.spec || {}), version, approved: true, modelName };
-    await patchK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/modelpromotionclaims/${promotion.name}`, { spec: promotion.raw.spec }, req);
+    const actor = await requestActor(req).catch(() => null);
+    const approvedBy = optionalString(body.approvedBy || body.approver) || actor?.username || 'opensphere-lifecycle-approver';
+    const requestedBy = optionalString(body.requestedBy || body.requester) || 'opensphere-lifecycle-requester';
+    await patchK8s(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/modelpromotionclaims/${promotion.name}`, {
+      metadata: {
+        annotations: {
+          'opensphere.io/model-version': version,
+          'opensphere.io/model-name': modelName,
+          'opensphere.io/requested-by': requestedBy,
+          'opensphere.io/requested-at': new Date().toISOString(),
+          'opensphere.io/approved': 'true',
+          'opensphere.io/approval-decision': 'Approved',
+          'opensphere.io/approved-by': approvedBy,
+          'opensphere.io/approved-at': new Date().toISOString(),
+        },
+      },
+    }, req);
     const patched = await k8sJson(`/apis/ai.opensphere.io/v1alpha1/namespaces/${namespace}/modelpromotionclaims/${promotion.name}`);
     try {
       promotion.reconcile = await reconcileModelPromotionClaim(patched || promotion.raw);
@@ -4252,8 +4345,20 @@ async function patchClaimOperation(req) {
   };
   const actor = await requestActor(req).catch(() => null);
   if (actor?.username) patch.metadata.annotations['opensphere.io/last-actor'] = actor.username;
-  if (action === 'approve' || action === 'promote') patch.spec = { stage: body.stage || 'production', approved: true };
-  if (action === 'reject') patch.spec = { stage: body.stage || 'rejected', approved: false };
+  if (action === 'approve' || action === 'promote') {
+    patch.metadata.annotations['opensphere.io/approved-by'] = actor?.username || internalK8sActor();
+    patch.metadata.annotations['opensphere.io/approved-at'] = now;
+    patch.metadata.annotations['opensphere.io/approved'] = 'true';
+    patch.metadata.annotations['opensphere.io/approval-decision'] = 'Approved';
+    patch.spec = { stage: body.stage || 'production' };
+  }
+  if (action === 'reject') {
+    patch.metadata.annotations['opensphere.io/approved'] = 'false';
+    patch.metadata.annotations['opensphere.io/approval-decision'] = 'Rejected';
+    patch.metadata.annotations['opensphere.io/rejected-by'] = actor?.username || internalK8sActor();
+    patch.metadata.annotations['opensphere.io/rejected-at'] = now;
+    patch.spec = { stage: body.stage || 'staging' };
+  }
   if (action === 'suspend') patch.spec = { suspended: true };
   if (action === 'resume' || action === 'retry') patch.spec = { suspended: false, retryAt: now };
   if (await crdInstalled(def.crdName)) {
@@ -4425,6 +4530,138 @@ function metricStatus(metric, value, threshold) {
   return 'Failing';
 }
 
+function trustyaiMetricAliases(metric) {
+  const raw = String(metric || '').toLowerCase();
+  const aliases = new Set([raw]);
+  if (raw.includes('drift')) ['drift', 'data_drift', 'prediction_drift'].forEach((item) => aliases.add(item));
+  if (raw.includes('bias') || raw.includes('fair')) ['bias', 'fairness', 'disparity', 'parity'].forEach((item) => aliases.add(item));
+  if (raw.includes('explain')) ['explainability', 'explanation', 'feature_importance', 'shap'].forEach((item) => aliases.add(item));
+  if (raw.includes('tox')) ['toxicity', 'toxic'].forEach((item) => aliases.add(item));
+  if (raw.includes('latency')) ['latency', 'request_latency'].forEach((item) => aliases.add(item));
+  return Array.from(aliases).filter(Boolean);
+}
+
+function parsePrometheusLabels(text = '') {
+  const labels = {};
+  const re = /([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g;
+  let match;
+  while ((match = re.exec(text))) labels[match[1]] = match[2];
+  return labels;
+}
+
+function trustyaiSamplesFromText(text) {
+  return String(text || '').split(/\r?\n/).flatMap((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return [];
+    const match = trimmed.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([^}]*)\})?\s+(-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*$/i);
+    if (!match) return [];
+    const value = Number(match[4]);
+    if (!Number.isFinite(value)) return [];
+    return [{
+      name: match[1],
+      labels: parsePrometheusLabels(match[3] || ''),
+      value,
+    }];
+  });
+}
+
+function trustyaiSamplesFromJson(value, prefix = '') {
+  if (value == null) return [];
+  if (typeof value === 'number' && Number.isFinite(value)) return [{ name: prefix || 'value', labels: {}, value }];
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => {
+      const name = optionalString(item?.metric || item?.name || item?.id || item?.type || '');
+      const itemValue = numberOrUndefined(item?.value ?? item?.score ?? item?.result ?? item?.current);
+      if (name && itemValue !== undefined) {
+        return [{ name, labels: jsonObject(item?.labels || item?.metadata, {}), value: itemValue }];
+      }
+      return trustyaiSamplesFromJson(item, `${prefix}_${index}`.replace(/^_/, ''));
+    });
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, entry]) => trustyaiSamplesFromJson(entry, prefix ? `${prefix}_${key}` : key));
+  }
+  return [];
+}
+
+function trustyaiSamplesFromResponse(contentType, body) {
+  if (String(contentType || '').includes('json')) {
+    try {
+      return trustyaiSamplesFromJson(JSON.parse(String(body || '{}')));
+    } catch {
+      return [];
+    }
+  }
+  const textSamples = trustyaiSamplesFromText(body);
+  if (textSamples.length) return textSamples;
+  try {
+    return trustyaiSamplesFromJson(JSON.parse(String(body || '{}')));
+  } catch {
+    return [];
+  }
+}
+
+function trustyaiCandidateUrls(info) {
+  const bases = [];
+  const endpoint = optionalString(info?.endpoint);
+  if (endpoint) bases.push(endpoint);
+  const namespace = optionalString(info?.namespace) || 'opensphere-system';
+  const names = Array.from(new Set([info?.name, 'trustyai-service', 'trustyai'].map((item) => optionalString(item)).filter(Boolean)));
+  for (const name of names) {
+    bases.push(`http://${name}.${namespace}.svc.cluster.local:8080`);
+    bases.push(`http://${name}.${namespace}.svc:8080`);
+  }
+  const normalized = Array.from(new Set(bases.map((base) => {
+    const value = String(base || '').trim();
+    if (!value) return '';
+    return /^https?:\/\//i.test(value) ? value.replace(/\/+$/, '') : `http://${value.replace(/\/+$/, '')}`;
+  }).filter(Boolean)));
+  const paths = ['/metrics', '/q/metrics', '/api/v1/metrics', '/api/v1/monitoring/metrics'];
+  return normalized.flatMap((base) => paths.map((pathName) => `${base}${pathName}`));
+}
+
+async function fetchTrustyaiMetricSamples(info) {
+  const urls = trustyaiCandidateUrls(info);
+  let lastError = '';
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const r = await fetch(url, { headers: { Accept: 'application/json, text/plain;q=0.9, */*;q=0.1' }, signal: controller.signal });
+      const body = await r.text();
+      if (!r.ok) {
+        lastError = `${url} returned HTTP ${r.status}`;
+        continue;
+      }
+      const samples = trustyaiSamplesFromResponse(r.headers.get('content-type'), body);
+      if (samples.length) return { url, samples };
+      lastError = `${url} returned no numeric metric samples`;
+    } catch (e) {
+      lastError = `${url}: ${e.name === 'AbortError' ? 'timeout' : e.message || String(e)}`;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return { url: '', samples: [], error: lastError || 'No TrustyAI metric endpoint responded.' };
+}
+
+function selectTrustyaiSample(samples, metric, targetName) {
+  const aliases = trustyaiMetricAliases(metric);
+  const target = String(targetName || '').toLowerCase();
+  return (samples || []).find((sample) => {
+    const name = String(sample.name || '').toLowerCase();
+    const labels = Object.values(sample.labels || {}).join(' ').toLowerCase();
+    const haystack = `${name} ${labels}`;
+    const metricMatch = aliases.some((alias) => alias && haystack.includes(alias));
+    if (!metricMatch) return false;
+    return !target || haystack.includes(target) || !Object.keys(sample.labels || {}).length;
+  });
+}
+
+function trustyaiSamplesCoverMetrics(samples, metrics, targetName) {
+  return (metrics || []).every((metric) => !!selectTrustyaiSample(samples, metric, targetName));
+}
+
 async function trustyaiServiceInfo(namespace) {
   const paths = [
     `/apis/trustyai.opendatahub.io/v1alpha1/namespaces/${namespace}/trustyaiservices`,
@@ -4462,6 +4699,8 @@ function monitoringMetricSource(claim, backend, trustyaiInfo) {
       namespace: trustyaiInfo.namespace,
       endpoint: trustyaiInfo.endpoint,
       apiVersion: trustyaiInfo.apiVersion,
+      measured: false,
+      message: 'TrustyAI resource was found, but no measured metric sample has been fetched yet.',
     };
   }
   return {
@@ -4478,20 +4717,24 @@ function monitoringMetricsFor(claim, source = { type: 'opensphere-fallback' }) {
   const name = claim.metadata?.name || 'monitoring-target';
   const metrics = Array.isArray(spec.metrics) && spec.metrics.length ? spec.metrics : ['drift', 'bias', 'explainability'];
   const defaultThreshold = numberOrUndefined(spec.threshold) ?? numberOrUndefined(spec.minimum) ?? 0.8;
-  const synthetic = source.type !== 'trustyai';
+  const synthetic = source.measured !== true;
   return metrics.map((metric) => {
     const lowerBetter = ['drift', 'bias', 'toxicity', 'error-rate'].includes(String(metric).toLowerCase());
     const threshold = numberOrUndefined(spec.thresholds?.[metric]) ?? (lowerBetter ? Math.min(defaultThreshold, 0.3) : defaultThreshold);
-    const value = synthetic ? null : metricValueFor(name, metric, lowerBetter);
+    const sample = !synthetic ? selectTrustyaiSample(source.samples || [], metric, name) : null;
+    const value = synthetic || !sample ? null : Number(numberOrUndefined(sample.value).toFixed(3));
     return {
       metric,
       value,
       threshold,
-      status: synthetic ? 'Unmeasured' : metricStatus(metric, value, threshold),
+      status: synthetic || !sample ? 'Unmeasured' : metricStatus(metric, value, threshold),
       source: source.type || 'opensphere-fallback',
       sourceName: source.name || '',
-      synthetic,
-      measured: !synthetic,
+      sourceMetric: sample?.name || '',
+      sourceLabels: sample?.labels || {},
+      synthetic: synthetic || !sample,
+      measured: !synthetic && !!sample,
+      message: synthetic ? (source.message || 'No measured metric source is available.') : '',
     };
   });
 }
@@ -4535,13 +4778,32 @@ async function reconcileMonitoringTarget(claim) {
     await patchMonitoringStatus(claim, status);
     return { name, namespace, phase: 'Retrying', error: backend.message, nextRetryAt: status.nextRetryAt };
   }
-  const metricSource = monitoringMetricSource(claim, backend, trustyaiInfo);
+  let metricSource = monitoringMetricSource(claim, backend, trustyaiInfo);
+  if (metricSource.type === 'trustyai') {
+    const measured = await fetchTrustyaiMetricSamples(trustyaiInfo);
+    const requestedMetrics = Array.isArray(claim.spec?.metrics) && claim.spec.metrics.length ? claim.spec.metrics : ['drift', 'bias', 'explainability'];
+    if (measured.samples.length && trustyaiSamplesCoverMetrics(measured.samples, requestedMetrics, name)) {
+      metricSource = {
+        ...metricSource,
+        endpoint: measured.url || metricSource.endpoint,
+        measured: true,
+        samples: measured.samples,
+        message: `Fetched ${measured.samples.length} numeric TrustyAI metric sample(s).`,
+      };
+    } else {
+      metricSource = {
+        ...metricSource,
+        measured: false,
+        message: measured.error || 'TrustyAI resource is ready, but no measured metrics were returned.',
+      };
+    }
+  }
   const metrics = monitoringMetricsFor(claim, metricSource);
   const history = await appendMonitoringHistory(claim, metrics, metricSource);
   const alerts = monitoringAlertsFor(claim, metrics, history);
   const failing = metrics.filter((metric) => metric.status === 'Failing');
   const warnings = metrics.filter((metric) => metric.status === 'Warning');
-  const synthetic = metricSource.type !== 'trustyai';
+  const synthetic = metricSource.measured !== true;
   const phase = synthetic ? 'Unmeasured' : failing.length ? 'Failing' : warnings.length ? 'Warning' : 'Healthy';
   const now = new Date().toISOString();
   const normalized = normalizedStatus({
@@ -4983,15 +5245,18 @@ function modelRegistrySource(backend, info) {
 
 let _modelRegistryPgPool = null;
 let _modelRegistryPgPoolKey = '';
+let _modelRegistryPgPoolRole = '';
 let _modelRegistryPgSchemaReady = false;
+let _modelRegistryPgMigrationReady = false;
 
 function modelRegistryPostgresSource(config, message = '') {
   return {
     type: 'opensphere-postgres',
-    name: BACKBONE_POSTGRES_SECRET,
+    name: config.secretName || BACKBONE_POSTGRES_SECRET,
     namespace: BACKBONE_CLAIM_NAMESPACE,
     endpoint: `${config.host}:${config.port}/${config.database}`,
     apiVersion: 'postgresql/v16',
+    role: config.role || 'owner',
     message,
   };
 }
@@ -5010,6 +5275,10 @@ async function backbonePostgresConfig() {
   return postgresConfigFromSecret(BACKBONE_POSTGRES_SECRET, 'Backbone PostgreSQL');
 }
 
+async function backbonePostgresAppConfig() {
+  return postgresConfigFromSecret(BACKBONE_POSTGRES_APP_SECRET, 'Backbone PostgreSQL app role');
+}
+
 async function dspaPostgresConfig() {
   return postgresConfigFromSecret(DSPA_POSTGRES_SECRET, 'DSPA PostgreSQL');
 }
@@ -5026,34 +5295,162 @@ async function postgresConfigFromSecret(secretName, label) {
     user: decodeSecretValue(secret.data.username),
     password: decodeSecretValue(secret.data.password),
     secretName,
+    role: secretName === BACKBONE_POSTGRES_APP_SECRET ? 'app' : 'owner',
   };
   if (!config.host || !config.database || !config.user || !config.password) throw { code: 424, msg: `${label} Secret is incomplete.` };
   return config;
 }
 
-async function modelRegistryPgPool() {
+function pgPoolFromConfig(config, max = 4) {
+  return new PgPool({
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    user: config.user,
+    password: config.password,
+    max,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 3_000,
+  });
+}
+
+async function modelRegistryOwnerPgPool() {
   const config = await backbonePostgresConfig();
-  const key = `${config.host}:${config.port}/${config.database}/${config.user}`;
+  return { pool: pgPoolFromConfig(config, 1), config };
+}
+
+async function modelRegistryRuntimeConfig() {
+  try {
+    return await backbonePostgresAppConfig();
+  } catch {
+    const ownerConfig = await backbonePostgresConfig();
+    return {
+      ...ownerConfig,
+      role: 'owner-fallback',
+      warning: `${BACKBONE_POSTGRES_APP_SECRET} is not ready; falling back to owner role until migration creates the app role Secret.`,
+    };
+  }
+}
+
+async function modelRegistryPgPool() {
+  const config = await modelRegistryRuntimeConfig();
+  const key = `${config.host}:${config.port}/${config.database}/${config.user}/${config.secretName}`;
   if (!_modelRegistryPgPool || _modelRegistryPgPoolKey !== key) {
     if (_modelRegistryPgPool) await _modelRegistryPgPool.end().catch(() => null);
-    _modelRegistryPgPool = new PgPool({
-      host: config.host,
-      port: config.port,
-      database: config.database,
-      user: config.user,
-      password: config.password,
-      max: 4,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 3_000,
-    });
+    _modelRegistryPgPool = pgPoolFromConfig(config, 4);
     _modelRegistryPgPoolKey = key;
+    _modelRegistryPgPoolRole = config.role || '';
     _modelRegistryPgSchemaReady = false;
   }
   return { pool: _modelRegistryPgPool, config };
 }
 
-async function ensureModelRegistryPgSchema(client) {
-  if (_modelRegistryPgSchemaReady) return;
+async function modelRegistryAppRoleUsable() {
+  try {
+    const config = await backbonePostgresAppConfig();
+    const pool = pgPoolFromConfig(config, 1);
+    const client = await pool.connect();
+    try {
+      await client.query("select 1 from oah_model_registry_approval_audit limit 1");
+      await client.query("select 1 from oah_vector_access_policies limit 1");
+      return true;
+    } finally {
+      client.release();
+      await pool.end().catch(() => null);
+    }
+  } catch {
+    return false;
+  }
+}
+
+function modelRegistryAppSecretManifest(ownerConfig, username, password, redact = false) {
+  return {
+    apiVersion: 'v1',
+    kind: 'Secret',
+    metadata: {
+      name: BACKBONE_POSTGRES_APP_SECRET,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'metadata-store',
+        'opensphere.io/credential-scope': 'runtime-app-role',
+      },
+      annotations: {
+        'opensphere.io/source-secret': BACKBONE_POSTGRES_SECRET,
+        'opensphere.io/postgres-role': username,
+        'opensphere.io/audit-table-permissions': 'select,insert-only',
+      },
+    },
+    type: 'Opaque',
+    stringData: {
+      provider: 'postgres',
+      host: ownerConfig.host,
+      port: String(ownerConfig.port || 5432),
+      database: ownerConfig.database,
+      username,
+      password: redact ? '<redacted-password>' : password,
+      role: 'app',
+    },
+  };
+}
+
+function pgIdentifier(value, label = 'identifier') {
+  const text = optionalString(value);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) throw { code: 500, msg: `${label} is not a safe PostgreSQL identifier.` };
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+async function ensureModelRegistryAppRole(client, ownerConfig) {
+  const existingSecret = await k8sJson(`/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_APP_SECRET}`).catch(() => null);
+  const username = decodeSecretValue(existingSecret?.data?.username) || BACKBONE_POSTGRES_APP_USER;
+  const password = decodeSecretValue(existingSecret?.data?.password) || randomBytes(32).toString('base64url');
+  const roleIdent = pgIdentifier(username, 'Backbone PostgreSQL app role');
+  try {
+    const roleSql = await client.query(
+      `select case
+         when exists (select 1 from pg_roles where rolname = $1::text)
+         then format('alter role %I login password %L', $1::text, $2::text)
+         else format('create role %I login password %L', $1::text, $2::text)
+       end as sql`,
+      [username, password],
+    );
+    await client.query(roleSql.rows[0].sql);
+  } catch (e) {
+    if (!existingSecret || e.code !== '42501') throw e;
+    console.warn(`[postgres] app role ${username} is provider-managed; skipping role password DDL.`);
+  }
+  await client.query(`grant usage on schema public to ${roleIdent}`);
+  await client.query(`grant select, insert, update on
+    oah_model_registry_versions,
+    oah_model_registry_promotions,
+    oah_model_registry_evaluation_metrics,
+    oah_vector_collections,
+    oah_vector_access_policies,
+    oah_vector_chunks
+    to ${roleIdent}`);
+  await client.query(`grant select, insert on oah_model_registry_approval_audit to ${roleIdent}`);
+  await client.query(`revoke update, delete, truncate on oah_model_registry_approval_audit from ${roleIdent}`);
+  const manifest = modelRegistryAppSecretManifest(ownerConfig, username, password);
+  const patch = {
+    metadata: {
+      labels: manifest.metadata.labels,
+      annotations: manifest.metadata.annotations,
+    },
+    stringData: manifest.stringData,
+    type: manifest.type,
+  };
+  await upsertK8s(
+    `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets`,
+    `/api/v1/namespaces/${BACKBONE_CLAIM_NAMESPACE}/secrets/${BACKBONE_POSTGRES_APP_SECRET}`,
+    manifest,
+    patch,
+    null,
+  );
+  return { username, secretName: BACKBONE_POSTGRES_APP_SECRET };
+}
+
+async function ensureModelRegistryPgSchema(client, ownerConfig) {
+  if (_modelRegistryPgMigrationReady) return;
   await client.query(`
     create extension if not exists vector;
     create table if not exists oah_model_registry_versions (
@@ -5075,6 +5472,25 @@ async function ensureModelRegistryPgSchema(client) {
       data jsonb not null,
       updated_at timestamptz not null default now()
     );
+    create or replace function oah_prevent_approval_audit_mutation()
+    returns trigger as $$
+    begin
+      raise exception 'oah_model_registry_approval_audit is append-only';
+    end;
+    $$ language plpgsql;
+    drop trigger if exists oah_model_registry_approval_audit_no_update on oah_model_registry_approval_audit;
+    drop trigger if exists oah_model_registry_approval_audit_no_delete on oah_model_registry_approval_audit;
+    drop trigger if exists oah_model_registry_approval_audit_no_truncate on oah_model_registry_approval_audit;
+    create trigger oah_model_registry_approval_audit_no_update
+      before update on oah_model_registry_approval_audit
+      for each row execute function oah_prevent_approval_audit_mutation();
+    create trigger oah_model_registry_approval_audit_no_delete
+      before delete on oah_model_registry_approval_audit
+      for each row execute function oah_prevent_approval_audit_mutation();
+    create trigger oah_model_registry_approval_audit_no_truncate
+      before truncate on oah_model_registry_approval_audit
+      for each statement execute function oah_prevent_approval_audit_mutation();
+    revoke update, delete, truncate on oah_model_registry_approval_audit from public;
     create table if not exists oah_model_registry_evaluation_metrics (
       id text primary key,
       data jsonb not null,
@@ -5085,10 +5501,32 @@ async function ensureModelRegistryPgSchema(client) {
       name text not null,
       description text not null default '',
       metadata jsonb not null default '{}'::jsonb,
+      owner text not null default 'opensphere-ai-hub',
+      groups jsonb not null default '[]'::jsonb,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now(),
       primary key (namespace, name)
     );
+    alter table oah_vector_collections add column if not exists owner text not null default 'opensphere-ai-hub';
+    alter table oah_vector_collections add column if not exists groups jsonb not null default '[]'::jsonb;
+    create table if not exists oah_vector_access_policies (
+      namespace text not null,
+      collection text not null,
+      owner text not null default 'opensphere-ai-hub',
+      groups jsonb not null default '[]'::jsonb,
+      source jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now(),
+      primary key (namespace, collection)
+    );
+    insert into oah_vector_access_policies (namespace, collection, owner, groups, source, updated_at)
+      select namespace,
+             name,
+             owner,
+             groups,
+             jsonb_build_object('apiVersion', 'postgresql/v16', 'kind', 'BackboneVectorAccessPolicy', 'namespace', namespace, 'name', name, 'backend', 'backbone-pgvector'),
+             now()
+      from oah_vector_collections
+      on conflict (namespace, collection) do nothing;
     create table if not exists oah_vector_chunks (
       id text primary key,
       namespace text not null,
@@ -5103,14 +5541,47 @@ async function ensureModelRegistryPgSchema(client) {
     create index if not exists oah_vector_chunks_collection_idx on oah_vector_chunks(namespace, collection);
     create index if not exists oah_vector_chunks_embedding_hnsw on oah_vector_chunks using hnsw (embedding vector_cosine_ops);
   `);
+  await ensureModelRegistryAppRole(client, ownerConfig);
+  _modelRegistryPgMigrationReady = true;
+}
+
+async function ensureModelRegistryPgMigration() {
+  if (_modelRegistryPgMigrationReady) return;
+  if (await modelRegistryAppRoleUsable()) {
+    _modelRegistryPgMigrationReady = true;
+    _modelRegistryPgSchemaReady = true;
+    return;
+  }
+  const { pool, config } = await modelRegistryOwnerPgPool();
+  const client = await pool.connect();
+  try {
+    await ensureModelRegistryPgSchema(client, config);
+  } finally {
+    client.release();
+    await pool.end().catch(() => null);
+  }
   _modelRegistryPgSchemaReady = true;
 }
 
+async function refreshModelRegistryAppRole() {
+  _modelRegistryPgMigrationReady = false;
+  await ensureModelRegistryPgMigration();
+  const config = await backbonePostgresAppConfig();
+  const usable = await modelRegistryAppRoleUsable();
+  if (!usable) throw { code: 424, msg: `${BACKBONE_POSTGRES_APP_SECRET} is not usable after app role refresh.` };
+  return {
+    secretName: BACKBONE_POSTGRES_APP_SECRET,
+    username: config.user,
+    role: config.role || 'app',
+    endpoint: `${config.host}:${config.port}/${config.database}`,
+  };
+}
+
 async function withModelRegistryPg(fn) {
+  await ensureModelRegistryPgMigration();
   const { pool, config } = await modelRegistryPgPool();
   const client = await pool.connect();
   try {
-    await ensureModelRegistryPgSchema(client);
     return await fn(client, config);
   } finally {
     client.release();
@@ -5135,57 +5606,458 @@ function pgVectorLiteral(values) {
   return `[${values.map((value) => Number(value || 0).toFixed(6)).join(',')}]`;
 }
 
-async function vectorMemoryState(namespaceFilter = '') {
+function normalizeStringArray(value) {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(',');
+  return Array.from(new Set(raw.map((item) => optionalString(item)).filter(Boolean)));
+}
+
+function identityUsernameFromClaims(claims = {}) {
+  return optionalString(
+    claims.preferred_username
+      || claims.email
+      || claims.name
+      || claims.sub,
+  ) || 'unknown';
+}
+
+function identityClaimStrings(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap(identityClaimStrings);
+  if (typeof value === 'object') {
+    return [
+      value.name,
+      value.display_name,
+      value.displayName,
+      value.id,
+    ].flatMap(identityClaimStrings);
+  }
+  return String(value).split(',');
+}
+
+function identityGroupsFromClaims(claims = {}) {
+  const values = [];
+  for (const key of IDENTITY_GROUP_CLAIM_KEYS) {
+    values.push(...identityClaimStrings(claims[key]));
+  }
+  values.push(...identityClaimStrings(claims.realm_access?.roles));
+  values.push(...identityClaimStrings(claims.resource_access?.[KANIDM_AZP]?.roles));
+  return identityGroupAliases(values);
+}
+
+function identityGroupAliases(value) {
+  const groups = normalizeStringArray(value);
+  const aliases = new Set();
+  for (const group of groups) {
+    aliases.add(group);
+    const trimmed = group.replace(/^\/+/, '');
+    if (trimmed) aliases.add(trimmed);
+    const leaf = trimmed.split('/').filter(Boolean).pop();
+    if (leaf) aliases.add(leaf);
+  }
+  return Array.from(aliases);
+}
+
+function vectorCollectionOwner(row) {
+  return optionalString(row?.owner) || optionalString(jsonObject(row?.metadata, {})?.owner) || 'opensphere-ai-hub';
+}
+
+function vectorCollectionGroups(row) {
+  const explicit = identityGroupAliases(jsonObject(row?.groups, []));
+  if (explicit.length) return explicit;
+  return identityGroupAliases(jsonObject(row?.metadata, {})?.groups);
+}
+
+function actorCanAccessVectorCollection(actor, row) {
+  if (!actor?.username) return false;
+  if (actorIsAdmin(actor)) return true;
+  const owner = vectorCollectionOwner(row);
+  if (owner && owner === actor.username) return true;
+  const allowedGroups = new Set(vectorCollectionGroups(row).flatMap((group) => identityGroupAliases(group)));
+  return identityGroupAliases(actor.groups || []).some((group) => allowedGroups.has(group));
+}
+
+function actorCanManageVectorCollection(actor, row) {
+  if (!actor?.username) return false;
+  if (actorIsAdmin(actor)) return true;
+  const owner = vectorCollectionOwner(row);
+  return !!owner && owner === actor.username;
+}
+
+function vectorCollectionAccess(row) {
+  return {
+    owner: vectorCollectionOwner(row),
+    groups: vectorCollectionGroups(row),
+    policySource: jsonObject(row?.metadata, {})?.policySource || null,
+  };
+}
+
+const VECTOR_RETRIEVAL_CRD = 'vectorretrievalclaims.ai.foundation.opensphere.io';
+const VECTOR_RETRIEVAL_API = '/apis/ai.foundation.opensphere.io/v1alpha1';
+
+function vectorRetrievalAccessPolicy(claim) {
+  const spec = claim?.spec || {};
+  const annotations = claim?.metadata?.annotations || {};
+  const access = jsonObject(spec.access, {});
+  const collection = optionalString(
+    spec.collection
+      || spec.collectionName
+      || spec.targetCollection
+      || access.collection
+      || annotations['opensphere.io/vector-collection']
+      || claim?.metadata?.name,
+  );
+  const owner = optionalString(
+    access.owner
+      || spec.owner
+      || annotations['opensphere.io/owner'],
+  );
+  const groups = identityGroupAliases(
+    access.groups
+      || spec.groups
+      || annotations['opensphere.io/groups'],
+  );
+  if (!collection || (!owner && !groups.length)) return null;
+  return {
+    collection,
+    owner,
+    groups,
+    source: {
+      apiVersion: claim?.apiVersion || 'ai.foundation.opensphere.io/v1alpha1',
+      kind: claim?.kind || 'VectorRetrievalClaim',
+      namespace: claim?.metadata?.namespace || '',
+      name: claim?.metadata?.name || '',
+    },
+  };
+}
+
+async function vectorRetrievalPolicyFor(namespace, collection) {
+  if (!(await crdInstalled(VECTOR_RETRIEVAL_CRD))) return null;
+  const encodedNs = encodeURIComponent(namespace);
+  const encodedName = encodeURIComponent(collection);
+  const direct = await k8sJson(`${VECTOR_RETRIEVAL_API}/namespaces/${encodedNs}/vectorretrievalclaims/${encodedName}`);
+  const candidates = direct ? [direct] : [];
+  const list = await k8sJson(`${VECTOR_RETRIEVAL_API}/namespaces/${encodedNs}/vectorretrievalclaims`);
+  for (const item of list?.items || []) {
+    if (!candidates.some((candidate) => candidate?.metadata?.name === item?.metadata?.name)) candidates.push(item);
+  }
+  return candidates
+    .map(vectorRetrievalAccessPolicy)
+    .find((policy) => policy?.collection === collection) || null;
+}
+
+function vectorBackbonePolicySource(namespace, collection) {
+  return {
+    apiVersion: 'postgresql/v16',
+    kind: 'BackboneVectorAccessPolicy',
+    namespace,
+    name: collection,
+    backend: 'backbone-pgvector',
+  };
+}
+
+function vectorBackboneAccessPolicy(row) {
+  if (!row?.namespace || !row?.collection) return null;
+  return {
+    collection: row.collection,
+    owner: optionalString(row.owner),
+    groups: identityGroupAliases(jsonObject(row.groups, [])),
+    source: jsonObject(row.source, {})?.kind ? jsonObject(row.source, {}) : vectorBackbonePolicySource(row.namespace, row.collection),
+  };
+}
+
+async function vectorBackboneAccessPolicyFor(namespace, collection) {
+  return withModelRegistryPg(async (client) => {
+    const result = await client.query(
+      `select namespace, collection, owner, groups, source
+       from oah_vector_access_policies
+       where namespace = $1 and collection = $2`,
+      [namespace, collection],
+    );
+    return vectorBackboneAccessPolicy(result.rows[0] || null);
+  }).catch(() => null);
+}
+
+async function vectorBackboneAccessPolicyMap(client, rows) {
+  if (!rows.length) return new Map();
+  const keys = rows.map((row) => `${row.namespace}\t${row.name}`);
+  const result = await client.query(
+    `select namespace, collection, owner, groups, source
+     from oah_vector_access_policies
+     where (namespace || chr(9) || collection) = any($1::text[])`,
+    [keys],
+  ).catch(() => ({ rows: [] }));
+  return new Map(result.rows.map((row) => [`${row.namespace}\t${row.collection}`, vectorBackboneAccessPolicy(row)]));
+}
+
+async function upsertVectorBackboneAccessPolicy(client, { namespace, collection, owner, groups, source }) {
+  const policySource = source || vectorBackbonePolicySource(namespace, collection);
+  await client.query(
+    `insert into oah_vector_access_policies (namespace, collection, owner, groups, source, updated_at)
+     values ($1, $2, $3, $4::jsonb, $5::jsonb, now())
+     on conflict (namespace, collection) do update set
+       owner = excluded.owner,
+       groups = excluded.groups,
+       source = excluded.source,
+       updated_at = now()`,
+    [
+      namespace,
+      collection,
+      optionalString(owner) || 'opensphere-ai-hub',
+      JSON.stringify(identityGroupAliases(groups)),
+      JSON.stringify(policySource),
+    ],
+  );
+}
+
+async function vectorCollectionWithPolicy(row, backbonePolicy = null) {
+  if (!row?.namespace || !row?.name) return row;
+  const policy = await vectorRetrievalPolicyFor(row.namespace, row.name).catch(() => null);
+  const effectivePolicy = policy || backbonePolicy || await vectorBackboneAccessPolicyFor(row.namespace, row.name);
+  if (!effectivePolicy) return row;
+  const metadata = {
+    ...jsonObject(row.metadata, {}),
+    policySource: effectivePolicy.source,
+  };
+  return {
+    ...row,
+    metadata,
+    owner: effectivePolicy.owner || vectorCollectionOwner(row),
+    groups: effectivePolicy.groups.length ? effectivePolicy.groups : vectorCollectionGroups(row),
+  };
+}
+
+async function upsertVectorRetrievalAccessPolicy(req, { namespace, collection, description, metadata, owner, groups }) {
+  if (!(await crdInstalled(VECTOR_RETRIEVAL_CRD))) return { phase: 'Skipped', reason: `${VECTOR_RETRIEVAL_CRD} is not installed` };
+  const labels = {
+    'app.kubernetes.io/part-of': 'opensphere-ai',
+    'app.kubernetes.io/component': 'vector-memory',
+    'opensphere.io/vector-collection': collection,
+  };
+  const policy = {
+    apiVersion: 'ai.foundation.opensphere.io/v1alpha1',
+    kind: 'VectorRetrievalClaim',
+    metadata: {
+      name: collection,
+      namespace,
+      labels,
+      annotations: {
+        'opensphere.io/vector-collection': collection,
+        'opensphere.io/policy-source': 'oah-vector-memory-acl',
+      },
+    },
+    spec: {
+      collection,
+      backend: 'backbone-pgvector',
+      description: optionalString(description),
+      metadata: jsonObject(metadata, {}),
+      access: {
+        owner: optionalString(owner),
+        groups: identityGroupAliases(groups),
+      },
+    },
+  };
+  const collectionPath = `${VECTOR_RETRIEVAL_API}/namespaces/${encodeURIComponent(namespace)}/vectorretrievalclaims`;
+  const resourcePath = `${collectionPath}/${encodeURIComponent(collection)}`;
+  const internalReq = req ? { _internal: true, _actor: req._actor || await requestActor(req) } : null;
+  return upsertK8s(collectionPath, resourcePath, policy, {
+    metadata: { labels, annotations: policy.metadata.annotations },
+    spec: policy.spec,
+  }, internalReq);
+}
+
+async function requireVectorCollectionAccess(req, action, namespace, collection) {
+  const actor = await requestActor(req);
+  const row = await withModelRegistryPg(async (client) => {
+    const result = await client.query(
+      `select namespace, name, metadata, owner, groups
+       from oah_vector_collections
+       where namespace = $1 and name = $2`,
+      [namespace, collection],
+    );
+    return result.rows[0] || null;
+  });
+  const effectiveRow = await vectorCollectionWithPolicy(row);
+  const target = { verb: 'get', group: 'ai.opensphere.io', resource: 'vectormemories', namespace, kind: 'VectorMemory', name: collection };
+  if (effectiveRow && actorCanAccessVectorCollection(actor, effectiveRow)) {
+    await appendSecurityAudit(req, true, action, target, 'vector collection owner/group check passed');
+    return { actor, collection: effectiveRow };
+  }
+  const reason = 'requires vector collection owner/group access';
+  await appendSecurityAudit(req, false, action, target, reason);
+  throw { code: 403, msg: `Forbidden: ${reason}` };
+}
+
+async function requireVectorCollectionManageAccess(req, action, namespace, collection) {
+  const actor = await requestActor(req);
+  const row = await withModelRegistryPg(async (client) => {
+    const result = await client.query(
+      `select namespace, name, description, metadata, owner, groups
+       from oah_vector_collections
+       where namespace = $1 and name = $2`,
+      [namespace, collection],
+    );
+    return result.rows[0] || null;
+  });
+  const effectiveRow = await vectorCollectionWithPolicy(row);
+  const target = { verb: 'update', group: 'ai.opensphere.io', resource: 'vectormemories', namespace, kind: 'VectorMemory', name: collection };
+  if (!effectiveRow) {
+    await appendSecurityAudit(req, false, action, target, 'vector collection not found');
+    throw { code: 404, msg: `Vector collection ${namespace}/${collection} was not found.` };
+  }
+  if (actorCanManageVectorCollection(actor, effectiveRow)) {
+    await appendSecurityAudit(req, true, action, target, actorIsAdmin(actor) ? 'admin group matched' : 'vector collection owner matched');
+    return { actor, collection: effectiveRow };
+  }
+  const reason = 'requires vector collection owner or OpenSphere admin group';
+  await appendSecurityAudit(req, false, action, target, reason);
+  throw { code: 403, msg: `Forbidden: ${reason}` };
+}
+
+async function vectorMemoryState(namespaceFilter = '', actor = null) {
   return withModelRegistryPg(async (client, config) => {
     const extension = await client.query("select extversion from pg_extension where extname = 'vector'");
     const params = [];
     const where = namespaceFilter ? 'where c.namespace = $1' : '';
     if (namespaceFilter) params.push(namespaceFilter);
     const collections = await client.query(`
-      select c.namespace, c.name, c.description, c.metadata, c.updated_at, count(ch.id)::int as chunks
+      select c.namespace, c.name, c.description, c.metadata, c.owner, c.groups, c.updated_at, count(ch.id)::int as chunks
       from oah_vector_collections c
       left join oah_vector_chunks ch on ch.namespace = c.namespace and ch.collection = c.name
       ${where}
-      group by c.namespace, c.name, c.description, c.metadata, c.updated_at
+      group by c.namespace, c.name, c.description, c.metadata, c.owner, c.groups, c.updated_at
       order by c.namespace, c.name
     `, params);
-    const total = collections.rows.reduce((sum, row) => sum + Number(row.chunks || 0), 0);
+    const backbonePolicies = await vectorBackboneAccessPolicyMap(client, collections.rows);
+    const policyRows = await Promise.all(collections.rows.map((row) => (
+      vectorCollectionWithPolicy(row, backbonePolicies.get(`${row.namespace}\t${row.name}`) || null)
+    )));
+    const visibleRows = actor ? policyRows.filter((row) => actorCanAccessVectorCollection(actor, row)) : policyRows;
+    const total = visibleRows.reduce((sum, row) => sum + Number(row.chunks || 0), 0);
     return {
       source: modelRegistryPostgresSource(config, 'Backbone PostgreSQL pgvector is the OpenSphere-native vector memory store.'),
       extension: { name: 'vector', version: extension.rows[0]?.extversion || '', ready: extension.rows.length > 0 },
       summary: {
-        collections: collections.rows.length,
+        collections: visibleRows.length,
         chunks: total,
         ready: extension.rows.length > 0,
       },
-      collections: collections.rows.map((row) => ({
+      collections: visibleRows.map((row) => ({
         namespace: row.namespace,
         name: row.name,
         description: row.description,
         chunks: Number(row.chunks || 0),
         metadata: jsonObject(row.metadata, {}),
+        access: vectorCollectionAccess(row),
         updatedAt: row.updated_at,
       })),
     };
   });
 }
 
-async function vectorMemoryResponse(reqUrl) {
+async function vectorMemoryResponse(reqUrl, req = null) {
   const u = new URL(reqUrl, 'http://localhost');
   const namespace = optionalString(u.searchParams.get('namespace'));
-  return vectorMemoryState(namespace);
+  const actor = req?.headers?.['x-os-id-token']
+    ? await requestActor(req)
+    : req && !requestIsLoopback(req)
+      ? await requestActor(req)
+      : null;
+  return vectorMemoryState(namespace, actor);
 }
 
-async function upsertVectorCollection(client, namespace, name, description, metadata = {}) {
+async function updateVectorCollectionAccess(req) {
+  const body = await prepareJsonBody(req);
+  const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+  const collection = requireDnsName(body.collection || body.name || 'oah-vector-memory', 'collection');
+  const access = req._vectorCollectionManageAccess || await requireVectorCollectionManageAccess(req, '/memory/vector/collections', namespace, collection);
+  const { actor, collection: current } = access;
+  const hasDescription = Object.prototype.hasOwnProperty.call(body, 'description');
+  const hasMetadata = body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata);
+  const hasOwner = Object.prototype.hasOwnProperty.call(body, 'owner');
+  const hasGroups = Object.prototype.hasOwnProperty.call(body, 'groups');
+  if (!hasDescription && !hasMetadata && !hasOwner && !hasGroups) {
+    throw { code: 400, msg: 'description, metadata, owner, or groups is required' };
+  }
+  const nextDescription = hasDescription ? optionalString(body.description) : optionalString(current.description);
+  const currentMetadata = jsonObject(current.metadata, {});
+  const nextMetadata = hasMetadata ? { ...currentMetadata, ...jsonObject(body.metadata, {}) } : currentMetadata;
+  const nextOwner = hasOwner ? optionalString(body.owner) : vectorCollectionOwner(current);
+  const nextGroups = hasGroups ? identityGroupAliases(body.groups) : vectorCollectionGroups(current);
+  if (!nextOwner) throw { code: 400, msg: 'owner cannot be empty' };
+  const updated = await withModelRegistryPg(async (client) => {
+    const result = await client.query(
+      `update oah_vector_collections
+       set description = $3,
+           metadata = $4::jsonb,
+           owner = $5,
+           groups = $6::jsonb,
+           updated_at = now()
+       where namespace = $1 and name = $2
+       returning namespace, name, description, metadata, owner, groups, updated_at`,
+      [namespace, collection, nextDescription, JSON.stringify(nextMetadata), nextOwner, JSON.stringify(nextGroups)],
+    );
+    const row = result.rows[0] || null;
+    if (row) {
+      await upsertVectorBackboneAccessPolicy(client, {
+        namespace,
+        collection,
+        owner: vectorCollectionOwner(row),
+        groups: vectorCollectionGroups(row),
+      });
+    }
+    return row;
+  });
+  const policy = updated ? await upsertVectorRetrievalAccessPolicy(req, {
+    namespace,
+    collection,
+    description: updated.description,
+    metadata: updated.metadata,
+    owner: vectorCollectionOwner(updated),
+    groups: vectorCollectionGroups(updated),
+  }).catch((e) => ({ phase: 'Warning', reason: e.msg || String(e) })) : null;
+  const effectiveUpdated = updated ? await vectorCollectionWithPolicy(updated) : null;
+  return {
+    phase: 'Updated',
+    policy,
+    collection: effectiveUpdated ? {
+      namespace: effectiveUpdated.namespace,
+      name: effectiveUpdated.name,
+      description: effectiveUpdated.description,
+      metadata: jsonObject(effectiveUpdated.metadata, {}),
+      access: vectorCollectionAccess(effectiveUpdated),
+      updatedAt: effectiveUpdated.updated_at,
+    } : null,
+    state: await vectorMemoryState(namespace, actor),
+  };
+}
+
+async function upsertVectorCollection(client, namespace, name, description, metadata = {}, access = {}) {
+  const owner = optionalString(access.owner) || optionalString(metadata?.owner) || 'opensphere-ai-hub';
+  const groups = identityGroupAliases(access.groups || metadata?.groups);
   await client.query(
-    `insert into oah_vector_collections (namespace, name, description, metadata, updated_at)
-     values ($1, $2, $3, $4::jsonb, now())
-     on conflict (namespace, name) do update set description = excluded.description, metadata = excluded.metadata, updated_at = now()`,
-    [namespace, name, description, JSON.stringify(metadata || {})],
+    `insert into oah_vector_collections (namespace, name, description, metadata, owner, groups, updated_at)
+     values ($1, $2, $3, $4::jsonb, $5, $6::jsonb, now())
+     on conflict (namespace, name) do update set
+       description = excluded.description,
+       metadata = excluded.metadata,
+       owner = coalesce(nullif(excluded.owner, ''), oah_vector_collections.owner),
+       groups = case
+         when jsonb_array_length(excluded.groups) > 0 then excluded.groups
+         else oah_vector_collections.groups
+       end,
+       updated_at = now()`,
+    [namespace, name, description, JSON.stringify(metadata || {}), owner, JSON.stringify(groups)],
   );
+  await upsertVectorBackboneAccessPolicy(client, {
+    namespace,
+    collection: name,
+    owner,
+    groups,
+  });
 }
 
-async function ingestVectorMemoryItem({ namespace, collection, documentId, content, metadata }) {
+async function ingestVectorMemoryItem({ namespace, collection, documentId, content, metadata, owner, groups }, actor = null) {
   const ns = requireDnsName(namespace || 'default', 'namespace');
   const collectionName = requireDnsName(collection || 'default-memory', 'collection');
   const docId = optionalString(documentId || `${collectionName}-${shortHash(content)}`) || `${collectionName}-${Date.now()}`;
@@ -5195,6 +6067,11 @@ async function ingestVectorMemoryItem({ namespace, collection, documentId, conte
     await upsertVectorCollection(client, ns, collectionName, 'OpenSphere AI Hub pgvector memory collection.', {
       provider: 'backbone-postgres',
       dimensions: 16,
+      owner: optionalString(owner) || actor?.username || 'opensphere-ai-hub',
+      groups: identityGroupAliases(groups || actor?.groups || []),
+    }, {
+      owner: optionalString(owner) || actor?.username || 'opensphere-ai-hub',
+      groups: identityGroupAliases(groups || actor?.groups || []),
     });
     const id = shortHash(`${ns}/${collectionName}/${docId}/${text}`);
     const embedding = pgVectorLiteral(deterministicEmbedding(text));
@@ -5210,6 +6087,7 @@ async function ingestVectorMemoryItem({ namespace, collection, documentId, conte
 
 async function vectorMemoryBootstrap(req) {
   const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  const actor = await requestActor(req);
   const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
   const collection = requireDnsName(body.collection || 'oah-vector-memory', 'collection');
   const samples = [
@@ -5225,15 +6103,18 @@ async function vectorMemoryBootstrap(req) {
       documentId: sample.documentId,
       content: sample.content,
       metadata: { topic: sample.topic, seededBy: 'oah-bootstrap' },
-    }));
+      owner: body.owner,
+      groups: body.groups,
+    }, actor));
   }
-  return { phase: 'Ready', ingested, state: await vectorMemoryState(namespace) };
+  return { phase: 'Ready', ingested, state: await vectorMemoryState(namespace, actor) };
 }
 
 async function vectorMemoryIngest(req) {
   const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-  const item = await ingestVectorMemoryItem(body);
-  return { phase: 'Ingested', item, state: await vectorMemoryState(item.namespace) };
+  const actor = await requestActor(req);
+  const item = await ingestVectorMemoryItem(body, actor);
+  return { phase: 'Ingested', item, state: await vectorMemoryState(item.namespace, actor) };
 }
 
 async function vectorMemoryQuery(req) {
@@ -5290,6 +6171,7 @@ async function readModelRegistryPgState() {
 
 async function upsertModelRegistryPgState(state) {
   return withModelRegistryPg(async (client, config) => {
+    const allowPrune = config.role !== 'app';
     await client.query('begin');
     try {
       for (const item of state.versions || []) {
@@ -5302,10 +6184,12 @@ async function upsertModelRegistryPgState(state) {
         );
       }
       const versionKeys = (state.versions || []).filter((item) => item?.name && item?.version).map((item) => `${item.name}\t${item.version}`);
-      if (versionKeys.length) {
-        await client.query(`delete from oah_model_registry_versions where not ((name || chr(9) || version) = any($1::text[]))`, [versionKeys]);
-      } else {
-        await client.query('delete from oah_model_registry_versions');
+      if (allowPrune) {
+        if (versionKeys.length) {
+          await client.query(`delete from oah_model_registry_versions where not ((name || chr(9) || version) = any($1::text[]))`, [versionKeys]);
+        } else {
+          await client.query('delete from oah_model_registry_versions');
+        }
       }
       for (const item of state.promotions || []) {
         if (!item?.name) continue;
@@ -5317,10 +6201,12 @@ async function upsertModelRegistryPgState(state) {
         );
       }
       const promotionKeys = (state.promotions || []).filter((item) => item?.name).map((item) => `${item.namespace || 'default'}\t${item.name}`);
-      if (promotionKeys.length) {
-        await client.query(`delete from oah_model_registry_promotions where not ((namespace || chr(9) || name) = any($1::text[]))`, [promotionKeys]);
-      } else {
-        await client.query('delete from oah_model_registry_promotions');
+      if (allowPrune) {
+        if (promotionKeys.length) {
+          await client.query(`delete from oah_model_registry_promotions where not ((namespace || chr(9) || name) = any($1::text[]))`, [promotionKeys]);
+        } else {
+          await client.query('delete from oah_model_registry_promotions');
+        }
       }
       for (const item of state.approvalAudit || []) {
         if (!item?.id) continue;
@@ -5677,8 +6563,9 @@ function promotionAuditRecord(claim, context) {
   const operation = optionalString(annotations['opensphere.io/last-operation'] || '');
   const operationAt = optionalString(annotations['opensphere.io/last-operation-at'] || '');
   const actor = optionalString(context.actor || annotations['opensphere.io/last-actor'] || 'opensphere-controller');
+  const separationOfDuties = context.separationOfDuties || promotionSeparationOfDuties(claim, context.approved === true);
   return {
-    id: shortHash(`${context.namespace}/${context.promotionRef}/${context.decision}/${context.generation}/${context.recordedAt}/${actor}`),
+    id: shortHash(`${context.namespace}/${context.promotionRef}/${context.decision}/${context.generation}/${actor}`),
     recordedAt: context.recordedAt,
     namespace: context.namespace,
     promotionRef: context.promotionRef,
@@ -5693,6 +6580,9 @@ function promotionAuditRecord(claim, context) {
     operation: operation || context.decision,
     operationAt: operationAt || context.recordedAt,
     actor,
+    requester: context.requester || separationOfDuties.requester || '',
+    approver: context.approver || separationOfDuties.approver || '',
+    separationOfDuties,
     backendMode: context.backendMode,
     backendPhase: context.backendPhase,
   };
@@ -5700,7 +6590,54 @@ function promotionAuditRecord(claim, context) {
 
 function appendApprovalAudit(items, next) {
   if (!next) return items || [];
-  return [...(items || []), next];
+  const map = new Map((items || []).map((item) => [item.id, item]));
+  if (!map.has(next.id)) map.set(next.id, next);
+  return [...map.values()].slice(-500);
+}
+
+function normalizePrincipal(value) {
+  return optionalString(value).trim().toLowerCase();
+}
+
+function promotionRequester(claim) {
+  const annotations = claim.metadata?.annotations || {};
+  const spec = claim.spec || {};
+  return optionalString(
+    spec.requestedBy
+    || spec.requester
+    || annotations['opensphere.io/requested-by']
+    || annotations['opensphere.io/requester']
+    || annotations['opensphere.io/created-by']
+  );
+}
+
+function promotionApprover(claim) {
+  const annotations = claim.metadata?.annotations || {};
+  const spec = claim.spec || {};
+  return optionalString(
+    spec.approvedBy
+    || spec.approver
+    || annotations['opensphere.io/approved-by']
+    || annotations['opensphere.io/approver']
+  );
+}
+
+function promotionSeparationOfDuties(claim, approved) {
+  const requester = promotionRequester(claim);
+  const approver = promotionApprover(claim);
+  if (!approved) {
+    return { required: false, allowed: true, requester, approver, reason: 'NotExplicitApproval' };
+  }
+  if (!requester) {
+    return { required: true, allowed: false, requester, approver, reason: 'MissingRequester' };
+  }
+  if (!approver) {
+    return { required: true, allowed: false, requester, approver, reason: 'MissingApprover' };
+  }
+  if (normalizePrincipal(requester) === normalizePrincipal(approver)) {
+    return { required: true, allowed: false, requester, approver, reason: 'SelfApprovalDenied' };
+  }
+  return { required: true, allowed: true, requester, approver, reason: 'RequesterApproverSeparated' };
 }
 
 function mergeMetrics(items, next, limit = 500) {
@@ -6027,6 +6964,9 @@ function normalizedArtifactCandidates(value) {
 function promotionAllowsServing(promotion) {
   const decision = optionalString(promotion?.approvalDecision || '').toLowerCase();
   const stage = optionalString(promotion?.stage || '').toLowerCase();
+  const separationOfDuties = promotion?.separationOfDuties || {};
+  if (decision === 'approvalsodviolation') return false;
+  if (promotion?.approved === true && separationOfDuties.allowed !== true) return false;
   return stage !== 'rejected'
     && (
       promotion?.approved === true
@@ -6053,13 +6993,33 @@ async function servingApprovalGate(claim, modelUri) {
   const breakGlassReason = optionalString(annotations['opensphere.io/break-glass-reason'] || annotations['opensphere.io/approval-exception-reason']);
   const artifactCandidates = normalizedArtifactCandidates(modelUri);
   if (!artifactCandidates.length) return { allowed: true, mode: 'NoArtifactUri', message: 'No explicit model artifact URI is present.' };
-  if (allowBreakGlass && breakGlassReason) {
-    return {
-      allowed: true,
-      mode: 'BreakGlass',
+  if (allowBreakGlass) {
+    const actor = optionalString(annotations['opensphere.io/last-actor'] || 'unknown');
+    await appendAuditLog({
+      time: new Date().toISOString(),
+      type: 'Warning',
+      reason: 'BreakGlassDenied',
+      message: 'Self-service break-glass annotations are not accepted for model serving. Use an approved ModelPromotionClaim.',
+      namespace: claim.metadata?.namespace || 'default',
+      kind: 'InferenceClaim',
+      name: claim.metadata?.name || '',
+      phase: 'Denied',
+      ready: false,
+      backendMode: '',
+      backendPhase: '',
+      controller: 'ModelGovernance',
+      actor,
       artifactUri: modelUri,
-      reason: breakGlassReason,
-      message: `Unapproved model artifact is allowed by break-glass annotation: ${breakGlassReason}`,
+      breakGlassReason,
+    }).catch(() => null);
+    return {
+      allowed: false,
+      mode: 'BreakGlassDenied',
+      artifactUri: modelUri,
+      reason: 'BreakGlassRequiresAdminApproval',
+      requestedReason: breakGlassReason,
+      actor,
+      message: 'InferenceClaim self-service break-glass is disabled. Create an approved or evaluation-passed ModelPromotionClaim before serving this artifact.',
     };
   }
   const namespace = claim.metadata?.namespace || 'default';
@@ -6430,22 +7390,29 @@ async function promotionArtifactUri(spec, namespace, modelName, promotionName = 
 async function reconcileModelPromotionClaim(claim) {
   const namespace = claim.metadata?.namespace || 'default';
   const spec = claim.spec || {};
+  const annotations = claim.metadata?.annotations || {};
   const name = claim.metadata?.name || 'promotion';
   if (pendingRetryMs(claim) > 0) return retryingResult(claim, name);
-  const modelName = spec.modelRef?.name || spec.modelName || spec.model || name;
-  const version = optionalString(spec.version || spec.modelVersion || name) || name;
+  const modelName = annotations['opensphere.io/model-name'] || spec.modelRef?.name || spec.modelName || spec.model || name;
+  const version = optionalString(annotations['opensphere.io/model-version'] || spec.version || spec.modelVersion || name) || name;
   const stage = optionalString(spec.stage || 'production') || 'production';
   const registryBackend = await modelRegistryBackend(namespace, spec);
   const evaluation = await evaluationState(spec.evaluationRef, namespace);
-  const approved = spec.approved === true;
-  const rejected = spec.approved === false || stage === 'rejected';
+  const annotationApproval = optionalString(annotations['opensphere.io/approved'] || '').toLowerCase();
+  const annotationDecision = optionalString(annotations['opensphere.io/approval-decision'] || '').toLowerCase();
+  const approved = spec.approved === true || annotationApproval === 'true' || annotationDecision === 'approved';
+  const rejected = spec.approved === false || annotationApproval === 'false' || annotationDecision === 'rejected' || stage === 'rejected';
   const canPromote = !rejected && (approved || evaluation.passed);
   const now = new Date().toISOString();
+  const separationOfDuties = promotionSeparationOfDuties(claim, approved);
   const baseStatus = {
     modelName,
     version,
     stage,
     approved,
+    requestedBy: separationOfDuties.requester || '',
+    approvedBy: separationOfDuties.approver || '',
+    separationOfDuties,
     evaluationRef: spec.evaluationRef?.name || '',
     evaluationPhase: evaluation.phase,
     evaluationPassed: evaluation.passed === true,
@@ -6469,6 +7436,50 @@ async function reconcileModelPromotionClaim(claim) {
     status.approvalDecision = 'Blocked';
     await patchPromotionStatus(claim, status);
     return { name, namespace, modelName, version, stage, phase: 'Retrying', error: registryBackend.backend.message, nextRetryAt: status.nextRetryAt };
+  }
+
+  if (approved && !separationOfDuties.allowed) {
+    const registry = await modelRegistryState({ source: registryBackend.source, backend: registryBackend.backend });
+    const auditRecord = promotionAuditRecord(claim, {
+      namespace,
+      promotionRef: name,
+      modelName,
+      version,
+      stage,
+      decision: 'ApprovalSoDViolation',
+      approved: false,
+      requester: separationOfDuties.requester,
+      approver: separationOfDuties.approver,
+      separationOfDuties,
+      evaluationRef: spec.evaluationRef?.name || '',
+      evaluationPhase: evaluation.phase,
+      generation: claim.metadata?.generation || 0,
+      recordedAt: now,
+      backendMode: registryBackend.backend.mode,
+      backendPhase: registryBackend.backend.phase,
+    });
+    await saveModelRegistryState({
+      ...registry,
+      approvalAudit: appendApprovalAudit(registry.approvalAudit, auditRecord),
+    }, null, registry.source || registryBackend.source);
+    const status = {
+      ...baseStatus,
+      registrySource: registry.source || registryBackend.source,
+      ...normalizedStatus({
+        phase: 'Blocked',
+        ready: false,
+        reason: 'ApprovalSoDViolation',
+        message: `Promotion approval requires separate requester and approver. Reason: ${separationOfDuties.reason}.`,
+        upstreamConditions: registryBackend.info.conditions,
+      }),
+    };
+    status.promotedAt = null;
+    status.registryConfigMap = null;
+    status.upstreamSync = null;
+    status.approvalDecision = 'ApprovalSoDViolation';
+    status.approvalAuditRef = auditRecord.id;
+    await patchPromotionStatus(claim, resetRetryFields(status));
+    return { name, namespace, modelName, version, stage, phase: 'Blocked', reason: separationOfDuties.reason };
   }
 
   if (rejected) {
@@ -6574,6 +7585,9 @@ async function reconcileModelPromotionClaim(claim) {
     evaluationPassed: evaluation.passed === true,
     metricCount: metricRecords.length,
     approvalDecision: auditRecord.decision,
+    requester: separationOfDuties.requester || '',
+    approver: separationOfDuties.approver || '',
+    separationOfDuties,
     backend: (registry.source || registryBackend.source).type,
     registry: `${(registry.source || registryBackend.source).namespace}/${(registry.source || registryBackend.source).name}`,
   };
@@ -6594,6 +7608,9 @@ async function reconcileModelPromotionClaim(claim) {
     evaluationPassed: evaluation.passed === true,
     metricCount: metricRecords.length,
     approvalAuditRef: auditRecord.id,
+    requester: separationOfDuties.requester || '',
+    approver: separationOfDuties.approver || '',
+    separationOfDuties,
     promotedAt: now,
   };
   const promotions = [
@@ -7541,8 +8558,189 @@ function operationTarget(pathname, body) {
   throw { code: 400, msg: 'unsupported operation target' };
 }
 
+function oahAgentToolsManifest() {
+  const generatedAt = new Date().toISOString();
+  const lifecycle = ['plan', 'preview', 'apply', 'watch', 'report'];
+  const tools = [
+    {
+      id: 'oah.readiness.get',
+      command: 'os ai readiness',
+      method: 'GET',
+      path: '/admin/native/final-readiness',
+      risk: 'low',
+      scope: 'oah:read',
+      lifecycle: ['report'],
+      description: 'Return OAH native readiness, upstream parity, support-service state, and gating evidence.',
+    },
+    {
+      id: 'oah.support-services.list',
+      command: 'os ai support-services list',
+      method: 'GET',
+      path: '/admin/native/support-services',
+      risk: 'low',
+      scope: 'oah:read',
+      lifecycle: ['report'],
+      description: 'List OAH support services for serving, pipelines, model registry, observability, distributed workloads, metadata, and object storage.',
+    },
+    {
+      id: 'oah.support-services.configure',
+      command: 'os ai support-services configure --component <serving|pipelines|model-registry|observability|distributed> --preview|--apply',
+      method: 'GET/POST',
+      previewPaths: [
+        '/admin/native/support-services/serving/preview',
+        '/admin/native/support-services/pipelines/preview',
+        '/admin/native/support-services/model-registry/preview',
+        '/admin/native/support-services/observability/preview',
+        '/admin/native/support-services/distributed/preview',
+      ],
+      applyPaths: [
+        '/admin/native/support-services/serving/configure',
+        '/admin/native/support-services/pipelines/configure',
+        '/admin/native/support-services/model-registry/configure',
+        '/admin/native/support-services/observability/configure',
+        '/admin/native/support-services/distributed/configure',
+      ],
+      risk: 'high',
+      scope: 'oah:admin',
+      lifecycle,
+      requiresApproval: true,
+      description: 'Preview or configure OAH support-service substrates. Apply calls are admin-only and must carry correlation and idempotency headers.',
+    },
+    {
+      id: 'oah.gpu.list',
+      command: 'os ai gpu list',
+      method: 'GET',
+      path: '/admin/native/gpu-inventory',
+      risk: 'low',
+      scope: 'oah:read',
+      lifecycle: ['report'],
+      description: 'Return Kubernetes GPU inventory and external compute bridge availability.',
+    },
+    {
+      id: 'oah.gpu.bridge',
+      command: 'os ai gpu bridge <health|capabilities|register|smoke|training-smoke> --preview|--apply',
+      method: 'POST',
+      paths: [
+        '/admin/native/gpu-bridge/health',
+        '/admin/native/gpu-bridge/capabilities',
+        '/admin/native/gpu-bridge/register',
+        '/admin/native/gpu-bridge/smoke',
+        '/admin/native/gpu-bridge/training-smoke',
+      ],
+      risk: 'medium',
+      scope: 'oah:compute:write',
+      lifecycle,
+      description: 'Operate external GPU bridge checks and registration for agent workloads.',
+    },
+    {
+      id: 'oah.vector.query',
+      command: 'os ai vector query --namespace <ns> --collection <name> --text <query>',
+      method: 'POST',
+      path: '/memory/vector/query',
+      risk: 'medium',
+      scope: 'oah:vector:read',
+      lifecycle: ['apply', 'report'],
+      description: 'Query pgvector-backed memory using collection owner/group ACL.',
+    },
+    {
+      id: 'oah.vector.ingest',
+      command: 'os ai vector ingest --namespace <ns> --collection <name> --file <path> --preview|--apply',
+      method: 'POST',
+      path: '/memory/vector/ingest',
+      risk: 'high',
+      scope: 'oah:vector:write',
+      lifecycle,
+      description: 'Ingest text into pgvector-backed memory. Admin access is required until delegated vector-write policy is promoted.',
+    },
+    {
+      id: 'oah.models.versions.list',
+      command: 'os ai model versions list',
+      method: 'GET',
+      path: '/models/registry/versions',
+      risk: 'low',
+      scope: 'oah:model:read',
+      lifecycle: ['report'],
+      description: 'List Backbone-backed model registry versions.',
+    },
+    {
+      id: 'oah.models.versions.register',
+      command: 'os ai model register --name <name> --version <version> --artifact <uri>',
+      method: 'POST',
+      path: '/models/registry/versions',
+      risk: 'medium',
+      scope: 'oah:model:write',
+      lifecycle,
+      description: 'Register a model version in the OAH model registry.',
+    },
+    {
+      id: 'oah.pipeline.run',
+      command: 'os ai pipeline run --pipeline <name> --namespace <ns> --watch',
+      method: 'POST',
+      path: '/operations/pipelines/run',
+      risk: 'medium',
+      scope: 'oah:pipeline:run',
+      lifecycle,
+      description: 'Create a PipelineRunClaim and follow execution evidence.',
+    },
+    {
+      id: 'oah.inference.update',
+      command: 'os ai inference deploy --name <name> --namespace <ns> --preview|--apply',
+      method: 'POST',
+      path: '/operations/inference',
+      risk: 'high',
+      scope: 'oah:serve:apply',
+      lifecycle,
+      requiresApproval: true,
+      description: 'Update an InferenceClaim or KServe serving target. Production exposure should require step-up approval.',
+    },
+    {
+      id: 'oah.audit.list',
+      command: 'os ai audit list --correlation-id <id>',
+      method: 'GET',
+      path: '/admin/native/audit-log',
+      risk: 'low',
+      scope: 'oah:audit:read',
+      lifecycle: ['report'],
+      description: 'Read OAH controller and security audit entries for human or agent operations.',
+    },
+  ];
+  return {
+    apiVersion: 'agent.opensphere.io/v1alpha1',
+    kind: 'OAHAgentToolManifest',
+    metadata: { name: 'opensphere-ai-hub', generatedAt },
+    cli: {
+      surface: 'os',
+      namespace: 'ai',
+      commandPrefix: 'os ai',
+      principle: 'console==cli: commands must consume the same OAH API contract used by the UI.',
+    },
+    security: {
+      headers: {
+        auth: 'Authorization: Bearer <OpenSphere PAT or delegated agent token>',
+        idToken: 'x-os-id-token: <Kanidm/OIDC id_token when available>',
+        correlation: 'X-OS-Correlation-ID: <stable user-request or agent-task id>',
+        idempotency: 'X-OS-Idempotency-Key: <required for mutating apply calls>',
+      },
+      requiredTokenProperties: ['issuer', 'audience', 'expiration', 'subject', 'groups'],
+      delegatedAgentClaims: ['sub', 'client_id', 'act', 'delegated_by', 'purpose', 'session_id', 'scopes', 'exp'],
+      writeRules: [
+        'Mutating apply calls require X-OS-Correlation-ID and X-OS-Idempotency-Key.',
+        'High-risk operations require an approval boundary before production apply.',
+        'Agent tokens must not bypass OAH RBAC, owner/group ACL, or model-promotion separation-of-duties checks.',
+      ],
+    },
+    operationContract: {
+      lifecycle,
+      outputModes: ['json', 'table'],
+      recommendedDefault: 'preview before apply; watch after apply; report with audit correlation id',
+    },
+    tools,
+  };
+}
+
 const ADMIN_READ_PATHS = new Set([
   '/admin/odh-components',
+  '/admin/native/agent-tools',
   '/admin/native/catalog',
   '/admin/native/backends',
   '/admin/native/support-services',
@@ -7569,6 +8767,7 @@ const ADMIN_READ_PATHS = new Set([
   '/admin/native/demo-smoke/preview',
   '/admin/setup/status',
   '/admin/setup/plan',
+  '/memory/vector',
 ]);
 
 async function requireOperationalReadAccess(req, action) {
@@ -7594,6 +8793,11 @@ async function requireOperationalReadAccess(req, action) {
 
 async function authorizeAiReadRequest(req, pathname) {
   if (req.method !== 'GET') return;
+  if (pathname === '/memory/vector') {
+    if (requestIsLoopback(req)) return;
+    await requestActor(req);
+    return;
+  }
   if (ADMIN_READ_PATHS.has(pathname)) {
     await requireOperationalReadAccess(req, pathname);
   }
@@ -7668,15 +8872,17 @@ async function authorizeAiRequest(req, pathname) {
     return;
   }
   if (pathname === '/memory/vector/query' && req.method === 'POST') {
-    const actor = await requestActor(req);
-    await appendSecurityAudit(req, true, pathname, {
-      verb: 'get',
-      group: 'ai.opensphere.io',
-      resource: 'vectormemory',
-      namespace: 'opensphere-system',
-      kind: 'VectorMemory',
-      name: actor.username,
-    }, 'authenticated vector memory query');
+    const body = await prepareJsonBody(req);
+    const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+    const collection = requireDnsName(body.collection || 'oah-vector-memory', 'collection');
+    await requireVectorCollectionAccess(req, pathname, namespace, collection);
+    return;
+  }
+  if (pathname === '/memory/vector/collections' && req.method === 'PATCH') {
+    const body = await prepareJsonBody(req);
+    const namespace = requireDnsName(body.namespace || 'opensphere-system', 'namespace');
+    const collection = requireDnsName(body.collection || body.name || 'oah-vector-memory', 'collection');
+    req._vectorCollectionManageAccess = await requireVectorCollectionManageAccess(req, pathname, namespace, collection);
     return;
   }
   if (pathname === '/models/registry/upstream/self-test' && req.method === 'POST') {
@@ -7783,6 +8989,8 @@ const BACKBONE_NAMESPACE = 'opensphere-backbone';
 const BACKBONE_CLAIM_NAMESPACE = 'opensphere-system';
 const BACKBONE_CLAIM_NAME = 'ai-hub';
 const BACKBONE_POSTGRES_SECRET = 'ai-hub-backbone-postgres';
+const BACKBONE_POSTGRES_APP_SECRET = 'ai-hub-backbone-postgres-app';
+const BACKBONE_POSTGRES_APP_USER = 'oah_app';
 const BACKBONE_RUSTFS_SECRET = 'ai-hub-backbone-rustfs';
 const BACKBONE_KSERVE_S3_SECRET = 'ai-hub-kserve-s3';
 const BACKBONE_OBJECT_CONNECTION = 'ai-hub-backbone-object-storage';
@@ -7806,8 +9014,11 @@ const DSPA_API_DEPLOYMENT = `ds-pipeline-${DSPA_NAME}`;
 const DSPA_MLMD_GRPC_DEPLOYMENT = `ds-pipeline-metadata-grpc-${DSPA_NAME}`;
 const OPENSPHERE_WILDCARD_TLS_SECRET = 'opensphere-wildcard-tls';
 const DSPO_PUBLIC_IMAGES = {
-  kubeRbacProxy: 'quay.io/openshift/origin-kube-rbac-proxy:latest',
-  mlmdEnvoy: 'docker.io/envoyproxy/envoy:v1.31-latest',
+  kubeRbacProxy: 'quay.io/openshift/origin-kube-rbac-proxy@sha256:d82c862da8fe5446edc0eb8fbed1f1f6bc38aac7d7c1586cad0e03d3efd6f90e',
+  mlmdEnvoy: 'docker.io/envoyproxy/envoy@sha256:caa5b411be1633b90023592a34a7e010c933d6e60206c758f631485e53006865',
+  persistenceAgent: 'quay.io/opendatahub/ds-pipelines-persistenceagent@sha256:3e2a4006d32660f51f442c42339558aa955ab33ea1f438438fda59399873b80c',
+  scheduledWorkflow: 'quay.io/opendatahub/ds-pipelines-scheduledworkflow@sha256:e85ca6824d766d152b1dff4d9647c6541b9e71531a9de229afc2f3dcdb43753d',
+  workflowController: 'quay.io/opendatahub/ds-pipelines-argo-workflowcontroller@sha256:26d00221b8709ab546aa2fa194d205a1e4acb214b732170a31c318c481bc0d8c',
   mariaDB: 'quay.io/sclorg/mariadb-105-c9s:c9s',
 };
 const BACKBONE_COMPONENTS = [
@@ -8061,8 +9272,9 @@ function backboneDspaManifest(config, postgresConfig) {
           key: 'config.json',
         },
       },
-      persistenceAgent: { deploy: true },
-      scheduledWorkflow: { deploy: true },
+      persistenceAgent: { deploy: true, image: DSPO_PUBLIC_IMAGES.persistenceAgent },
+      scheduledWorkflow: { deploy: true, image: DSPO_PUBLIC_IMAGES.scheduledWorkflow },
+      workflowController: { image: DSPO_PUBLIC_IMAGES.workflowController },
       database: {
         mariaDB: {
           deploy: false,
@@ -8231,6 +9443,42 @@ function dspaMlmdCompatibilityNetworkPolicyManifest() {
   };
 }
 
+function dspaApiCompatibilityNetworkPolicyManifest() {
+  return {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: `${DSPA_NAME}-allow-ai-runtime-kfp-api`,
+      namespace: BACKBONE_CLAIM_NAMESPACE,
+      labels: {
+        'app.kubernetes.io/part-of': 'opensphere-ai',
+        'opensphere.io/support-service': 'data-science-pipelines',
+        'opensphere.io/compatibility': 'dspo-network',
+      },
+    },
+    spec: {
+      podSelector: {
+        matchLabels: {
+          app: DSPA_API_DEPLOYMENT,
+          component: 'data-science-pipelines',
+        },
+      },
+      policyTypes: ['Ingress'],
+      ingress: [{
+        from: [
+          { podSelector: { matchLabels: { app: 'ai' } } },
+          { podSelector: { matchLabels: { 'pipelines.kubeflow.org/v2_component': 'true' } } },
+        ],
+        ports: [
+          { protocol: 'TCP', port: 8443 },
+          { protocol: 'TCP', port: 8888 },
+          { protocol: 'TCP', port: 8887 },
+        ],
+      }],
+    },
+  };
+}
+
 async function ensureDspoImageCompatibility(req) {
   const steps = [];
   const deployment = await k8sJson(`/apis/apps/v1/namespaces/${DSPO_NAMESPACE}/deployments/${DSPO_OPERATOR_DEPLOYMENT}`);
@@ -8246,6 +9494,10 @@ async function ensureDspoImageCompatibility(req) {
   const overrides = {
     IMAGES_KUBE_RBAC_PROXY: DSPO_PUBLIC_IMAGES.kubeRbacProxy,
     IMAGES_MLMDENVOY: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+    IMAGES_PERSISTENCEAGENT: DSPO_PUBLIC_IMAGES.persistenceAgent,
+    IMAGES_SCHEDULEDWORKFLOW: DSPO_PUBLIC_IMAGES.scheduledWorkflow,
+    IMAGES_WORKFLOWCONTROLLER: DSPO_PUBLIC_IMAGES.workflowController,
+    IMAGES_ARGO_WORKFLOWCONTROLLER: DSPO_PUBLIC_IMAGES.workflowController,
     IMAGES_MARIADB: DSPO_PUBLIC_IMAGES.mariaDB,
   };
   const containers = (deployment.spec?.template?.spec?.containers || []).map((container) => (
@@ -8280,6 +9532,10 @@ async function ensureDspoImageCompatibility(req) {
         IMAGES_KUBE_RBAC_PROXY: DSPO_PUBLIC_IMAGES.kubeRbacProxy,
         'kube-rbac-proxy': DSPO_PUBLIC_IMAGES.kubeRbacProxy,
         IMAGES_MLMDENVOY: DSPO_PUBLIC_IMAGES.mlmdEnvoy,
+        IMAGES_PERSISTENCEAGENT: DSPO_PUBLIC_IMAGES.persistenceAgent,
+        IMAGES_SCHEDULEDWORKFLOW: DSPO_PUBLIC_IMAGES.scheduledWorkflow,
+        IMAGES_WORKFLOWCONTROLLER: DSPO_PUBLIC_IMAGES.workflowController,
+        IMAGES_ARGO_WORKFLOWCONTROLLER: DSPO_PUBLIC_IMAGES.workflowController,
         IMAGES_MARIADB: DSPO_PUBLIC_IMAGES.mariaDB,
       },
     }, req);
@@ -8297,6 +9553,9 @@ async function ensureDspoImageCompatibility(req) {
     const nextConfig = rawConfig
       .replace(/registry\.redhat\.io\/openshift-service-mesh\/proxyv2-rhel9:2\.6/g, DSPO_PUBLIC_IMAGES.mlmdEnvoy)
       .replace(/registry\.redhat\.io\/openshift4\/ose-kube-rbac-proxy-rhel9:latest/g, DSPO_PUBLIC_IMAGES.kubeRbacProxy)
+      .replace(/quay\.io\/opendatahub\/ds-pipelines-persistenceagent:master/g, DSPO_PUBLIC_IMAGES.persistenceAgent)
+      .replace(/quay\.io\/opendatahub\/ds-pipelines-scheduledworkflow:master/g, DSPO_PUBLIC_IMAGES.scheduledWorkflow)
+      .replace(/quay\.io\/opendatahub\/ds-pipelines-argo-workflowcontroller:3\.6\.12/g, DSPO_PUBLIC_IMAGES.workflowController)
       .replace(/registry\.redhat\.io\/rhel9\/mariadb-105:latest/g, DSPO_PUBLIC_IMAGES.mariaDB);
     await patchK8s(`/api/v1/namespaces/${DSPO_NAMESPACE}/configmaps/${DSPO_CONFIGMAP}`, {
       data: { 'config.yaml': nextConfig },
@@ -8359,6 +9618,7 @@ async function ensureDspaTlsCompatibility(req) {
 
 async function ensureDspaNetworkCompatibility(req) {
   const policies = [
+    dspaApiCompatibilityNetworkPolicyManifest(),
     dspaMariadbCompatibilityNetworkPolicyManifest(),
     dspaMlmdCompatibilityNetworkPolicyManifest(),
   ];
@@ -8463,9 +9723,40 @@ async function ensureDeploymentImagePullSecret(req, namespace, name, secretName)
   };
 }
 
+async function ensureServiceAccountImagePullSecret(req, namespace, name, secretName) {
+  const path = `/api/v1/namespaces/${namespace}/serviceaccounts/${name}`;
+  const serviceAccount = await k8sJson(path);
+  if (!serviceAccount) {
+    return {
+      kind: 'ServiceAccount',
+      namespace,
+      name,
+      phase: 'Pending',
+      detail: `${namespace}/${name} is not created yet.`,
+    };
+  }
+  const existing = serviceAccount.imagePullSecrets || [];
+  const hasSecret = existing.some((item) => item?.name === secretName);
+  if (hasSecret) {
+    return {
+      ...resourceRefFor(serviceAccount, 'ServiceAccount'),
+      phase: 'Ready',
+      detail: `${namespace}/${name} already references ${secretName}.`,
+    };
+  }
+  const next = [...existing.map((item) => ({ name: item.name })), { name: secretName }];
+  const patched = await patchK8s(path, { imagePullSecrets: next }, req);
+  return {
+    ...resourceRefFor(patched, 'ServiceAccount'),
+    phase: 'Configured',
+    detail: `Added ${secretName} to ${namespace}/${name}.`,
+  };
+}
+
 async function ensureDspaRuntimeImagePullSecrets(req) {
   const deployments = [DSPA_API_DEPLOYMENT, DSPA_MLMD_GRPC_DEPLOYMENT];
   const resources = [];
+  resources.push(await ensureServiceAccountImagePullSecret(req, BACKBONE_CLAIM_NAMESPACE, OAH_RUNTIME_SERVICE_ACCOUNT, GHCR_PULL_SECRET));
   for (const name of deployments) {
     resources.push(await ensureDeploymentImagePullSecret(req, BACKBONE_CLAIM_NAMESPACE, name, GHCR_PULL_SECRET));
   }
@@ -8476,8 +9767,8 @@ async function ensureDspaRuntimeImagePullSecrets(req) {
     label: 'DSPA runtime image pull secrets',
     phase: pending ? 'Pending' : configured ? 'Configured' : 'Ready',
     detail: pending
-      ? `${GHCR_PULL_SECRET} will be attached after DSPO creates ${deployments.join(', ')}.`
-      : `${GHCR_PULL_SECRET} is attached to ${deployments.join(', ')}.`,
+      ? `${GHCR_PULL_SECRET} will be attached after DSPO creates ${OAH_RUNTIME_SERVICE_ACCOUNT} and ${deployments.join(', ')}.`
+      : `${GHCR_PULL_SECRET} is attached to ${OAH_RUNTIME_SERVICE_ACCOUNT} and ${deployments.join(', ')}.`,
     resources,
   };
 }
@@ -9622,6 +10913,7 @@ async function pipelinesFoundationPreview(req) {
         manifests: dspaManifest ? [
           dspoImageCompatibilityPreview(),
           ...dspaProxyTlsSecretNames().map((name) => dspaProxyTlsSecretManifest(name, wildcardTlsSecret, true)),
+          dspaApiCompatibilityNetworkPolicyManifest(),
           dspaMariadbCompatibilityNetworkPolicyManifest(),
           dspaMlmdCompatibilityNetworkPolicyManifest(),
           dspaPostgresServerConfigMap(),
@@ -9641,7 +10933,8 @@ async function pipelinesFoundationPreview(req) {
 }
 
 async function configurePipelinesFoundation(req) {
-  const applyReq = null;
+  const actor = await requestActor(req);
+  const applyReq = { _internal: true, _actor: actor };
   const { created, skipped } = await ensureFoundationCrds(PIPELINE_FALLBACK_CRDS, applyReq);
   const dspoCompatibilitySteps = await ensureDspoImageCompatibility(applyReq);
   const tlsCompatibility = await ensureDspaTlsCompatibility(applyReq);
@@ -9649,6 +10942,7 @@ async function configurePipelinesFoundation(req) {
     phase: 'Warning',
     detail: e.msg || String(e),
     manifests: [
+      dspaApiCompatibilityNetworkPolicyManifest(),
       dspaMariadbCompatibilityNetworkPolicyManifest(),
       dspaMlmdCompatibilityNetworkPolicyManifest(),
     ],
@@ -9964,16 +11258,32 @@ function mergeModelRegistryFoundationState(configMapState, pgState) {
 }
 
 async function configureModelRegistryFoundation(req) {
-  const [configMap, pgStateResult, hasNativeDscCrd] = await Promise.all([
+  const [configMap, appRoleResult, hasNativeDscCrd] = await Promise.all([
     k8sJson('/api/v1/namespaces/opensphere-system/configmaps/ai-model-registry-versions'),
-    readModelRegistryPgState().then((state) => ({ state })).catch((e) => ({ error: e.msg || String(e) })),
+    refreshModelRegistryAppRole().then((role) => ({ role })).catch((e) => ({ error: e.msg || String(e) })),
     crdInstalled('openspheredatascienceclusters.ai.opensphere.io'),
   ]);
+  const pgStateResult = await readModelRegistryPgState().then((state) => ({ state })).catch((e) => ({ error: e.msg || String(e) }));
   const configMapState = modelRegistryStateFromConfigMap(configMap);
   const pgState = pgStateResult.state || { versions: [], promotions: [], approvalAudit: [], evaluationMetrics: [] };
   const mergedState = mergeModelRegistryFoundationState(configMapState, pgState);
 
   const steps = [];
+  if (appRoleResult.error) {
+    steps.push({
+      id: 'native-registry-postgres-app-role',
+      label: 'Backbone PostgreSQL restricted app role',
+      phase: 'Warning',
+      detail: appRoleResult.error,
+    });
+  } else {
+    steps.push({
+      id: 'native-registry-postgres-app-role',
+      label: 'Backbone PostgreSQL restricted app role',
+      phase: 'Succeeded',
+      detail: `Secret ${BACKBONE_CLAIM_NAMESPACE}/${appRoleResult.role.secretName} is usable as ${appRoleResult.role.username} (${appRoleResult.role.role}) for ${appRoleResult.role.endpoint}.`,
+    });
+  }
   if (pgStateResult.error) {
     steps.push({
       id: 'native-registry-postgres',
@@ -10034,7 +11344,7 @@ async function configureModelRegistryFoundation(req) {
 
   const preview = await modelRegistryFoundationPreview(req);
   return {
-    phase: pgStateResult.error ? 'Warning' : preview.phase,
+    phase: pgStateResult.error || appRoleResult.error ? 'Warning' : preview.phase,
     generatedAt: new Date().toISOString(),
     steps,
     preview,
@@ -11299,14 +12609,21 @@ async function upstreamParityInventory(req) {
   ));
 
   const trustyInstalled = await crdInstalled('trustyaiservices.trustyai.opendatahub.io');
+  const trustyInfo = trustyInstalled ? await trustyaiServiceInfo(namespace).catch(() => ({ ready: false, name: '', namespace, endpoint: '', conditions: [] })) : null;
+  const trustySamples = trustyInfo?.ready ? await fetchTrustyaiMetricSamples(trustyInfo).catch((e) => ({ samples: [], error: e.msg || String(e) })) : null;
+  const trustyReady = !!(trustyInfo?.ready && trustySamples?.samples?.length);
   checks.push(upstreamCheck(
     'trustyai',
     'TrustyAI monitoring',
     false,
-    trustyInstalled ? 'Missing' : 'NotInstalled',
-    trustyInstalled ? 'TrustyAIService CRD exists; instance readiness still needs validation.' : 'No trustyaiservices API resource was discovered.',
-    trustyInstalled ? 'Run model monitoring and explainability e2e.' : 'Install TrustyAI only when drift, bias, and explainability evidence are required.',
-    [],
+    trustyReady ? 'Ready' : trustyInstalled ? 'Missing' : 'NotInstalled',
+    trustyReady
+      ? `TrustyAIService ${trustyInfo.namespace}/${trustyInfo.name} is ready and returned ${trustySamples.samples.length} numeric metric sample(s).`
+      : trustyInstalled
+        ? `TrustyAIService CRD exists, but measured metric endpoint is not ready: ${trustySamples?.error || 'no ready TrustyAIService found'}.`
+        : 'No trustyaiservices API resource was discovered.',
+    trustyReady ? 'Run model monitoring and explainability e2e for each served model.' : trustyInstalled ? 'Create a ready TrustyAIService and expose metrics.' : 'Install TrustyAI only when drift, bias, and explainability evidence are required.',
+    trustyInfo?.name ? [{ kind: 'TrustyAIService', namespace: trustyInfo.namespace, name: trustyInfo.name, phase: trustyInfo.ready ? 'Ready' : 'Pending' }] : [],
   ));
 
   const required = checks.filter((item) => item.required);
@@ -14967,12 +16284,14 @@ const server = http.createServer(async (req, res) => {
     if (p === '/models/registry/import-serving' && req.method === 'POST') return jsonRes(res, 200, await importServingTargetAsModelVersion(req));
     if (p === '/models/registry/upstream' && req.method === 'GET') return jsonRes(res, 200, await modelRegistryUpstream(req.url));
     if (p === '/models/registry/upstream/self-test' && req.method === 'POST') return jsonRes(res, 200, await modelRegistryWriteSelfTest(req));
-    if (p === '/memory/vector' && req.method === 'GET') return jsonRes(res, 200, await vectorMemoryResponse(req.url));
+    if (p === '/memory/vector' && req.method === 'GET') return jsonRes(res, 200, await vectorMemoryResponse(req.url, req));
     if (p === '/memory/vector/bootstrap' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryBootstrap(req));
     if (p === '/memory/vector/ingest' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryIngest(req));
     if (p === '/memory/vector/query' && req.method === 'POST') return jsonRes(res, 200, await vectorMemoryQuery(req));
+    if (p === '/memory/vector/collections' && req.method === 'PATCH') return jsonRes(res, 200, await updateVectorCollectionAccess(req));
     if (p === '/admin/odh-components' && req.method === 'GET') return jsonRes(res, 200, await odhComponents());
     if (p === '/admin/odh-components/action' && req.method === 'POST') return jsonRes(res, 200, await odhComponentOperation(req));
+    if (p === '/admin/native/agent-tools' && req.method === 'GET') return jsonRes(res, 200, oahAgentToolsManifest());
     if (p === '/admin/native/catalog' && req.method === 'GET') return jsonRes(res, 200, await nativeCatalog());
     if (p === '/admin/native/backends' && req.method === 'GET') return jsonRes(res, 200, await nativeBackends());
     if (p === '/admin/native/support-services' && req.method === 'GET') return jsonRes(res, 200, await supportServices(req));
@@ -15150,6 +16469,7 @@ server.listen(PORT, () => {
   reconcileModelPromotions().catch((e) => console.error('[controller] model promotion reconcile failed: ' + (e.msg || e)));
   reconcileMonitoringTargets().catch((e) => console.error('[controller] monitoring reconcile failed: ' + (e.msg || e)));
   reconcileDistributedWorkloads().catch((e) => console.error('[controller] distributed workload reconcile failed: ' + (e.msg || e)));
+  ensureDspaRuntimeImagePullSecrets(null).catch((e) => console.error('[controller] DSPA image pull secret reconcile failed: ' + (e.msg || e)));
   reconcilePassiveResources().catch((e) => console.error('[controller] passive resource reconcile failed: ' + (e.msg || e)));
   setInterval(() => {
     reconcileWorkbenches().catch((e) => console.error('[controller] workbench reconcile failed: ' + (e.msg || e)));
@@ -15159,6 +16479,7 @@ server.listen(PORT, () => {
     reconcileModelPromotions().catch((e) => console.error('[controller] model promotion reconcile failed: ' + (e.msg || e)));
     reconcileMonitoringTargets().catch((e) => console.error('[controller] monitoring reconcile failed: ' + (e.msg || e)));
     reconcileDistributedWorkloads().catch((e) => console.error('[controller] distributed workload reconcile failed: ' + (e.msg || e)));
+    ensureDspaRuntimeImagePullSecrets(null).catch((e) => console.error('[controller] DSPA image pull secret reconcile failed: ' + (e.msg || e)));
     reconcilePassiveResources().catch((e) => console.error('[controller] passive resource reconcile failed: ' + (e.msg || e)));
   }, 30000);
 });

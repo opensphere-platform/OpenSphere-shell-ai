@@ -4,6 +4,7 @@ param(
   [switch]$RequireRemoteImages,
   [switch]$RequireSignedImages,
   [switch]$AllowUnsignedImages,
+  [switch]$AllowDevKey,
   [switch]$SkipLocalBuild,
   [string]$ReportDir = "release-reports",
   [string]$Namespace = "opensphere-system",
@@ -27,6 +28,15 @@ if ($AllowUnsignedImages) {
   $RequireSignedImages = $false
 } elseif (-not $PSBoundParameters.ContainsKey("RequireSignedImages")) {
   $RequireSignedImages = $true
+}
+if (-not $PSBoundParameters.ContainsKey("CosignKeyRef") -and $env:OAH_COSIGN_KEY_REF) {
+  $CosignKeyRef = $env:OAH_COSIGN_KEY_REF
+}
+if (-not $PSBoundParameters.ContainsKey("CosignIdentity") -and $env:OAH_COSIGN_IDENTITY) {
+  $CosignIdentity = $env:OAH_COSIGN_IDENTITY
+}
+if (-not $PSBoundParameters.ContainsKey("CosignIssuer") -and $env:OAH_COSIGN_ISSUER) {
+  $CosignIssuer = $env:OAH_COSIGN_ISSUER
 }
 
 function Fail([string]$Message) {
@@ -83,12 +93,58 @@ function Kube-Json([string[]]$ArgsList) {
   }
 }
 
+function Kube-JsonRequired([string]$Description, [string[]]$ArgsList) {
+  $value = Kube-Json $ArgsList
+  if (-not $value) {
+    Fail "Unable to read $Description with kubectl $($ArgsList -join ' '). Release verification cannot continue without live cluster evidence."
+  }
+  return $value
+}
+
 function Test-LocalImage([string]$Image) {
   return $Image -match '^(localhost|127\.0\.0\.1|\[::1\])(:|/)'
 }
 
 function Test-DigestImage([string]$Image) {
   return $Image -match '@sha256:[a-fA-F0-9]{64}$'
+}
+
+function Add-ImageEntry([System.Collections.Generic.List[object]]$Images, [string]$Id, [string]$Image) {
+  if (-not $Image) { return }
+  $Images.Add([pscustomobject]@{ id = $Id; image = $Image }) | Out-Null
+}
+
+function Add-DeploymentImages([System.Collections.Generic.List[object]]$Images, $Deployment, [string]$Prefix) {
+  if (-not $Deployment) { return }
+  $name = $Deployment.metadata.name
+  $containers = @()
+  if ($Deployment.spec.template.spec.containers) { $containers = @($Deployment.spec.template.spec.containers) }
+  for ($i = 0; $i -lt $containers.Count; $i++) {
+    Add-ImageEntry $Images "$Prefix/$name/container/$($containers[$i].name)" "$($containers[$i].image)"
+  }
+  $initContainers = @()
+  if ($Deployment.spec.template.spec.initContainers) { $initContainers = @($Deployment.spec.template.spec.initContainers) }
+  for ($i = 0; $i -lt $initContainers.Count; $i++) {
+    Add-ImageEntry $Images "$Prefix/$name/initContainer/$($initContainers[$i].name)" "$($initContainers[$i].image)"
+  }
+}
+
+function Add-DspaDeploymentImages([System.Collections.Generic.List[object]]$Images) {
+  $deployments = Kube-JsonRequired "$Namespace deployment list for DSPA runtime image policy" @("get", "deploy", "-n", $Namespace)
+  if (-not $deployments.items) {
+    Fail "Deployment list in namespace '$Namespace' did not include an items array. Release verification cannot prove DSPA runtime images."
+  }
+  $matched = 0
+  foreach ($deployment in @($deployments.items)) {
+    $name = "$($deployment.metadata.name)"
+    if ($name -like "ds-pipeline*" -or $name -like "*$DspaName*") {
+      $matched++
+      Add-DeploymentImages $Images $deployment "dspa-live"
+    }
+  }
+  if ($matched -eq 0) {
+    Fail "No DSPA runtime deployments matched 'ds-pipeline*' or '*$DspaName*' in namespace '$Namespace'. Release verification cannot prove live DSPA sidecar images."
+  }
 }
 
 function Resolve-CosignCommand() {
@@ -138,6 +194,13 @@ function Invoke-Cosign([string[]]$ArgsList) {
   }
 }
 
+function Test-LocalCosignKeyRef([string]$KeyRef) {
+  if (-not $KeyRef) { return $false }
+  if ($KeyRef -match '^(kms|awskms|azurekms|gcpkms|hashivault|k8s)://') { return $false }
+  if ($KeyRef -match '^https?://') { return $false }
+  return $true
+}
+
 function Verify-CosignSignature([string]$Image) {
   Require-Cosign
   if (-not $CosignKeyRef -and (-not $CosignIdentity -or -not $CosignIssuer)) {
@@ -146,6 +209,9 @@ function Verify-CosignSignature([string]$Image) {
   $args = New-Object System.Collections.Generic.List[string]
   $args.Add("verify")
   if ($CosignKeyRef) {
+    if ((Test-LocalCosignKeyRef $CosignKeyRef) -and -not $AllowDevKey) {
+      Fail "Local cosign key references are not accepted for production release verification. Use keyless -CosignIdentity/-CosignIssuer or a KMS-backed -CosignKeyRef, or pass -AllowDevKey only for explicit non-production audit runs."
+    }
     $args.Add("--key")
     $args.Add($CosignKeyRef)
   } else {
@@ -163,16 +229,17 @@ function Verify-CosignSignature([string]$Image) {
 }
 
 function Verify-ImagePolicy([string]$DesiredImage) {
-  $ai = Kube-Json @("get", "deploy", $AiDeployment, "-n", $Namespace)
-  $controller = Kube-Json @("get", "deploy", $ControllerDeployment, "-n", $Namespace)
-  $dspa = Kube-Json @("get", "dspa", $DspaName, "-n", $Namespace)
-  $images = @(
-    [pscustomobject]@{ id = "package"; image = $DesiredImage },
-    [pscustomobject]@{ id = "ai-deployment"; image = "$($ai.spec.template.spec.containers[0].image)" },
-    [pscustomobject]@{ id = "dupa-controller"; image = "$($controller.spec.template.spec.containers[0].image)" },
-    [pscustomobject]@{ id = "dspa-api-server"; image = "$($dspa.spec.apiServer.image)" },
-    [pscustomobject]@{ id = "dspa-mlmd-grpc"; image = "$($dspa.spec.mlmd.grpc.image)" }
-  )
+  $ai = Kube-JsonRequired "$Namespace/$AiDeployment deployment" @("get", "deploy", $AiDeployment, "-n", $Namespace)
+  $controller = Kube-JsonRequired "$Namespace/$ControllerDeployment deployment" @("get", "deploy", $ControllerDeployment, "-n", $Namespace)
+  $dspa = Kube-JsonRequired "$Namespace/$DspaName DSPA" @("get", "dspa", $DspaName, "-n", $Namespace)
+  $images = New-Object System.Collections.Generic.List[object]
+  Add-ImageEntry $images "package" $DesiredImage
+  Add-DeploymentImages $images $ai "core"
+  Add-DeploymentImages $images $controller "core"
+  Add-ImageEntry $images "dspa-api-server" "$($dspa.spec.apiServer.image)"
+  Add-ImageEntry $images "dspa-mlmd-grpc" "$($dspa.spec.mlmd.grpc.image)"
+  Add-ImageEntry $images "dspa-spec/mlmd-envoy" "$($dspa.spec.mlmd.envoy.image)"
+  Add-DspaDeploymentImages $images
 
   foreach ($entry in $images) {
     Write-Output "[oah-release] image=$($entry.id) value=$($entry.image)"
@@ -201,6 +268,7 @@ function Write-ReleaseReport([string]$DesiredImage) {
     cosignKeyRef = $CosignKeyRef
     cosignIdentity = $CosignIdentity
     cosignIssuer = $CosignIssuer
+    allowDevKey = [bool]$AllowDevKey
     skipLocalBuild = [bool]$SkipLocalBuild
     status = "Passed"
     stepsPassed = [int]$StepResults.Count
@@ -222,6 +290,7 @@ function Write-ReleaseReport([string]$DesiredImage) {
   $lines.Add("- Cosign key ref: ``$CosignKeyRef``")
   $lines.Add("- Cosign identity: ``$CosignIdentity``")
   $lines.Add("- Cosign issuer: ``$CosignIssuer``")
+  $lines.Add("- Allow dev key: $AllowDevKey")
   $lines.Add("- Skip local build: $SkipLocalBuild")
   $lines.Add("- Status: Passed")
   $lines.Add("")

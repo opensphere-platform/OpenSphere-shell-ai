@@ -356,7 +356,7 @@ interface VectorMemoryResponse {
   source?: { type?: string; name?: string; namespace?: string; endpoint?: string; message?: string };
   extension?: { name: string; version: string; ready: boolean };
   summary?: { collections: number; chunks: number; ready: boolean };
-  collections?: Array<{ namespace: string; name: string; description: string; chunks: number; updatedAt?: string }>;
+  collections?: Array<{ namespace: string; name: string; description: string; chunks: number; metadata?: Record<string, unknown>; access?: { owner: string; groups: string[] }; updatedAt?: string }>;
 }
 
 interface VectorQueryResponse {
@@ -604,6 +604,15 @@ interface RegistryPromotionItem {
   evaluationPhase?: string;
   metricCount?: number;
   promotedAt?: string;
+  requester?: string;
+  approver?: string;
+  separationOfDuties?: {
+    required?: boolean;
+    allowed?: boolean;
+    requester?: string;
+    approver?: string;
+    reason?: string;
+  };
 }
 
 interface RegistryApprovalAuditItem {
@@ -617,6 +626,15 @@ interface RegistryApprovalAuditItem {
   decision: string;
   evaluationPhase?: string;
   actor?: string;
+  requester?: string;
+  approver?: string;
+  separationOfDuties?: {
+    required?: boolean;
+    allowed?: boolean;
+    requester?: string;
+    approver?: string;
+    reason?: string;
+  };
 }
 
 interface RegistryEvaluationMetricItem {
@@ -3073,7 +3091,7 @@ function phaseClass(phase: string): string {
                     <h3 class="ai-panel-title">Promotion history</h3>
                     <table class="table table-compact ai-mini-table">
                       <thead>
-                        <tr><th>Promotion</th><th>Model</th><th>Stage</th><th>Decision</th><th>Evaluation</th><th>Metrics</th></tr>
+                        <tr><th>Promotion</th><th>Model</th><th>Stage</th><th>Decision</th><th>Requester</th><th>Approver</th><th>SoD</th><th>Evaluation</th><th>Metrics</th></tr>
                       </thead>
                       <tbody>
                         @for (promotion of registryPromotions(); track promotion.namespace + ':' + promotion.name) {
@@ -3082,6 +3100,11 @@ function phaseClass(phase: string): string {
                             <td>{{ promotion.modelName }}:{{ promotion.version }}</td>
                             <td>{{ promotion.stage }}</td>
                             <td><span [class]="'label ' + statusClass(promotion.approvalDecision || promotion.evaluationPhase || 'Pending')">{{ promotion.approvalDecision || '-' }}</span></td>
+                            <td>{{ promotion.requester || promotion.separationOfDuties?.requester || '-' }}</td>
+                            <td>{{ promotion.approver || promotion.separationOfDuties?.approver || '-' }}</td>
+                            <td>
+                              <span [class]="promotion.separationOfDuties?.allowed === false ? 'label label-danger' : promotion.separationOfDuties?.required ? 'label label-success' : 'label label-info'">{{ promotion.separationOfDuties?.reason || 'NotRequired' }}</span>
+                            </td>
                             <td>{{ promotion.evaluationPhase || '-' }}</td>
                             <td>{{ promotion.metricCount || 0 }}</td>
                           </tr>
@@ -3112,7 +3135,7 @@ function phaseClass(phase: string): string {
                     <h3 class="ai-panel-title">Approval audit trail</h3>
                     <table class="table table-compact ai-mini-table">
                       <thead>
-                        <tr><th>Time</th><th>Promotion</th><th>Decision</th><th>Actor</th><th>Evaluation</th></tr>
+                        <tr><th>Time</th><th>Promotion</th><th>Decision</th><th>Actor</th><th>Requester</th><th>Approver</th><th>SoD</th><th>Evaluation</th></tr>
                       </thead>
                       <tbody>
                         @for (entry of registryApprovalAudit(); track entry.id) {
@@ -3121,6 +3144,11 @@ function phaseClass(phase: string): string {
                             <td>{{ entry.namespace }}/{{ entry.promotionRef }}</td>
                             <td><span [class]="'label ' + statusClass(entry.decision)">{{ entry.decision }}</span></td>
                             <td>{{ entry.actor || '-' }}</td>
+                            <td>{{ entry.requester || entry.separationOfDuties?.requester || '-' }}</td>
+                            <td>{{ entry.approver || entry.separationOfDuties?.approver || '-' }}</td>
+                            <td>
+                              <span [class]="entry.separationOfDuties?.allowed === false ? 'label label-danger' : entry.separationOfDuties?.required ? 'label label-success' : 'label label-info'">{{ entry.separationOfDuties?.reason || 'NotRequired' }}</span>
+                            </td>
                             <td>{{ entry.evaluationPhase || '-' }}</td>
                           </tr>
                         }
@@ -5768,6 +5796,34 @@ function phaseClass(phase: string): string {
                     <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="loadVectorMemory()">REFRESH MEMORY</button>
                     <span [class]="vectorMemory()?.summary?.ready ? 'label label-success' : 'label label-warning'">{{ vectorMemory()?.summary?.ready ? 'Ready' : 'Pending' }}</span>
                   </div>
+                  @if (vectorMemory()?.collections?.length) {
+                    <table class="table table-compact ai-mini-table">
+                      <thead>
+                        <tr><th>Collection</th><th>Owner</th><th>Groups</th><th>Chunks</th></tr>
+                      </thead>
+                      <tbody>
+                        @for (collection of vectorMemory()?.collections || []; track collection.namespace + ':' + collection.name) {
+                          <tr>
+                            <td><strong>{{ collection.name }}</strong><p class="ai-footnote">{{ collection.namespace }}</p></td>
+                            <td>{{ collection.access?.owner || '-' }}</td>
+                            <td>{{ (collection.access?.groups || []).join(', ') || '-' }}</td>
+                            <td>{{ collection.chunks }}</td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  }
+                  <form clrForm clrLayout="compact" class="ai-inline-form">
+                    <clr-input-container>
+                      <label>Owner</label>
+                      <input clrInput name="vectorAclOwner" [value]="vectorAclOwner()" (input)="vectorAclOwner.set($any($event.target).value)" />
+                    </clr-input-container>
+                    <clr-input-container>
+                      <label>Groups</label>
+                      <input clrInput name="vectorAclGroups" [value]="vectorAclGroups()" (input)="vectorAclGroups.set($any($event.target).value)" />
+                    </clr-input-container>
+                    <button type="button" class="btn btn-sm btn-outline" [disabled]="saving()" (click)="saveVectorCollectionAccess()">SAVE ACCESS</button>
+                  </form>
                   <form clrForm clrLayout="compact" class="ai-inline-form">
                     <clr-input-container>
                       <label>Query</label>
@@ -6803,6 +6859,8 @@ export class AppComponent implements OnInit, OnDestroy {
   readonly vectorMemory = signal<VectorMemoryResponse | null>(null);
   readonly vectorQueryText = signal('OpenSphere AI Hub model registry and object storage');
   readonly vectorQueryResult = signal<VectorQueryResponse | null>(null);
+  readonly vectorAclOwner = signal('');
+  readonly vectorAclGroups = signal('');
   readonly trainingLifecycle = signal<TrainingLifecycleResponse | null>(null);
   readonly lineageItems = signal<PipelineLineageItem[]>([]);
   readonly trustyMetrics = signal<TrustyMetricItem[]>([]);
@@ -7714,6 +7772,11 @@ export class AppComponent implements OnInit, OnDestroy {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Vector memory failed with HTTP ${res.status}`);
       this.vectorMemory.set(data as VectorMemoryResponse);
+      const first = (data as VectorMemoryResponse).collections?.[0];
+      if (first?.access) {
+        this.vectorAclOwner.set(first.access.owner || '');
+        this.vectorAclGroups.set((first.access.groups || []).join(', '));
+      }
     } catch {
       this.vectorMemory.set(null);
     }
@@ -7757,6 +7820,33 @@ export class AppComponent implements OnInit, OnDestroy {
       if (!res.ok) throw new Error(data.message || data.error || `Vector query failed with HTTP ${res.status}`);
       this.vectorQueryResult.set(data as VectorQueryResponse);
       this.actionMessage.set({ type: 'success', message: `${data.items?.length || 0} vector memory result(s) returned.` });
+    } catch (error) {
+      this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.saving.set(false);
+    }
+  }
+
+  async saveVectorCollectionAccess(): Promise<void> {
+    if (this.saving()) return;
+    this.saving.set(true);
+    this.actionMessage.set(null);
+    try {
+      const namespace = this.createForm().namespace || this.projects()[0]?.name || 'opensphere-system';
+      const res = await fetch(`${this.apiBase}/memory/vector/collections`, {
+        method: 'PATCH',
+        headers: this.actionHeaders(),
+        body: JSON.stringify({
+          namespace,
+          collection: 'oah-vector-memory',
+          owner: this.vectorAclOwner(),
+          groups: this.vectorAclGroups().split(',').map((item) => item.trim()).filter(Boolean),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || data.error || `Vector access update failed with HTTP ${res.status}`);
+      this.vectorMemory.set(data.state as VectorMemoryResponse);
+      this.actionMessage.set({ type: 'success', message: `Vector collection access updated in ${namespace}.` });
     } catch (error) {
       this.actionMessage.set({ type: 'danger', message: error instanceof Error ? error.message : String(error) });
     } finally {

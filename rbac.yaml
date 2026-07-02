@@ -66,7 +66,7 @@ rules:
     resources: ["pipelines", "pipelineruns"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["datasciencepipelinesapplications.opendatahub.io"]
-    resources: ["datasciencepipelinesapplications"]
+    resources: ["datasciencepipelinesapplications", "datasciencepipelinesapplications/api"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["datasciencecluster.opendatahub.io"]
     resources: ["datascienceclusters"]
@@ -254,6 +254,7 @@ rules:
     resourceNames:
       - "oah-external-gpu-credentials"
       - "ai-hub-backbone-postgres"
+      - "ai-hub-backbone-postgres-app"
       - "oah-dspa-postgres"
       - "ai-hub-backbone-rustfs"
       - "ai-hub-kserve-s3"

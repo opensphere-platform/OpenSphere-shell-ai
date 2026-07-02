@@ -31,6 +31,7 @@ const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const releaseVerifier = read('scripts/verify-oah-release.ps1');
 const productionPreflightVerifier = read('scripts/verify-production-preflight.ps1');
+const tokenVerifier = read('scripts/verify-oah-id-token.js');
 const promotionVerifier = read('scripts/promote-oah-images.ps1');
 const registryLoginVerifier = read('scripts/login-release-registry.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
@@ -62,6 +63,7 @@ for (const endpoint of [
   '/admin/native/support-services/backbone/claim',
   '/admin/native/support-services/backbone/bindings/preview',
   '/admin/native/support-services/backbone/bindings',
+  '/memory/vector/collections',
 ]) {
   requireText('server support-services API', server, endpoint);
 }
@@ -106,6 +108,12 @@ for (const uiText of [
   'Preview observability foundation',
   'Object storage bootstrap',
   'Metadata credential bootstrap',
+  'SAVE ACCESS',
+  'vectorAclOwner',
+  '/memory/vector/collections',
+  'Requester',
+  'Approver',
+  'separationOfDuties',
 ]) {
   requireText('Support services UI', app, uiText);
 }
@@ -154,15 +162,20 @@ requirePattern('server DSPA apiVersion', server, /datasciencepipelinesapplicatio
 requirePattern('server DSPA external storage', server, /externalStorage:\s*\{/);
 requirePattern('server DSPA API image digest', server, /DSPA_API_SERVER_IMAGE[\s\S]*ghcr\.io\/opensphere-platform\/oah-ds-pipelines-api-server@sha256:[a-f0-9]{64}/);
 requirePattern('server DSPA MLMD image digest', server, /DSPA_MLMD_GRPC_IMAGE[\s\S]*ghcr\.io\/opensphere-platform\/oah-mlmd-grpc-postgres-wrapper@sha256:[a-f0-9]{64}/);
-requirePattern('server DSPO public kube-rbac-proxy image', server, /quay\.io\/openshift\/origin-kube-rbac-proxy:latest/);
-requirePattern('server DSPO public MLMD envoy image', server, /docker\.io\/envoyproxy\/envoy:v1\.31-latest/);
+requirePattern('server DSPO public kube-rbac-proxy image digest', server, /quay\.io\/openshift\/origin-kube-rbac-proxy@sha256:[a-f0-9]{64}/);
+requirePattern('server DSPO public MLMD envoy image digest', server, /docker\.io\/envoyproxy\/envoy@sha256:[a-f0-9]{64}/);
+requirePattern('server DSPO persistence agent image digest', server, /quay\.io\/opendatahub\/ds-pipelines-persistenceagent@sha256:[a-f0-9]{64}/);
+requirePattern('server DSPO scheduled workflow image digest', server, /quay\.io\/opendatahub\/ds-pipelines-scheduledworkflow@sha256:[a-f0-9]{64}/);
+requirePattern('server DSPO workflow controller image digest', server, /quay\.io\/opendatahub\/ds-pipelines-argo-workflowcontroller@sha256:[a-f0-9]{64}/);
 requirePattern('server DSPA TLS compatibility', server, /function ensureDspaTlsCompatibility/);
 requirePattern('server DSPA network compatibility', server, /function ensureDspaNetworkCompatibility/);
 requirePattern('server DSPO image compatibility', server, /function ensureDspoImageCompatibility/);
 requirePattern('server DSPA GHCR pull secret constant', server, /const GHCR_PULL_SECRET\s*=\s*'ghcr-pull'/);
 requirePattern('server DSPA runtime image pull secret repair', server, /async function ensureDspaRuntimeImagePullSecrets/);
+requirePattern('server KFP authenticated proxy fallback', server, /function kfpProxyFetchOptions[\s\S]*Authorization: `Bearer \$\{tok\(\)\}`[\s\S]*function kfpApiBases[\s\S]*https:\/\/ds-pipeline-\$\{name\}\.\$\{namespace\}\.svc\.cluster\.local:8443/);
+requirePattern('server KFP api network policy compatibility', server, /function dspaApiCompatibilityNetworkPolicyManifest[\s\S]*allow-ai-runtime-kfp-api[\s\S]*app: 'ai'[\s\S]*port: 8888/);
 requirePattern('server pipelines configure admin path', server, /\/admin\/native\/support-services\/pipelines\/configure/);
-requirePattern('server pipelines configure controller apply', server, /async function configurePipelinesFoundation[\s\S]*const applyReq = null;[\s\S]*ensureDspaRuntimeImagePullSecrets\(applyReq\)/);
+requirePattern('server pipelines configure audited controller apply', server, /async function configurePipelinesFoundation[\s\S]*const actor = await requestActor\(req\);[\s\S]*const applyReq = \{ _internal: true, _actor: actor \};[\s\S]*ensureDspaRuntimeImagePullSecrets\(applyReq\)/);
 requirePattern('server upstream parity inventory', server, /async function upstreamParityInventory/);
 requirePattern('server upstream parity route', server, /\/admin\/native\/upstream-parity/);
 requirePattern('server upstream parity operator precision', server, /namespaceMatchingPodsReady/);
@@ -187,10 +200,41 @@ requirePattern('server shell token header', server, /headers\['x-shell-token'\]\
 requirePattern('server serving approval gate', server, /async function servingApprovalGate/);
 requirePattern('server inference approval enforcement', server, /UnapprovedModelArtifact/);
 requirePattern('server vector bootstrap authz', server, /pathname === '\/memory\/vector\/bootstrap'[\s\S]*requireAdminAccess/);
-requirePattern('server vector query authn', server, /pathname === '\/memory\/vector\/query'[\s\S]*requestActor\(req\)/);
+requirePattern('server vector collection ownership schema', server, /oah_vector_collections[\s\S]*owner text not null default 'opensphere-ai-hub'[\s\S]*groups jsonb not null default '\[\]'::jsonb/);
+requirePattern('server vector central policy schema', server, /create table if not exists oah_vector_access_policies[\s\S]*primary key \(namespace, collection\)/);
+requirePattern('server vector list owner filter', server, /pathname === '\/memory\/vector'[\s\S]*requestActor\(req\)[\s\S]*vectorMemoryResponse\(req\.url, req\)/);
+requirePattern('server vector owner group access', server, /function actorCanAccessVectorCollection[\s\S]*actorIsAdmin\(actor\)[\s\S]*vectorCollectionOwner[\s\S]*vectorCollectionGroups/);
+requirePattern('server vector owner/admin manage access', server, /function actorCanManageVectorCollection[\s\S]*actorIsAdmin\(actor\)[\s\S]*vectorCollectionOwner/);
+requirePattern('server vector group aliases', server, /function identityGroupAliases[\s\S]*replace\(\s*\/\^\\\/\+/);
+requirePattern('server identity group claim extraction', server, /const IDENTITY_GROUP_CLAIM_KEYS[\s\S]*groups_name[\s\S]*function identityGroupsFromClaims[\s\S]*realm_access[\s\S]*resource_access/);
+requirePattern('server admin group alias matching', server, /function actorIsAdmin[\s\S]*identityGroupAliases\(actor\?\.groups[\s\S]*identityGroupAliases\(ADMIN_GROUPS\)/);
+requirePattern('server vector retrieval policy source', server, /const VECTOR_RETRIEVAL_CRD\s*=\s*'vectorretrievalclaims\.ai\.foundation\.opensphere\.io'[\s\S]*function vectorRetrievalAccessPolicy/);
+requirePattern('server vector policy augments DB ACL', server, /async function vectorCollectionWithPolicy[\s\S]*vectorRetrievalPolicyFor[\s\S]*policySource/);
+requirePattern('server vector backbone central policy source', server, /function vectorBackbonePolicySource[\s\S]*BackboneVectorAccessPolicy[\s\S]*async function upsertVectorBackboneAccessPolicy/);
+requirePattern('server vector central policy batch load', server, /async function vectorBackboneAccessPolicyMap[\s\S]*oah_vector_access_policies[\s\S]*vectorMemoryState[\s\S]*vectorCollectionWithPolicy\(row, backbonePolicies\.get/);
+requirePattern('server vector ACL writes policy CR', server, /async function upsertVectorRetrievalAccessPolicy[\s\S]*kind: 'VectorRetrievalClaim'[\s\S]*access:\s*\{[\s\S]*owner:[\s\S]*groups:/);
+requirePattern('server vector ACL update API', server, /async function updateVectorCollectionAccess[\s\S]*update oah_vector_collections[\s\S]*owner = \$5[\s\S]*groups = \$6::jsonb/);
+requirePattern('server vector ACL update syncs central policy', server, /async function updateVectorCollectionAccess[\s\S]*upsertVectorBackboneAccessPolicy\(client/);
+requirePattern('server vector ACL update syncs policy', server, /async function updateVectorCollectionAccess[\s\S]*upsertVectorRetrievalAccessPolicy[\s\S]*policy/);
+requirePattern('server vector query collection authz', server, /pathname === '\/memory\/vector\/query'[\s\S]*requireVectorCollectionAccess\(req, pathname, namespace, collection\)/);
+requirePattern('server vector ACL route authz', server, /pathname === '\/memory\/vector\/collections'[\s\S]*requireVectorCollectionManageAccess\(req, pathname, namespace, collection\)/);
 requirePattern('server append-only approval audit helper', server, /function appendApprovalAudit/);
 requirePattern('server approval audit insert-only', server, /oah_model_registry_approval_audit[\s\S]*on conflict \(id\) do nothing/);
+requirePattern('server promotion SoD helper', server, /function promotionSeparationOfDuties[\s\S]*SelfApprovalDenied[\s\S]*RequesterApproverSeparated/);
+requirePattern('server promotion SoD enforcement', server, /approved && !separationOfDuties\.allowed[\s\S]*ApprovalSoDViolation[\s\S]*patchPromotionStatus/);
+requirePattern('server serving blocks SoD violation', server, /function promotionAllowsServing[\s\S]*approvalsodviolation[\s\S]*separationOfDuties\.allowed !== true/);
+requirePattern('server promotion requester annotation', server, /opensphere\.io\/requested-by[\s\S]*opensphere\.io\/requested-at/);
+requirePattern('server promotion approver annotation', server, /opensphere\.io\/approved-by[\s\S]*opensphere\.io\/approved-at/);
+requirePattern('server model registry app role secret', server, /BACKBONE_POSTGRES_APP_SECRET\s*=\s*'ai-hub-backbone-postgres-app'/);
+requirePattern('server model registry app role migration', server, /async function ensureModelRegistryAppRole[\s\S]*grant select, insert on oah_model_registry_approval_audit[\s\S]*revoke update, delete, truncate on oah_model_registry_approval_audit/);
+requirePattern('server model registry runtime app role preference', server, /async function modelRegistryRuntimeConfig[\s\S]*backbonePostgresAppConfig\(\)[\s\S]*owner-fallback/);
+requirePattern('server model registry app role avoids delete prune', server, /async function upsertModelRegistryPgState[\s\S]*allowPrune = config\.role !== 'app'[\s\S]*if \(allowPrune\)[\s\S]*delete from oah_model_registry_versions[\s\S]*if \(allowPrune\)[\s\S]*delete from oah_model_registry_promotions/);
+requirePattern('server model registry app role refresh helper', server, /async function refreshModelRegistryAppRole[\s\S]*_modelRegistryPgMigrationReady = false[\s\S]*ensureModelRegistryPgMigration\(\)[\s\S]*modelRegistryAppRoleUsable\(\)/);
+requirePattern('server model registry configure refreshes app role', server, /async function configureModelRegistryFoundation[\s\S]*refreshModelRegistryAppRole\(\)[\s\S]*native-registry-postgres-app-role[\s\S]*Backbone PostgreSQL restricted app role/);
 requirePattern('server monitoring synthetic fallback', server, /NoMeasuredMetricSource[\s\S]*syntheticMetrics/);
+requirePattern('server TrustyAI metric fetch parser', server, /function trustyaiSamplesFromText[\s\S]*function trustyaiSamplesFromJson[\s\S]*function fetchTrustyaiMetricSamples/);
+requirePattern('server TrustyAI measured coverage gate', server, /function trustyaiSamplesCoverMetrics[\s\S]*selectTrustyaiSample[\s\S]*if \(measured\.samples\.length && trustyaiSamplesCoverMetrics/);
+requirePattern('server upstream parity TrustyAI measured evidence', server, /const trustySamples = trustyInfo\?\.ready \? await fetchTrustyaiMetricSamples[\s\S]*TrustyAIService[\s\S]*numeric metric sample/);
 requirePattern('server backbone response', server, /backbone,\s*\n\s*upstreamParity,\s*\n\s*productFlow,\s*\n\s*setupPrerequisites/);
 requireText('AI plugin package KFP pod label', pluginPackage, 'podLabels:');
 requireText('AI plugin package KFP pod label', pluginPackage, 'pipelines.kubeflow.org/v2_component: "true"');
@@ -223,12 +267,20 @@ for (const verifierText of [
   'ghcr.io/opensphere-platform/oah-mlmd-grpc-postgres-wrapper@sha256:',
   'DSPA MLMD image',
   '/pipelines/backend',
+  'apiProbe=',
+  'AbortSignal.timeout(10000)',
   'KFP smoke record',
   'KFP seed pipeline',
   '/memory/vector',
   'pgvector',
   '/models/registry/versions',
   'model registry storage=',
+  'ds-pipeline-$DspaName.$Namespace.svc.cluster.local:8443',
+  'sourceRole=',
+  'restricted app role',
+  'SodSmokePromotionName',
+  'ApprovalSoDViolation',
+  'SoD self-approval audit record',
   'model registry mirror versions=',
   'monitoring target=',
   '/monitoring/trustyai/metrics',
@@ -242,6 +294,11 @@ for (const releaseVerifierText of [
   'RequireLiveBrowser = $true',
   'dspa-api-server',
   'dspa-mlmd-grpc',
+  'dspa-spec/mlmd-envoy',
+  'Add-DspaDeploymentImages',
+  'Kube-JsonRequired',
+  'Release verification cannot continue without live cluster evidence',
+  'No DSPA runtime deployments matched',
 ]) {
   requireText('release verifier strict gate', releaseVerifier, releaseVerifierText);
 }
@@ -249,7 +306,19 @@ for (const releaseVerifierText of [
 for (const preflightVerifierText of [
   'dspa-api-server-image',
   'dspa-mlmd-grpc-image',
+  'dspa-mlmd-envoy-image',
+  'Add-Dspa-Deployment-Image-Checks',
   'Add-Image-Check',
+  'Add-Signature-TrustRoot-Check',
+  'image-signature-trust-root',
+  'RequireProductionReady',
+  'RequireSignedImages',
+  'OAH_COSIGN_KEY_REF',
+  'OAH_COSIGN_IDENTITY',
+  'OAH_COSIGN_ISSUER',
+  'KMS-backed CosignKeyRef',
+  'dspa-live-deployments-readable',
+  'dspa-live-deployments-present',
 ]) {
   requireText('production preflight DSPA image gate', productionPreflightVerifier, preflightVerifierText);
 }
@@ -320,6 +389,13 @@ for (const preflightText of [
   'serving-contract',
   'live-browser-token',
   'OAH_ID_TOKEN',
+  'verify-oah-id-token.js',
+  '--use-system-ca',
+  'Add-LiveBrowserToken-Check',
+  'RequiredTokenIssuer',
+  'RequiredTokenAudience',
+  'OAH_REQUIRED_TOKEN_ISSUER',
+  'OAH_REQUIRED_TOKEN_AUDIENCE',
   'oah-production-preflight-$Stamp.json',
   'phase=',
 ]) {
@@ -370,8 +446,13 @@ for (const releaseText of [
   'CosignKeyRef',
   'CosignIdentity',
   'CosignIssuer',
+  'OAH_COSIGN_KEY_REF',
+  'OAH_COSIGN_IDENTITY',
+  'OAH_COSIGN_ISSUER',
   'Resolve-CosignCommand',
   'Require-Cosign',
+  'Test-LocalCosignKeyRef',
+  'KMS-backed -CosignKeyRef',
   'Verify-CosignSignature',
   'cosign $($ArgsList -join',
   'npm.cmd test',
@@ -394,9 +475,32 @@ for (const liveBrowserText of [
   'support-services-live-browser',
   'OAH_ID_TOKEN',
   'OAH_LIVE_ROUTE',
+  'verifyTokenWithHelper',
+  'verify-oah-id-token.js',
+  '--use-system-ca',
+  'signatureVerified',
+  'OAH_REQUIRED_TOKEN_ISSUER',
+  'OAH_REQUIRED_TOKEN_AUDIENCE',
+  'issuer mismatch',
+  'audience mismatch',
+  'decodeJwtHeader',
+  'signed JWT with a signature segment',
+  'alg=none is not accepted',
+  'identityGroupClaimKeys',
+  'groups_name',
+  'realm_access',
+  'resource_access',
+  'OAH_ID_TOKEN does not contain any supported group claim',
   'Page.addScriptToEvaluateOnNewDocument',
+  'awaitPromise: true',
   '__OPENSPHERE_ID_TOKEN__',
   'x-os-id-token',
+  '/api/plugins/ai/admin/native/final-readiness',
+  'authenticated final-readiness browser fetch',
+  '/api/plugins/ai/memory/vector/collections',
+  'authenticated vector owner/group browser smoke',
+  'oah-live-browser-smoke',
+  'Vector owner/group browser smoke failed',
   '/api/plugins/ai/',
   'oah product flow readiness',
   'gpu training smoke',
@@ -406,6 +510,29 @@ for (const liveBrowserText of [
   'checks passed',
 ]) {
   requireText('live browser support-services verifier', liveBrowserVerifier, liveBrowserText);
+}
+
+for (const tokenVerifierText of [
+  'OAH_ID_TOKEN',
+  'OAH_REQUIRED_TOKEN_ISSUER',
+  'OAH_REQUIRED_TOKEN_AUDIENCE',
+  'OAH_SKIP_TOKEN_SIGNATURE_VERIFY',
+  'OAH_ALLOW_UNSIGNED_ID_TOKEN_FOR_TESTS',
+  'must not be used for production verification',
+  '.well-known/openid-configuration',
+  'jwks_uri',
+  'crypto.createPublicKey',
+  'joseEcdsaSignatureToDer',
+  'ES256',
+  'OAH_ID_TOKEN signature did not verify against issuer JWKS',
+  'OAH_ID_TOKEN kid',
+  'alg=none is not accepted',
+  'groups_name',
+  'realm_access',
+  'resource_access',
+  'signatureVerified',
+]) {
+  requireText('OAH ID token verifier', tokenVerifier, tokenVerifierText);
 }
 
 for (const productFlowText of [
@@ -441,6 +568,9 @@ for (const upstreamVerifierText of [
   'latestReadyRevision',
   'Upstream Model Registry',
   'TrustyAI monitoring',
+  'FetchTrustyMetricEvidence',
+  'numeric metric sample',
+  'measured metric evidence is missing',
   'RequireAll',
   'requiredMissing',
   'upstream-parity',

@@ -114,6 +114,114 @@ function IsReady($Object) {
   return $condition -and $condition.status -eq "True"
 }
 
+function FindAiPod() {
+  $pods = KubeJson @("get", "pods", "-n", $Namespace, "-l", "app=ai")
+  if (-not $pods -or -not $pods.items) { return "" }
+  $running = @($pods.items | Where-Object {
+    $_.status.phase -eq "Running" -and @($_.status.conditions | Where-Object { $_.type -eq "Ready" -and $_.status -eq "True" }).Count -gt 0
+  })
+  if ($running.Count -lt 1) { return "" }
+  return [string]$running[0].metadata.name
+}
+
+function TrustyEndpoint($Object) {
+  $candidates = @(
+    $Object.status.endpoint,
+    $Object.status.url,
+    $Object.status.metricsEndpoint,
+    $Object.status.serviceUrl,
+    $Object.spec.endpoint,
+    $Object.spec.url
+  ) | Where-Object { $_ }
+  if ($candidates.Count -gt 0) { return [string]$candidates[0] }
+  return ""
+}
+
+function TrustyCandidateUrls($Object) {
+  $namespaceName = [string]$Object.metadata.namespace
+  if (-not $namespaceName) { $namespaceName = $Namespace }
+  $names = New-Object System.Collections.Generic.List[string]
+  foreach ($name in @($Object.metadata.name, "trustyai-service", "trustyai")) {
+    if ($name -and -not $names.Contains([string]$name)) { $names.Add([string]$name) }
+  }
+  $bases = New-Object System.Collections.Generic.List[string]
+  $endpoint = TrustyEndpoint $Object
+  if ($endpoint) { $bases.Add($endpoint) }
+  foreach ($name in $names) {
+    $bases.Add("http://$name.$namespaceName.svc.cluster.local:8080")
+    $bases.Add("http://$name.$namespaceName.svc:8080")
+  }
+  $urls = New-Object System.Collections.Generic.List[string]
+  foreach ($base in $bases) {
+    $normalized = [string]$base
+    if (-not ($normalized -match '^https?://')) { $normalized = "http://$normalized" }
+    $normalized = $normalized.TrimEnd("/")
+    foreach ($path in @("/metrics", "/q/metrics", "/api/v1/metrics", "/api/v1/monitoring/metrics")) {
+      $url = "$normalized$path"
+      if (-not $urls.Contains($url)) { $urls.Add($url) }
+    }
+  }
+  return @($urls.ToArray())
+}
+
+function FetchTrustyMetricEvidence($Object) {
+  $pod = FindAiPod
+  if (-not $pod) {
+    return @{ Samples = 0; Detail = "no ready ai pod available to probe TrustyAI metrics" }
+  }
+  $urlsJson = (TrustyCandidateUrls $Object) | ConvertTo-Json -Compress
+  $urlsB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($urlsJson))
+  $script = @"
+const urls = JSON.parse(Buffer.from(process.env.TRUSTY_URLS_B64, 'base64').toString('utf8'));
+const sampleRe = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*$/i;
+(async () => {
+  let last = '';
+  for (const url of urls) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json, text/plain;q=0.9, */*;q=0.1' } });
+      const text = await res.text();
+      clearTimeout(timeout);
+      if (!res.ok) { last = `${url} HTTP ${res.status}`; continue; }
+      let samples = text.split(/\r?\n/).filter((line) => sampleRe.test(line.trim())).length;
+      if (!samples) {
+        try {
+          const parsed = JSON.parse(text);
+          const walk = (value) => {
+            if (typeof value === 'number' && Number.isFinite(value)) return 1;
+            if (Array.isArray(value)) return value.reduce((sum, item) => sum + walk(item), 0);
+            if (value && typeof value === 'object') return Object.values(value).reduce((sum, item) => sum + walk(item), 0);
+            return 0;
+          };
+          samples = walk(parsed);
+        } catch {}
+      }
+      if (samples > 0) {
+        console.log(JSON.stringify({ samples, url }));
+        return;
+      }
+      last = `${url} returned no numeric samples`;
+    } catch (error) {
+      clearTimeout(timeout);
+      last = `${url} ${error.message || String(error)}`;
+    }
+  }
+  console.log(JSON.stringify({ samples: 0, error: last || 'no TrustyAI metric endpoint responded' }));
+})();
+"@
+  $output = & kubectl exec -n $Namespace $pod -- env "TRUSTY_URLS_B64=$urlsB64" node -e $script 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $output) {
+    return @{ Samples = 0; Detail = "metric probe failed from ai pod $pod" }
+  }
+  try {
+    $parsed = ($output -join "`n") | ConvertFrom-Json
+    return @{ Samples = [int]$parsed.samples; Detail = if ($parsed.samples -gt 0) { "$($parsed.samples) numeric metric sample(s) from $($parsed.url)" } else { [string]$parsed.error } }
+  } catch {
+    return @{ Samples = 0; Detail = "metric probe returned unparseable output" }
+  }
+}
+
 function AddCheck([System.Collections.Generic.List[object]]$Checks, [string]$Id, [string]$Label, [string]$Status, [string]$Evidence, [string]$NextAction, [bool]$Required = $true) {
   $Checks.Add([pscustomobject]@{
     id = $Id
@@ -244,7 +352,19 @@ $trustyInstalled = HasApiResource "trustyaiservices"
 if ($trustyInstalled) {
   $trustyResources = KubeJson @("get", "trustyaiservices", "-A")
   $count = if ($trustyResources -and $trustyResources.items) { @($trustyResources.items).Count } else { 0 }
-  AddCheck $checks "trustyai" "TrustyAI monitoring" ($(if ($count -gt 0) { "Ready" } else { "Missing" })) "trustyaiservices API resource is installed with $count instance(s)." "Run model monitoring and explainability e2e."
+  $readyItems = @($trustyResources.items | Where-Object { IsReady $_ })
+  if ($readyItems.Count -gt 0) {
+    $metricEvidence = FetchTrustyMetricEvidence $readyItems[0]
+    if ($metricEvidence.Samples -gt 0) {
+      AddCheck $checks "trustyai" "TrustyAI monitoring" "Ready" "TrustyAIService $($readyItems[0].metadata.namespace)/$($readyItems[0].metadata.name) is Ready and returned $($metricEvidence.Detail)." "Run model monitoring and explainability e2e for each served model." $false
+    } else {
+      AddCheck $checks "trustyai" "TrustyAI monitoring" "Missing" "TrustyAIService API has $count instance(s), $($readyItems.Count) Ready, but measured metric evidence is missing: $($metricEvidence.Detail)." "Expose TrustyAI numeric metrics before claiming measured monitoring parity." $false
+    }
+  } elseif ($count -gt 0) {
+    AddCheck $checks "trustyai" "TrustyAI monitoring" "Missing" "trustyaiservices API resource is installed with $count instance(s), but none are Ready." "Create a Ready TrustyAIService and expose metrics." $false
+  } else {
+    AddCheck $checks "trustyai" "TrustyAI monitoring" "Missing" "trustyaiservices API resource is installed but no instances were found." "Create a Ready TrustyAIService and expose metrics." $false
+  }
 } else {
   AddCheck $checks "trustyai" "TrustyAI monitoring" "NotInstalled" "No trustyaiservices API resource was discovered." "Install TrustyAI only when drift, bias, and explainability evidence are required." $false
 }

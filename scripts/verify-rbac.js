@@ -74,6 +74,9 @@ if (controller && !hasRule(controller, 'backbone.opensphere.io', 'backboneclaims
 if (controller && !hasRule(controller, 'datasciencepipelinesapplications.opendatahub.io', 'datasciencepipelinesapplications', ['create', 'update', 'patch'])) {
   fail('ai-controller must be able to create/update/patch DataSciencePipelinesApplication resources.');
 }
+if (reader && !hasRule(reader, 'datasciencepipelinesapplications.opendatahub.io', 'datasciencepipelinesapplications/api', ['get'])) {
+  fail('ai-reader must be able to read the DataSciencePipelinesApplication API subresource for KFP proxy access.');
+}
 if (controller && !hasRule(controller, 'networking.k8s.io', 'networkpolicies', ['create', 'update', 'patch'])) {
   fail('ai-controller must be able to create/update/patch NetworkPolicy resources for support-service compatibility.');
 }
@@ -94,6 +97,7 @@ if (credentialReader) {
   const allowedSecrets = new Set([
     'oah-external-gpu-credentials',
     'ai-hub-backbone-postgres',
+    'ai-hub-backbone-postgres-app',
     'oah-dspa-postgres',
     'ai-hub-backbone-rustfs',
     'ai-hub-kserve-s3',
