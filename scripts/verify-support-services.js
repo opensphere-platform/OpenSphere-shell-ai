@@ -267,6 +267,18 @@ for (const promotionText of [
   'aiPinned=',
   'controllerPinned=',
   'Replace-RegexFile',
+  'SignImages',
+  'VerifySignatures',
+  'CosignKeyRef',
+  'CosignIdentity',
+  'CosignIssuer',
+  'Require-Cosign',
+  'Sign-Image',
+  'Verify-ImageSignature',
+  'Invoke-Cosign @("sign"',
+  '.Add("verify")',
+  'Signatures',
+  'verificationRequested',
 ]) {
   requireText('OAH image promotion verifier', promotionVerifier, promotionText);
 }
@@ -283,6 +295,12 @@ for (const releaseText of [
   'Test-DigestImage',
   'uses local registry',
   'not pinned to a sha256 digest',
+  'CosignKeyRef',
+  'CosignIdentity',
+  'CosignIssuer',
+  'Require-Cosign',
+  'Verify-CosignSignature',
+  'cosign $($ArgsList -join',
   'npm.cmd test',
   'test:contracts',
   'verify-live-support-services.ps1',
@@ -358,3 +376,4 @@ for (const upstreamVerifierText of [
 }
 
 if (!process.exitCode) console.log('[support-services] regression checks passed');
+

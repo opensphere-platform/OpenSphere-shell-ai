@@ -6,6 +6,9 @@ param(
   [switch]$SkipLocalBuild,
   [string]$ReportDir = "release-reports",
   [string]$Namespace = "opensphere-system",
+  [string]$CosignKeyRef = "",
+  [string]$CosignIdentity = "",
+  [string]$CosignIssuer = "",
   [string]$AiDeployment = "ai",
   [string]$ControllerDeployment = "dupa-registry-controller"
 )
@@ -78,6 +81,42 @@ function Test-DigestImage([string]$Image) {
   return $Image -match '@sha256:[a-fA-F0-9]{64}$'
 }
 
+function Require-Cosign() {
+  $cmd = Get-Command cosign -ErrorAction SilentlyContinue
+  if (-not $cmd) {
+    Fail "cosign was not found. Install cosign or run without -RequireSignedImages."
+  }
+}
+
+function Invoke-Cosign([string[]]$ArgsList) {
+  Write-Output "[oah-release] cosign $($ArgsList -join ' ')"
+  & cosign @ArgsList
+  if ($LASTEXITCODE -ne 0) {
+    Fail "cosign $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Verify-CosignSignature([string]$Image) {
+  Require-Cosign
+  $args = New-Object System.Collections.Generic.List[string]
+  $args.Add("verify")
+  if ($CosignKeyRef) {
+    $args.Add("--key")
+    $args.Add($CosignKeyRef)
+  } else {
+    if ($CosignIdentity) {
+      $args.Add("--certificate-identity")
+      $args.Add($CosignIdentity)
+    }
+    if ($CosignIssuer) {
+      $args.Add("--certificate-oidc-issuer")
+      $args.Add($CosignIssuer)
+    }
+  }
+  $args.Add($Image)
+  Invoke-Cosign $args.ToArray()
+}
+
 function Verify-ImagePolicy([string]$DesiredImage) {
   $ai = Kube-Json @("get", "deploy", $AiDeployment, "-n", $Namespace)
   $controller = Kube-Json @("get", "deploy", $ControllerDeployment, "-n", $Namespace)
@@ -95,6 +134,9 @@ function Verify-ImagePolicy([string]$DesiredImage) {
     if ($RequireSignedImages -and -not (Test-DigestImage $entry.image)) {
       Fail "Image '$($entry.id)' is not pinned to a sha256 digest ('$($entry.image)') but -RequireSignedImages was set."
     }
+    if ($RequireSignedImages -and (Test-DigestImage $entry.image)) {
+      Verify-CosignSignature $entry.image
+    }
   }
 }
 
@@ -108,6 +150,9 @@ function Write-ReleaseReport([string]$DesiredImage) {
     requireLiveBrowser = [bool]$RequireLiveBrowser
     requireRemoteImages = [bool]$RequireRemoteImages
     requireSignedImages = [bool]$RequireSignedImages
+    cosignKeyRef = $CosignKeyRef
+    cosignIdentity = $CosignIdentity
+    cosignIssuer = $CosignIssuer
     skipLocalBuild = [bool]$SkipLocalBuild
     status = "Passed"
     stepsPassed = [int]$StepResults.Count
@@ -126,6 +171,9 @@ function Write-ReleaseReport([string]$DesiredImage) {
   $lines.Add("- Require live browser: $RequireLiveBrowser")
   $lines.Add("- Require remote images: $RequireRemoteImages")
   $lines.Add("- Require signed images: $RequireSignedImages")
+  $lines.Add("- Cosign key ref: ``$CosignKeyRef``")
+  $lines.Add("- Cosign identity: ``$CosignIdentity``")
+  $lines.Add("- Cosign issuer: ``$CosignIssuer``")
   $lines.Add("- Skip local build: $SkipLocalBuild")
   $lines.Add("- Status: Passed")
   $lines.Add("")

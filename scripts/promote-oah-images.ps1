@@ -9,6 +9,11 @@ param(
   [string]$PackagePath = "uipluginpackage.yaml",
   [string]$ControllerDeploymentPath = "..\OpenSphere-console\backend\dupa-control\dupa-registry-controller.yaml",
   [string]$ReportDir = "release-reports",
+  [switch]$SignImages,
+  [switch]$VerifySignatures,
+  [string]$CosignKeyRef = "",
+  [string]$CosignIdentity = "",
+  [string]$CosignIssuer = "",
   [switch]$DryRun,
   [switch]$UpdateManifests
 )
@@ -62,6 +67,51 @@ function Push-Image([string]$Source, [string]$Target) {
   return $Matches[1]
 }
 
+function Require-Cosign() {
+  $cmd = Get-Command cosign -ErrorAction SilentlyContinue
+  if (-not $cmd) {
+    Fail "cosign was not found. Install cosign or run without -SignImages/-VerifySignatures."
+  }
+}
+
+function Invoke-Cosign([string[]]$ArgsList) {
+  Write-Output "[oah-promote] cosign $($ArgsList -join ' ')"
+  & cosign @ArgsList
+  if ($LASTEXITCODE -ne 0) {
+    Fail "cosign $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
+  }
+}
+
+function Sign-Image([string]$PinnedRef) {
+  Require-Cosign
+  if ($CosignKeyRef) {
+    Invoke-Cosign @("sign", "--yes", "--key", $CosignKeyRef, $PinnedRef)
+  } else {
+    Invoke-Cosign @("sign", "--yes", $PinnedRef)
+  }
+}
+
+function Verify-ImageSignature([string]$PinnedRef) {
+  Require-Cosign
+  $args = New-Object System.Collections.Generic.List[string]
+  $args.Add("verify")
+  if ($CosignKeyRef) {
+    $args.Add("--key")
+    $args.Add($CosignKeyRef)
+  } else {
+    if ($CosignIdentity) {
+      $args.Add("--certificate-identity")
+      $args.Add($CosignIdentity)
+    }
+    if ($CosignIssuer) {
+      $args.Add("--certificate-oidc-issuer")
+      $args.Add($CosignIssuer)
+    }
+  }
+  $args.Add($PinnedRef)
+  Invoke-Cosign $args.ToArray()
+}
+
 function Replace-RegexFile([string]$PathValue, [string]$Pattern, [string]$Replacement) {
   $text = Get-Content -Raw -LiteralPath $PathValue
   $updated = [regex]::Replace($text, $Pattern, $Replacement)
@@ -93,7 +143,7 @@ try {
 
   Write-Output "[oah-promote] aiSource=$AiSourceImage aiTarget=$aiTarget"
   Write-Output "[oah-promote] controllerSource=$ControllerSourceImage controllerTarget=$controllerTarget"
-  Write-Output "[oah-promote] dryRun=$DryRun updateManifests=$UpdateManifests"
+  Write-Output "[oah-promote] dryRun=$DryRun updateManifests=$UpdateManifests signImages=$SignImages verifySignatures=$VerifySignatures"
 
   $aiDigest = ""
   $controllerDigest = ""
@@ -107,6 +157,32 @@ try {
 
   $aiPinned = "$AiRepository@$aiDigest"
   $controllerPinned = "$ControllerRepository@$controllerDigest"
+
+  $signatureStatus = [ordered]@{
+    requested = [bool]$SignImages
+    verificationRequested = [bool]$VerifySignatures
+    mode = $(if ($CosignKeyRef) { "key" } else { "keyless" })
+    ai = "NotRequested"
+    controller = "NotRequested"
+  }
+  if (($SignImages -or $VerifySignatures) -and $DryRun) {
+    $signatureStatus.ai = "Planned"
+    $signatureStatus.controller = "Planned"
+    Write-Output "[oah-promote] dry-run signature plan uses cosign against digest refs after push"
+  } else {
+    if ($SignImages) {
+      Sign-Image $aiPinned
+      Sign-Image $controllerPinned
+      $signatureStatus.ai = "Signed"
+      $signatureStatus.controller = "Signed"
+    }
+    if ($VerifySignatures) {
+      Verify-ImageSignature $aiPinned
+      Verify-ImageSignature $controllerPinned
+      $signatureStatus.ai = $(if ($SignImages) { "SignedAndVerified" } else { "Verified" })
+      $signatureStatus.controller = $(if ($SignImages) { "SignedAndVerified" } else { "Verified" })
+    }
+  }
 
   if ($UpdateManifests) {
     if ($DryRun) {
@@ -135,6 +211,7 @@ try {
       digest = $controllerDigest
       pinned = $controllerPinned
     }
+    signatures = [pscustomobject]$signatureStatus
     updateManifests = [bool]$UpdateManifests
   }
   $jsonPath = Join-Path $reportPath "oah-image-promotion-$Stamp.json"
@@ -152,6 +229,14 @@ try {
   $lines.Add("|---|---|---|---|")
   $lines.Add("| AI shell | ``$AiSourceImage`` | ``$aiTarget`` | ``$aiPinned`` |")
   $lines.Add("| DUPA controller | ``$ControllerSourceImage`` | ``$controllerTarget`` | ``$controllerPinned`` |")
+  $lines.Add("")
+  $lines.Add("## Signatures")
+  $lines.Add("")
+  $lines.Add("- Requested: $($signatureStatus.requested)")
+  $lines.Add("- Verification requested: $($signatureStatus.verificationRequested)")
+  $lines.Add("- Mode: ``$($signatureStatus.mode)``")
+  $lines.Add("- AI shell: $($signatureStatus.ai)")
+  $lines.Add("- DUPA controller: $($signatureStatus.controller)")
   $lines | Set-Content -LiteralPath $mdPath -Encoding UTF8
 
   Write-Output "[oah-promote] aiPinned=$aiPinned"
@@ -161,3 +246,4 @@ try {
 } finally {
   Pop-Location
 }
+
