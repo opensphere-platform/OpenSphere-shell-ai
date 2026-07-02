@@ -30,6 +30,7 @@ const app = read('src/app/app.component.ts');
 const liveVerifier = read('scripts/verify-live-support-services.ps1');
 const productFlowVerifier = read('scripts/verify-oah-product-flow.ps1');
 const releaseVerifier = read('scripts/verify-oah-release.ps1');
+const promotionVerifier = read('scripts/promote-oah-images.ps1');
 const browserVerifier = read('scripts/verify-support-services-browser.js');
 const liveBrowserVerifier = read('scripts/verify-live-support-services-browser.js');
 const upstreamParityVerifier = read('scripts/verify-upstream-parity.ps1');
@@ -249,8 +250,26 @@ requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm ru
 requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
 requireText('package scripts', packageJson, 'test:release');
+requireText('package scripts', packageJson, 'release:promote-images');
 requireText('browser support-services verifier', browserVerifier, '/usr/bin/chromium');
 requireText('gitignore release reports', gitignore, 'release-reports/');
+
+for (const promotionText of [
+  'oah-promote',
+  'TargetRegistry',
+  'TargetNamespace',
+  'DryRun',
+  'UpdateManifests',
+  'Push-Image',
+  'docker push',
+  'sha256:',
+  'oah-image-promotion-$Stamp.json',
+  'aiPinned=',
+  'controllerPinned=',
+  'Replace-RegexFile',
+]) {
+  requireText('OAH image promotion verifier', promotionVerifier, promotionText);
+}
 
 for (const releaseText of [
   'oah-release',
