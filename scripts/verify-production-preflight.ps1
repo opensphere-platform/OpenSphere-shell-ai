@@ -127,7 +127,7 @@ try {
     Add-Check "registry-auth" "Blocked" "Docker config has no auth entry for $TargetRegistry." "Run docker login $TargetRegistry on the release runner."
   }
 
-  foreach ($image in @("localhost:5000/ai:v203", "localhost:5000/dupa-registry-controller:bb21")) {
+  foreach ($image in @("localhost:5000/ai:v203", "localhost:5000/dupa-registry-controller:bb22")) {
     if (Docker-Image-Exists $image) {
       Add-Check "local-image-$image" "Ready" "$image exists locally for promotion."
     } else {

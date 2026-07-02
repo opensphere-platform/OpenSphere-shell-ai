@@ -1,4 +1,4 @@
-apiVersion: plugins.opensphere.io/v1alpha1
+﻿apiVersion: plugins.opensphere.io/v1alpha1
 kind: UIPluginPackage
 metadata:
   name: ai
@@ -11,9 +11,14 @@ spec:
   serviceAccountName: ai-runtime
   podLabels:
     pipelines.kubeflow.org/v2_component: "true"
+  env:
+    - name: OSP_ADMIN_GROUPS
+      value: "opensphere-console-admins,opensphere-admins,system:masters,cluster-admins"
+    - name: KANIDM_JWKS_URL
+      value: "https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk"
   image:
-    repository: localhost:5000/ai
-    digest: v203
+    repository: ghcr.io/opensphere-platform/ai
+    digest: sha256:1b399ca73510d4b563235a578c601d26da5ef5e6b80e478f30085427d55b46cd
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"

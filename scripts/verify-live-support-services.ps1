@@ -71,7 +71,9 @@ if (Test-Path $PackagePath) {
   if (-not $repositoryMatch.Success -or -not $digestMatch.Success) {
     Fail "Could not read desired image repository/digest from $PackagePath."
   }
-  $desiredImage = "$($repositoryMatch.Groups[1].Value):$($digestMatch.Groups[1].Value)"
+  $repo = $repositoryMatch.Groups[1].Value
+  $digest = $digestMatch.Groups[1].Value
+  $desiredImage = if ($digest.StartsWith("sha256:")) { "$repo@$digest" } else { "$repo`:$digest" }
   Write-Output "[support-services-live] desired image=$desiredImage"
   if ($image -ne $desiredImage) {
     Fail "Deployment image $image does not match desired image $desiredImage."

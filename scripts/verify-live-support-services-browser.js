@@ -131,7 +131,7 @@ async function waitForRuntime(client, expression, label, timeoutMs = 45000) {
   let last;
   while (Date.now() < deadline) {
     const result = await client.send('Runtime.evaluate', { expression, returnByValue: true }).catch((error) => ({ error }));
-    last = result.error ? result.error.message : result.result?.value;
+    last = result.error ? result.error.message : result.result?.result?.value;
     if (last) return last;
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
@@ -145,8 +145,8 @@ async function waitForRuntime(client, expression, label, timeoutMs = 45000) {
       events: (window.__oahLiveBrowserEvents || []).slice(-10)
     }))()`,
     returnByValue: true,
-  }).catch(() => ({ result: { value: {} } }));
-  throw new Error(`${label} did not become true. Last=${JSON.stringify(last)} Debug=${JSON.stringify(debug.result.value)}`);
+  }).catch(() => ({ result: { result: { value: {} } } }));
+  throw new Error(`${label} did not become true. Last=${JSON.stringify(last)} Debug=${JSON.stringify(debug.result.result.value)}`);
 }
 
 async function main() {
@@ -186,6 +186,20 @@ async function main() {
       source: `
         (() => {
           const token = ${JSON.stringify(token)};
+          const authority = 'https://auth.console.opensphere.dev/oauth2/openid/opensphere-console';
+          const clientId = 'opensphere-console';
+          const decode = (part) => JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '=')));
+          const profile = decode(token.split('.')[1] || '');
+          try {
+            window.sessionStorage.setItem('oidc.user:' + authority + ':' + clientId, JSON.stringify({
+              id_token: token,
+              access_token: token,
+              token_type: 'Bearer',
+              scope: 'openid profile email groups_name groups',
+              profile,
+              expires_at: profile.exp || Math.floor(Date.now() / 1000) + 3600,
+            }));
+          } catch {}
           window.__OSP_ID_TOKEN__ = token;
           window.__OPENSPHERE_ID_TOKEN__ = token;
           window.__OS_AUTH__ = { token };
@@ -248,7 +262,7 @@ async function main() {
       })()`,
       returnByValue: true,
     });
-    const value = rendered.result.value;
+    const value = rendered.result.result.value;
     assert(value.missing.length === 0, `Missing live rendered text: ${value.missing.join(', ')}`);
     assert(value.fetchErrors.length === 0, `Live browser fetch errors: ${value.fetchErrors.join('; ')}`);
     assert(value.buttons.some((button) => button.text.includes('Refresh') || button.text.includes('REFRESH')), 'Refresh button was not rendered.');

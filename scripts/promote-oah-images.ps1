@@ -3,7 +3,7 @@ param(
   [string]$TargetNamespace = "opensphere-platform",
   [string]$ReleaseTag = "",
   [string]$AiSourceImage = "localhost:5000/ai:v203",
-  [string]$ControllerSourceImage = "localhost:5000/dupa-registry-controller:bb21",
+  [string]$ControllerSourceImage = "localhost:5000/dupa-registry-controller:bb22",
   [string]$AiRepository = "",
   [string]$ControllerRepository = "",
   [string]$PackagePath = "uipluginpackage.yaml",
@@ -43,7 +43,7 @@ function Require-Image([string]$Image) {
 }
 
 function Invoke-Docker([string[]]$ArgsList) {
-  Write-Output "[oah-promote] docker $($ArgsList -join ' ')"
+  Write-Host "[oah-promote] docker $($ArgsList -join ' ')"
   & docker @ArgsList
   if ($LASTEXITCODE -ne 0) {
     Fail "docker $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
@@ -52,10 +52,10 @@ function Invoke-Docker([string[]]$ArgsList) {
 
 function Push-Image([string]$Source, [string]$Target) {
   Invoke-Docker @("tag", $Source, $Target)
-  Write-Output "[oah-promote] docker push $Target"
+  Write-Host "[oah-promote] docker push $Target"
   $pushOutput = @(& docker push $Target 2>&1)
   foreach ($line in $pushOutput) {
-    Write-Output $line
+    Write-Host $line
   }
   if ($LASTEXITCODE -ne 0) {
     Fail "docker push $Target failed with exit code $LASTEXITCODE."

@@ -35,7 +35,7 @@ const internalK8sActor = () => `system:serviceaccount:${serviceAccountNamespace(
 const AI_CLAIM_FINALIZER = 'ai.opensphere.io/finalizer';
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
-const ADMIN_GROUPS = (process.env.OSP_ADMIN_GROUPS || 'opensphere-admins,system:masters,cluster-admins')
+const ADMIN_GROUPS = (process.env.OSP_ADMIN_GROUPS || 'opensphere-console-admins,opensphere-admins,system:masters,cluster-admins')
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
@@ -52,7 +52,7 @@ const KANIDM_ISSUERS = (process.env.KANIDM_ISS || DEFAULT_KANIDM_ISSUERS.join(',
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
-const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://kanidm-core.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
+const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
 const KANIDM_TLS_SERVERNAME = process.env.KANIDM_TLS_SERVERNAME || 'kanidm.opensphere-console-auth.svc';
 const KANIDM_AZP = process.env.KANIDM_AZP || 'opensphere-console';
 const KANIDM_CA_PATH = process.env.KANIDM_CA_PATH || '/etc/kanidm-ca/ca.crt';
