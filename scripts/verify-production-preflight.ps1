@@ -28,6 +28,21 @@ function Command-Exists([string]$Name) {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Resolve-CosignCommand() {
+  foreach ($name in @("cosign", "cosign-windows-amd64")) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+  }
+  $wingetPath = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Sigstore.Cosign_Microsoft.Winget.Source_8wekyb3d8bbwe\cosign-windows-amd64.exe"
+  if (Test-Path -LiteralPath $wingetPath) { return $wingetPath }
+  $wingetRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+  if (Test-Path -LiteralPath $wingetRoot) {
+    $match = Get-ChildItem $wingetRoot -Recurse -File -Filter "cosign*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match) { return $match.FullName }
+  }
+  return $null
+}
+
 function Invoke-Text([scriptblock]$Command) {
   try {
     $global:LASTEXITCODE = 0
@@ -81,8 +96,9 @@ try {
     }
   }
 
-  if (Command-Exists "cosign") {
-    Add-Check "tool-cosign" "Ready" "cosign is available for image signature verification."
+  $cosign = Resolve-CosignCommand
+  if ($cosign) {
+    Add-Check "tool-cosign" "Ready" "cosign is available for image signature verification: $cosign"
   } else {
     Add-Check "tool-cosign" "Blocked" "cosign is missing." "Install cosign before running -SignImages or -RequireSignedImages."
   }

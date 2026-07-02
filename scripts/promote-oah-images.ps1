@@ -67,8 +67,23 @@ function Push-Image([string]$Source, [string]$Target) {
   return $Matches[1]
 }
 
+function Resolve-CosignCommand() {
+  foreach ($name in @("cosign", "cosign-windows-amd64")) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+  }
+  $wingetPath = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Sigstore.Cosign_Microsoft.Winget.Source_8wekyb3d8bbwe\cosign-windows-amd64.exe"
+  if (Test-Path -LiteralPath $wingetPath) { return $wingetPath }
+  $wingetRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+  if (Test-Path -LiteralPath $wingetRoot) {
+    $match = Get-ChildItem $wingetRoot -Recurse -File -Filter "cosign*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($match) { return $match.FullName }
+  }
+  return $null
+}
+
 function Require-Cosign() {
-  $cmd = Get-Command cosign -ErrorAction SilentlyContinue
+  $cmd = Resolve-CosignCommand
   if (-not $cmd) {
     Fail "cosign was not found. Install cosign or run without -SignImages/-VerifySignatures."
   }
@@ -76,7 +91,8 @@ function Require-Cosign() {
 
 function Invoke-Cosign([string[]]$ArgsList) {
   Write-Output "[oah-promote] cosign $($ArgsList -join ' ')"
-  & cosign @ArgsList
+  $cosign = Require-Cosign
+  & $cosign @ArgsList
   if ($LASTEXITCODE -ne 0) {
     Fail "cosign $($ArgsList -join ' ') failed with exit code $LASTEXITCODE."
   }
