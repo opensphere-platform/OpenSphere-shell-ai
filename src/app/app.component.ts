@@ -7310,7 +7310,8 @@ export class AppComponent implements OnInit, OnDestroy {
     const uiRoute = String(route || '')
       .replace(/^https?:\/\/[^/]+/i, '')
       .replace(/^\/+/, '')
-      .replace(/^ai\/?/, '');
+      .replace(/^p\/ai\/?/, '') // 표준 접두사(/p/ai/...)
+      .replace(/^ai\/?/, ''); // 구형 bare 접두사(/ai/...) — 하위호환
     const clusterBase = PAGE_ROUTE['cluster-settings'];
     if (uiRoute === clusterBase || uiRoute.startsWith(`${clusterBase}/`)) {
       const tabRoute = uiRoute === clusterBase ? 'setup' : uiRoute.slice(clusterBase.length + 1).split('/')[0];
@@ -7342,10 +7343,12 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
+  /** 표준: `/p/<id>/서브패스` (콘솔 라우터가 `/p/` 네임스페이스만 소유 — bare `/ai/...`는 legacy, 제거됨).
+   * currentUiRoute()는 'ai' 세그먼트를 값으로 찾아 그 뒤를 취하므로 접두사 변경에 영향받지 않는다. */
   private routeUrl(page: PageId, tab = this.clusterSettingsTab()): string {
     const route = PAGE_ROUTE[page];
     const tabRoute = page === 'cluster-settings' && tab !== 'setup' ? `/${CLUSTER_SETTINGS_TAB_ROUTE[tab]}` : '';
-    return route ? `/ai/${route}${tabRoute}` : '/ai';
+    return route ? `/p/ai/${route}${tabRoute}` : '/p/ai';
   }
 
   private writeRoute(page: PageId, push: boolean, tab = this.clusterSettingsTab()): void {
