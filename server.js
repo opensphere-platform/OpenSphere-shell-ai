@@ -8586,19 +8586,17 @@ function oahAgentToolsManifest() {
       id: 'oah.support-services.configure',
       command: 'os ai support-services configure --component <serving|pipelines|model-registry|observability|distributed> --preview|--apply',
       method: 'GET/POST',
-      previewPaths: [
-        '/admin/native/support-services/serving/preview',
-        '/admin/native/support-services/pipelines/preview',
-        '/admin/native/support-services/model-registry/preview',
-        '/admin/native/support-services/observability/preview',
-        '/admin/native/support-services/distributed/preview',
-      ],
-      applyPaths: [
-        '/admin/native/support-services/serving/configure',
-        '/admin/native/support-services/pipelines/configure',
-        '/admin/native/support-services/model-registry/configure',
-        '/admin/native/support-services/observability/configure',
-        '/admin/native/support-services/distributed/configure',
+      // component별로 preview(GET)/apply(POST) 경로가 다르다 — os는 --component 값으로 이 맵에서
+      // 골라 쓴다(하드코딩된 경로 문자열을 os 소스에 두지 않기 위함).
+      components: {
+        serving: { previewPath: '/admin/native/support-services/serving/preview', applyPath: '/admin/native/support-services/serving/configure' },
+        pipelines: { previewPath: '/admin/native/support-services/pipelines/preview', applyPath: '/admin/native/support-services/pipelines/configure' },
+        'model-registry': { previewPath: '/admin/native/support-services/model-registry/preview', applyPath: '/admin/native/support-services/model-registry/configure' },
+        observability: { previewPath: '/admin/native/support-services/observability/preview', applyPath: '/admin/native/support-services/observability/configure' },
+        distributed: { previewPath: '/admin/native/support-services/distributed/preview', applyPath: '/admin/native/support-services/distributed/configure' },
+      },
+      params: [
+        { name: 'component', flag: 'component', in: 'route', required: true, type: 'string', enum: ['serving', 'pipelines', 'model-registry', 'observability', 'distributed'] },
       ],
       risk: 'high',
       scope: 'oah:admin',
@@ -8620,12 +8618,24 @@ function oahAgentToolsManifest() {
       id: 'oah.gpu.bridge',
       command: 'os ai gpu bridge <health|capabilities|register|smoke|training-smoke> --preview|--apply',
       method: 'POST',
-      paths: [
-        '/admin/native/gpu-bridge/health',
-        '/admin/native/gpu-bridge/capabilities',
-        '/admin/native/gpu-bridge/register',
-        '/admin/native/gpu-bridge/smoke',
-        '/admin/native/gpu-bridge/training-smoke',
+      // sub-operation은 세 번째 positional 토큰("os ai gpu bridge <op>")으로 고른다.
+      operations: {
+        health: { path: '/admin/native/gpu-bridge/health' },
+        capabilities: { path: '/admin/native/gpu-bridge/capabilities' },
+        register: { path: '/admin/native/gpu-bridge/register' },
+        smoke: { path: '/admin/native/gpu-bridge/smoke' },
+        'training-smoke': { path: '/admin/native/gpu-bridge/training-smoke' },
+      },
+      params: [
+        { name: 'endpoint', flag: 'endpoint', in: 'body', required: false, type: 'string' },
+        { name: 'namespace', flag: 'namespace', in: 'body', required: false, type: 'string', default: 'opensphere-system' },
+        { name: 'credentialSecret', flag: 'credential-secret', in: 'body', required: false, type: 'string' },
+        { name: 'token', flag: 'token', in: 'body', required: false, type: 'string' },
+        { name: 'profile', flag: 'profile', in: 'body', required: false, type: 'string' },
+        { name: 'name', flag: 'name', in: 'body', required: false, type: 'string' },
+        { name: 'resourceName', flag: 'resource-name', in: 'body', required: false, type: 'string' },
+        { name: 'maxConcurrency', flag: 'max-concurrency', in: 'body', required: false, type: 'number' },
+        { name: 'trainingJobName', flag: 'training-job-name', in: 'body', required: false, type: 'string' },
       ],
       risk: 'medium',
       scope: 'oah:compute:write',
@@ -8637,6 +8647,12 @@ function oahAgentToolsManifest() {
       command: 'os ai vector query --namespace <ns> --collection <name> --text <query>',
       method: 'POST',
       path: '/memory/vector/query',
+      params: [
+        { name: 'namespace', flag: 'namespace', in: 'body', required: false, type: 'string', default: 'opensphere-system' },
+        { name: 'collection', flag: 'collection', in: 'body', required: true, type: 'string', default: 'oah-vector-memory' },
+        { name: 'query', flag: 'text', in: 'body', required: true, type: 'string' },
+        { name: 'limit', flag: 'limit', in: 'body', required: false, type: 'number', default: 5 },
+      ],
       risk: 'medium',
       scope: 'oah:vector:read',
       lifecycle: ['apply', 'report'],
@@ -8647,6 +8663,13 @@ function oahAgentToolsManifest() {
       command: 'os ai vector ingest --namespace <ns> --collection <name> --file <path> --preview|--apply',
       method: 'POST',
       path: '/memory/vector/ingest',
+      params: [
+        { name: 'namespace', flag: 'namespace', in: 'body', required: false, type: 'string', default: 'default' },
+        { name: 'collection', flag: 'collection', in: 'body', required: false, type: 'string', default: 'default-memory' },
+        { name: 'documentId', flag: 'document-id', in: 'body', required: false, type: 'string' },
+        // content는 --file 로 준 로컬 파일을 os가 읽어서 채운다(파일 내용 자체를 값으로 보내진 않음).
+        { name: 'content', flag: 'file', in: 'body', required: true, type: 'file' },
+      ],
       risk: 'high',
       scope: 'oah:vector:write',
       lifecycle,
@@ -8664,9 +8687,15 @@ function oahAgentToolsManifest() {
     },
     {
       id: 'oah.models.versions.register',
-      command: 'os ai model register --name <name> --version <version> --artifact <uri>',
+      command: 'os ai model register --name <name> --version <version> --stage <stage> --source <source>',
       method: 'POST',
       path: '/models/registry/versions',
+      params: [
+        { name: 'name', flag: 'name', in: 'body', required: true, type: 'string' },
+        { name: 'version', flag: 'version', in: 'body', required: true, type: 'string' },
+        { name: 'stage', flag: 'stage', in: 'body', required: false, type: 'string', default: 'development' },
+        { name: 'source', flag: 'source', in: 'body', required: false, type: 'string', default: 'manual-registration' },
+      ],
       risk: 'medium',
       scope: 'oah:model:write',
       lifecycle,
@@ -8674,19 +8703,35 @@ function oahAgentToolsManifest() {
     },
     {
       id: 'oah.pipeline.run',
-      command: 'os ai pipeline run --pipeline <name> --namespace <ns> --watch',
+      command: 'os ai pipeline run --pipeline <name> --namespace <ns> --run-name <name> --dataset-ref <ref>',
       method: 'POST',
       path: '/operations/pipelines/run',
+      params: [
+        { name: 'name', flag: 'pipeline', in: 'body', required: true, type: 'string' },
+        { name: 'namespace', flag: 'namespace', in: 'body', required: false, type: 'string', default: 'default' },
+        { name: 'runName', flag: 'run-name', in: 'body', required: false, type: 'string' },
+        { name: 'datasetRef', flag: 'dataset-ref', in: 'body', required: false, type: 'string' },
+      ],
       risk: 'medium',
       scope: 'oah:pipeline:run',
       lifecycle,
-      description: 'Create a PipelineRunClaim and follow execution evidence.',
+      description: 'Create a PipelineRunClaim and follow execution evidence. --watch polling is not implemented server-side yet; run returns the initial claim state only.',
     },
     {
       id: 'oah.inference.update',
-      command: 'os ai inference deploy --name <name> --namespace <ns> --preview|--apply',
+      // 단기 조치(2026-07-03 OAH 검토): /operations/inference는 POST 하나뿐이고 별도 preview
+      // 경로가 없다 — command 문구가 --preview를 지원하는 것처럼 보이면 안 되므로 제거했다.
+      // 장기: OAH가 /operations/inference/preview를 추가하면 previewPath를 선언하고 다시 넣는다.
+      command: 'os ai inference deploy --name <name> --namespace <ns> --runtime <runtime> --model-ref <ref> --apply (apply-only guarded — no preview path yet)',
       method: 'POST',
       path: '/operations/inference',
+      params: [
+        { name: 'name', flag: 'name', in: 'body', required: true, type: 'string' },
+        { name: 'namespace', flag: 'namespace', in: 'body', required: false, type: 'string', default: 'default' },
+        { name: 'runtime', flag: 'runtime', in: 'body', required: false, type: 'string', default: 'kserve' },
+        { name: 'modelRef', flag: 'model-ref', in: 'body', required: false, type: 'string', default: 'trained-model' },
+        { name: 'promotionRef', flag: 'promotion-ref', in: 'body', required: false, type: 'string' },
+      ],
       risk: 'high',
       scope: 'oah:serve:apply',
       lifecycle,
@@ -8698,10 +8743,15 @@ function oahAgentToolsManifest() {
       command: 'os ai audit list --correlation-id <id>',
       method: 'GET',
       path: '/admin/native/audit-log',
+      // 주의: nativeAuditLog()는 인자를 받지 않는다(서버가 correlation-id로 필터링하지 않음) —
+      // --correlation-id는 os가 응답 목록을 받은 뒤 클라이언트 쪽에서 후필터링한다(clientSideFilter).
+      params: [
+        { name: 'correlationId', flag: 'correlation-id', in: 'clientSideFilter', required: false, type: 'string' },
+      ],
       risk: 'low',
       scope: 'oah:audit:read',
       lifecycle: ['report'],
-      description: 'Read OAH controller and security audit entries for human or agent operations.',
+      description: 'Read OAH controller and security audit entries for human or agent operations. correlation-id filtering happens client-side; the API itself does not yet accept a filter parameter.',
     },
   ];
   return {
@@ -8716,8 +8766,11 @@ function oahAgentToolsManifest() {
     },
     security: {
       headers: {
-        auth: 'Authorization: Bearer <OpenSphere PAT or delegated agent token>',
-        idToken: 'x-os-id-token: <Kanidm/OIDC id_token when available>',
+        // OAH authenticates on x-os-id-token alone (JWKS/issuer/audience/group claim
+        // verification). Authorization: Bearer carries the OpenSphere PAT for BFF/registry
+        // calls only — OAH does not accept an opaque PAT as x-os-id-token (2026-07-03 review).
+        auth: 'Authorization: Bearer <OpenSphere PAT> (BFF/registry only — not evaluated by OAH)',
+        idToken: 'x-os-id-token: <Kanidm/OIDC id_token, or an OAH-verifiable delegated agent JWT> (required for OAH API calls)',
         correlation: 'X-OS-Correlation-ID: <stable user-request or agent-task id>',
         idempotency: 'X-OS-Idempotency-Key: <required for mutating apply calls>',
       },
