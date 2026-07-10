@@ -10,8 +10,8 @@ spec:
   hostCompat: ">=1.0.0 <2.0.0"
   displayName: "OpenSphere AI Hub"
   owner: platform-experience
-  version: 0.1.0
-  description: "OpenSphere AI Hub operations dashboard"
+  version: 1.0.0
+  description: "CONSTITUTION-0003 Production subShell reference for OpenSphere AI operations"
   serviceAccountName: ai-runtime
   podLabels:
     pipelines.kubeflow.org/v2_component: "true"
@@ -19,16 +19,16 @@ spec:
     - name: OSP_ADMIN_GROUPS
       value: "opensphere-console-admins,opensphere-admins,system:masters,cluster-admins"
     - name: KANIDM_JWKS_URL
-      value: "https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk"
+      value: "https://opensphere-auth.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk"
   image:
     repository: ai
-    digest: sha256:b43bb8d6d39d97ea678cf895f2427451ab9fd5b4c643de23436d5d10d1f1bd4c
+    digest: sha256:a65af5151f049ad3b1dbd070a2f7a05d89779226f8736814170ba11d32a9e613
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"
   manifest:
     path: /plugins/ui-shell.manifest.json
-    sha256: "9317947886be172674bd5ce4a55a9e9c1ef663b06a9f1d541898ab8c9a1f3aab"
+    sha256: "fd2039f2e852d9d70e345f2d33bf1edc9ab2d8202fbbf458025bba6df9dd177b"
     signaturePath: /plugins/ui-shell.manifest.json.sig
   trust:
     keyId: opensphere-plugins-v1
@@ -36,17 +36,23 @@ spec:
   permissions:
     - page:register
     - api:proxy
+    - nav:contribute
+    - search:contribute
+    - notify:publish
   api:
     basePath: /api/plugins/ai
+  cli:
+    namespace: ai
+    manifestPath: /admin/native/agent-tools
   contributions:
     page: { enabled: true }
-    navigation: { enabled: false, mode: "none", reason: "OpenSphere AI Hub owns navigation inside its page" }
+    navigation: { enabled: true, mode: "runtime" }
     api: { enabled: true, basePath: "/api/plugins/ai" }
-    cli: { enabled: false, reason: "OpenSphere AI Hub CLI manifest is not published" }
-    manual: { enabled: false, mode: "none", reason: "OpenSphere AI Hub Manual contribution is not published" }
-    search: { enabled: false, mode: "none", reason: "OpenSphere AI Hub search contribution is not published" }
-    notification: { enabled: false, frontend: false, backend: false, reason: "OpenSphere AI Hub notification contribution is not published" }
-    observability: { enabled: false, logs: false, metrics: false, traces: false, reason: "OpenSphere AI Hub observability contract is not published" }
+    cli: { enabled: true, namespace: "ai", manifestPath: "/admin/native/agent-tools" }
+    manual: { enabled: true, sourceId: "plugin:ai", mode: "install-time" }
+    search: { enabled: true, mode: "runtime" }
+    notification: { enabled: true, frontend: true, backend: true }
+    observability: { enabled: true, logs: true, metrics: true, traces: true }
 ---
 apiVersion: plugins.opensphere.io/v1alpha1
 kind: UIPluginRegistration
@@ -63,4 +69,4 @@ spec:
     exposeInNavigation: true
   approval:
     requestedBy: cmars
-    reason: "OpenSphere AI Hub subShell dashboard deployment"
+    reason: "CONSTITUTION-0003 Production subShell reference deployment"

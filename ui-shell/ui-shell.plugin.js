@@ -1,45 +1,75 @@
-// ─────────────────────────────────────────────────────────────────────────
-// AI — OpenSphere subShell 진입점 (SDK 표준 골격).
-//   셸 계약: ESM activate/deactivate. light DOM. Angular Element <osp-ai-shell>를 셸 본문에 주입.
-//   server.js가 /api/k8s/* 프록시 + WS exec + /app(번들) 서빙.
-// ─────────────────────────────────────────────────────────────────────────
-const TAG = 'osp-ai-shell'; // www/main.js(Angular Elements)가 customElements.define(TAG)
+// OpenSphere AI — CONSTITUTION-0003 Production subShell reference adapter.
+const TAG = 'osp-ai-shell';
+const RELEASE = '1.0.0';
 let injected = false;
-let hostContextInstalled = false;
+let activeContext = null;
 
 function injectOnce(base) {
   if (injected) return;
   injected = true;
-  window.__OSP_NG_API_BASE__ = base; // legacy SDK skeleton compatibility
-  window.__OSP_AI_API_BASE__ = base; // AI dashboard REST endpoints
-  const v = `?v=${Date.now()}`; // 재배포 번들 즉시 반영(PoC 캐시버스터)
+  window.__OSP_NG_API_BASE__ = base;
+  window.__OSP_AI_API_BASE__ = base;
   const css = document.createElement('link');
-  css.rel = 'stylesheet'; css.href = `${base}/app/styles.css${v}`;
+  css.rel = 'stylesheet';
+  css.href = `${base}/app/styles.css?v=${RELEASE}`;
   css.setAttribute('data-osp-plugin', 'ai');
   document.head.appendChild(css);
-  const s = document.createElement('script');
-  s.type = 'module'; s.src = `${base}/app/main.js${v}`;
-  s.setAttribute('data-osp-plugin', 'ai');
-  document.head.appendChild(s);
+  const script = document.createElement('script');
+  script.type = 'module';
+  script.src = `${base}/app/main.js?v=${RELEASE}`;
+  script.setAttribute('data-osp-plugin', 'ai');
+  document.head.appendChild(script);
 }
 
+const navigation = [
+  { id: 'ai-operate', label: 'AI Operations', children: [
+    { id: 'ai-overview', label: 'Overview', route: '/p/ai' },
+    { id: 'ai-workbenches', label: 'Workbenches', route: '/p/ai/workbenches' },
+    { id: 'ai-pipelines', label: 'Pipelines', route: '/p/ai/pipelines' },
+    { id: 'ai-training', label: 'Training', route: '/p/ai/training/jobs' },
+    { id: 'ai-models', label: 'Models', route: '/p/ai/models/registry' },
+    { id: 'ai-inference', label: 'Inference', route: '/p/ai/inference' },
+    { id: 'ai-evaluation', label: 'Evaluation', route: '/p/ai/evaluation/jobs' },
+    { id: 'ai-monitoring', label: 'Monitoring', route: '/p/ai/monitoring/trustyai' },
+  ] },
+];
+
 export function activate(ctx) {
+  activeContext = ctx;
   const base = (ctx.api?.baseUrl ?? '').replace(/\/$/, '');
   const contexts = window.__OPENSPHERE_HOST_CONTEXTS__ ||= Object.create(null);
-  contexts.ai = { api: { baseUrl: base, fetch: ctx.api?.fetch } };
-  hostContextInstalled = true;
+  contexts.ai = { api: { baseUrl: base, fetch: ctx.api?.fetch }, routing: ctx.routing };
   injectOnce(base);
-  ctx.extensions.registerPage({
-    id: ctx.pluginId,
-    title: 'OpenSphere AI Hub',
-    navBand: 'Operate',
-    elementTag: TAG,
+  ctx.extensions.registerPage?.({ id: ctx.pluginId, title: 'OpenSphere AI Hub', navBand: 'Operate', elementTag: TAG });
+  ctx.extensions.nav?.contribute(navigation);
+  ctx.extensions.search?.contribute({
+    async query(q) {
+      const response = await ctx.api.fetch(`search?q=${encodeURIComponent(q)}`);
+      if (!response.ok) return [];
+      const body = await response.json();
+      return Array.isArray(body.items) ? body.items : [];
+    },
+  });
+  ctx.notify?.publish({
+    title: 'OpenSphere AI Hub ready',
+    detail: 'Production subShell capabilities are connected to the Main Shell.',
+    severity: 'success',
+    persistent: false,
+    category: 'AI lifecycle',
+    route: '/p/ai',
+    topic: 'ai.subshell.ready',
+    dedupKey: `ai-ready-${RELEASE}`,
   });
 }
 
 export function deactivate() {
-  if (hostContextInstalled && window.__OPENSPHERE_HOST_CONTEXTS__) delete window.__OPENSPHERE_HOST_CONTEXTS__.ai;
+  activeContext?.extensions.nav?.clear();
+  activeContext?.extensions.search?.clear();
+  activeContext?.notify?.clear();
+  if (window.__OPENSPHERE_HOST_CONTEXTS__) delete window.__OPENSPHERE_HOST_CONTEXTS__.ai;
   document.querySelectorAll('[data-osp-plugin="ai"]').forEach((node) => node.remove());
-  hostContextInstalled = false;
+  delete window.__OSP_NG_API_BASE__;
+  delete window.__OSP_AI_API_BASE__;
+  activeContext = null;
   injected = false;
 }

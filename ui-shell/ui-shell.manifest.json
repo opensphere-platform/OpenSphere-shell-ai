@@ -5,16 +5,19 @@
   "hostRef": "main",
   "hostApiVersion": "1.0.0",
   "hostCompat": ">=1.0.0 <2.0.0",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "title": "OpenSphere AI Hub",
   "description": "OpenSphere OpenSphere AI Hub subShell.",
   "entry": "ui-shell.plugin.js",
-  "entrySha256": "ed0f3e4922d229d2d89909cbab59b59b3da0216cf4f44485733ddcb92db64141",
+  "entrySha256": "37181a2bc8ee73b18374420c62b5757c2b254a130d7581a2d9503a6d491a416e",
   "shellCompat": ">=0.2.0 <0.9.0",
   "sdkVersion": "0.3.6",
   "permissions": [
     "page:register",
-    "api:proxy"
+    "api:proxy",
+    "nav:contribute",
+    "search:contribute",
+    "notify:publish"
   ],
   "nav": {
     "band": "Operate",
@@ -28,40 +31,37 @@
       "enabled": true
     },
     "navigation": {
-      "enabled": false,
-      "mode": "none",
-      "reason": "OpenSphere AI Hub owns navigation inside its page"
+      "enabled": true,
+      "mode": "runtime"
     },
     "api": {
       "enabled": true,
       "basePath": "/api/plugins/ai"
     },
     "cli": {
-      "enabled": false,
-      "reason": "OpenSphere AI Hub CLI manifest is not published"
+      "enabled": true,
+      "namespace": "ai",
+      "manifestPath": "/admin/native/agent-tools"
     },
     "manual": {
-      "enabled": false,
-      "mode": "none",
-      "reason": "OpenSphere AI Hub Manual contribution is not published"
+      "enabled": true,
+      "sourceId": "plugin:ai",
+      "mode": "install-time"
     },
     "search": {
-      "enabled": false,
-      "mode": "none",
-      "reason": "OpenSphere AI Hub search contribution is not published"
+      "enabled": true,
+      "mode": "runtime"
     },
     "notification": {
-      "enabled": false,
-      "frontend": false,
-      "backend": false,
-      "reason": "OpenSphere AI Hub notification contribution is not published"
+      "enabled": true,
+      "frontend": true,
+      "backend": true
     },
     "observability": {
-      "enabled": false,
-      "logs": false,
-      "metrics": false,
-      "traces": false,
-      "reason": "OpenSphere AI Hub observability contract is not published"
+      "enabled": true,
+      "logs": true,
+      "metrics": true,
+      "traces": true
     }
   }
 }

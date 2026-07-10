@@ -7017,16 +7017,21 @@ export class AppComponent implements OnInit, OnDestroy {
   private operationsRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private operationsRefreshInFlight = false;
   private readonly popStateHandler = (): void => this.applyRouteFromLocation();
+  private routeUnsubscribe: (() => void) | null = null;
 
   ngOnInit(): void {
     if (typeof window !== 'undefined') {
-      window.addEventListener('popstate', this.popStateHandler);
+      const routing = this.hostRouting();
+      if (routing) this.routeUnsubscribe = routing.subscribe(() => this.applyRouteFromLocation());
+      else window.addEventListener('popstate', this.popStateHandler);
     }
     void this.refresh().finally(() => this.startOperationsAutoRefresh());
   }
 
   ngOnDestroy(): void {
     if (typeof window !== 'undefined') {
+      this.routeUnsubscribe?.();
+      this.routeUnsubscribe = null;
       window.removeEventListener('popstate', this.popStateHandler);
     }
     this.stopOperationsAutoRefresh();
@@ -7406,7 +7411,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private routeUrl(page: PageId, tab = this.clusterSettingsTab()): string {
     const route = PAGE_ROUTE[page];
     const tabRoute = page === 'cluster-settings' && tab !== 'setup' ? `/${CLUSTER_SETTINGS_TAB_ROUTE[tab]}` : '';
-    return route ? `/p/ai/${route}${tabRoute}` : '/p/ai';
+    const basePath = this.hostRouting()?.basePath || '/p/ai';
+    return route ? `${basePath}/${route}${tabRoute}` : basePath;
   }
 
   private writeRoute(page: PageId, push: boolean, tab = this.clusterSettingsTab()): void {
@@ -7414,11 +7420,10 @@ export class AppComponent implements OnInit, OnDestroy {
     const nextUrl = this.routeUrl(page, tab);
     if (`${window.location.pathname}${window.location.search}${window.location.hash}` === nextUrl) return;
     const state = { page, tab };
-    if (push) {
-      window.history.pushState(state, '', nextUrl);
-    } else {
-      window.history.replaceState(state, '', nextUrl);
-    }
+    const routing = this.hostRouting();
+    if (routing) routing.navigate(nextUrl, { replace: !push });
+    else if (push) window.history.pushState(state, '', nextUrl);
+    else window.history.replaceState(state, '', nextUrl);
   }
 
   private applyRouteFromLocation(): void {
@@ -9285,6 +9290,26 @@ export class AppComponent implements OnInit, OnDestroy {
     return mediated ? mediated(input, init) : window.fetch(input, init);
   }
 
+  private hostRouting(): {
+    basePath: string;
+    currentPath: () => string;
+    navigate: (path: string, options?: { replace?: boolean }) => void;
+    subscribe: (listener: (path: string) => void) => () => void;
+  } | undefined {
+    if (typeof window === 'undefined') return undefined;
+    const w = window as Window & {
+      __OPENSPHERE_HOST_CONTEXTS__?: Record<string, {
+        routing?: {
+          basePath: string;
+          currentPath: () => string;
+          navigate: (path: string, options?: { replace?: boolean }) => void;
+          subscribe: (listener: (path: string) => void) => () => void;
+        };
+      }>;
+    };
+    return w.__OPENSPHERE_HOST_CONTEXTS__?.['ai']?.routing;
+  }
+
   async refresh(): Promise<void> {
     await Promise.all([this.fetchSummary(), this.fetchProjects(), this.fetchCapabilities()]);
     const page = this.activePage();
@@ -9398,10 +9423,12 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private currentUiRoute(): string {
     if (typeof window === 'undefined') return '';
-    const parts = window.location.pathname.split('/').filter(Boolean);
-    const aiIndex = parts.indexOf('ai');
-    if (aiIndex >= 0) return parts.slice(aiIndex + 1).join('/');
-    return parts.join('/');
+    const path = this.hostRouting()?.currentPath() || window.location.pathname;
+    const pathname = new URL(path, window.location.origin).pathname;
+    const basePath = this.hostRouting()?.basePath || '/p/ai';
+    if (pathname === basePath) return '';
+    if (pathname.startsWith(`${basePath}/`)) return pathname.slice(basePath.length + 1);
+    return pathname.split('/').filter(Boolean).join('/');
   }
 
   private initialOpenGroups(): Set<string> {

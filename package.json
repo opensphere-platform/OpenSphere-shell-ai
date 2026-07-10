@@ -1,6 +1,6 @@
 {
   "name": "ai",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "OpenSphere subShell — AI. Angular 22 + Clarity 18, exported as Angular Element <osp-ai-shell>. Standalone project: `ng build` → dist served by server.js (generic K8s proxy + WS exec).",
   "private": true,
   "scripts": {
@@ -8,12 +8,13 @@
     "start": "ng serve",
     "serve:backend": "node server.js",
     "test": "npm run test:contracts && npm run test:ui",
-    "test:contracts": "npm run test:rbac && npm run test:support-services",
+    "test:contracts": "npm run test:rbac && npm run test:support-services && node scripts/verify-constitution-0003.js",
     "test:ui": "npm run build && npm run test:browser-support-services",
     "test:browser-support-services": "node scripts/verify-support-services-browser.js",
     "test:live-browser-support-services": "node scripts/verify-live-support-services-browser.js",
     "test:live-support-services": "powershell -ExecutionPolicy Bypass -File scripts/verify-live-support-services.ps1",
     "release:promote-images": "powershell -ExecutionPolicy Bypass -File scripts/promote-oah-images.ps1",
+    "release:sign-manifest": "node scripts/sign-manifest.cjs",
     "release:login-registry": "powershell -ExecutionPolicy Bypass -File scripts/login-release-registry.ps1",
     "test:product-flow": "powershell -ExecutionPolicy Bypass -File scripts/verify-oah-product-flow.ps1",
     "test:rbac": "node scripts/verify-rbac.js",

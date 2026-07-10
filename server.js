@@ -22,7 +22,7 @@ function tokenFromCookie(cookieHeader) {
 const PORT = process.env.PORT || 8080;
 const PLUGINS = process.env.PLUGINS_DIR || '/app/plugins';
 const WWW = process.env.WWW_DIR || '/app/www';
-const VERSION = process.env.APP_VERSION || '0.1.0';
+const VERSION = process.env.APP_VERSION || '1.0.0';
 const WORKBENCH_IMAGE = process.env.WORKBENCH_IMAGE || 'localhost:5000/ai:workbench';
 const PIPELINE_RUNNER_IMAGE = process.env.PIPELINE_RUNNER_IMAGE || WORKBENCH_IMAGE;
 const INFERENCE_RUNTIME_IMAGE = process.env.INFERENCE_RUNTIME_IMAGE || WORKBENCH_IMAGE;
@@ -53,7 +53,7 @@ const KANIDM_ISSUERS = (process.env.KANIDM_ISS || DEFAULT_KANIDM_ISSUERS.join(',
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
-const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
+const KANIDM_JWKS_URL = process.env.KANIDM_JWKS_URL || 'https://opensphere-auth.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk';
 const KANIDM_TLS_SERVERNAME = process.env.KANIDM_TLS_SERVERNAME || 'kanidm.opensphere-console-auth.svc';
 const KANIDM_AZP = process.env.KANIDM_AZP || 'opensphere-console';
 const KANIDM_CA_PATH = process.env.KANIDM_CA_PATH || '/etc/kanidm-ca/ca.crt';
@@ -986,7 +986,7 @@ function bodyJson(req) {
 
 async function appendSecurityAudit(req, allowed, action, target, reason) {
   const actor = req?._actor || null;
-  await appendAuditLog({
+  const entry = {
     time: new Date().toISOString(),
     type: allowed ? 'Normal' : 'Warning',
     reason: allowed ? 'AccessAllowed' : 'AccessDenied',
@@ -1004,7 +1004,18 @@ async function appendSecurityAudit(req, allowed, action, target, reason) {
     verb: target?.verb || '',
     resource: target?.resource || '',
     apiGroup: target?.group || '',
-  });
+    correlationId: String(req?.headers?.['x-os-correlation-id'] || ''),
+    idempotencyKey: String(req?.headers?.['x-os-idempotency-key'] || ''),
+  };
+  await appendAuditLog(entry);
+  if (WRITE_METHODS.has(req?.method)) {
+    await publishNotify({
+      action: entry.reason,
+      target: `${entry.kind}/${entry.namespace ? `${entry.namespace}/` : ''}${entry.name}`,
+      result: allowed ? 'accepted' : 'denied',
+      reason: `${entry.message}; correlationId=${entry.correlationId}; idempotencyKey=${entry.idempotencyKey}`,
+    }, true);
+  }
 }
 
 async function requireResourceAccess(req, action, { verb, group = '', resource, namespace = '', kind = '', name = '' }) {
@@ -8821,6 +8832,7 @@ const ADMIN_READ_PATHS = new Set([
   '/admin/setup/status',
   '/admin/setup/plan',
   '/memory/vector',
+  '/operations/ledger',
 ]);
 
 async function requireOperationalReadAccess(req, action) {
@@ -8861,6 +8873,10 @@ async function authorizeAiRequest(req, pathname) {
     await authorizeAiReadRequest(req, pathname);
     return;
   }
+  const correlationId = String(req.headers['x-os-correlation-id'] || '');
+  const idempotencyKey = String(req.headers['x-os-idempotency-key'] || '');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(correlationId)) throw { code: 400, msg: 'X-OS-Correlation-ID is required for mutating requests.' };
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)) throw { code: 400, msg: 'X-OS-Idempotency-Key is required for mutating requests.' };
   if (pathname === '/admin/setup/plan') return;
 
   const adminPaths = new Set([
@@ -16223,16 +16239,21 @@ async function summary(req) {
 // 시작/노드 경고를 콘솔 인박스에 발행 = subShell이 콘솔 알림 core와 '유기적' 작동.
 // best-effort: 발행 실패해도 ai 본 기능엔 영향 없음. (manifest 권한 불요 — 백엔드 in-cluster 호출)
 const CONTROLLER = process.env.OSP_CONTROLLER || 'http://dupa-registry-controller.opensphere-system.svc.cluster.local:8080';
-async function publishNotify(ev) {
+async function publishNotify(ev, required = false) {
   try {
-    const headers = { 'content-type': 'application/json', 'x-opensphere-source': 'ai' };
+    const headers = { 'content-type': 'application/json', 'x-opensphere-source': 'ai', authorization: `Bearer ${tok()}` };
     if (process.env.SHELL_SERVICE_TOKEN) headers['x-shell-token'] = process.env.SHELL_SERVICE_TOKEN;
-    await fetch(`${CONTROLLER}/api/admin/events`, {
+    const response = await fetch(`${CONTROLLER}/api/admin/events`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ source: 'ai', ...ev }),
     });
-  } catch (e) { /* 콘솔 알림은 best-effort */ }
+    if (!response.ok) throw new Error(`Console event HTTP ${response.status}`);
+    return true;
+  } catch (e) {
+    if (required) throw Object.assign(new Error(`durable audit unavailable: ${e.message || e}`), { code: 503 });
+    return false;
+  }
 }
 const _notifiedNodes = new Set();
 async function nodeHealthPublish() {
@@ -16308,7 +16329,58 @@ async function k8sProxy(req, res, rawUrl) {
   res.end(text);
 }
 
+const AI_SEARCH_ITEMS = [
+  ['Workbench', 'Notebook and interactive development', '/p/ai/workbenches'],
+  ['Pipeline', 'Pipeline definitions and runs', '/p/ai/pipelines'],
+  ['Training', 'Training jobs and compute', '/p/ai/training/jobs'],
+  ['Model', 'Model registry and promotions', '/p/ai/models/registry'],
+  ['Inference', 'Serving runtimes and endpoints', '/p/ai/inference'],
+  ['Evaluation', 'Evaluation policies and jobs', '/p/ai/evaluation/jobs'],
+  ['Monitoring', 'TrustyAI metrics and alerts', '/p/ai/monitoring/trustyai'],
+];
+
+function aiSearch(rawUrl) {
+  const q = (new URL(rawUrl, 'http://ai.local').searchParams.get('q') || '').trim().toLowerCase();
+  const items = AI_SEARCH_ITEMS
+    .filter(([label, sublabel]) => !q || `${label} ${sublabel}`.toLowerCase().includes(q))
+    .map(([label, sublabel, path]) => ({ label, sublabel, path, kind: 'result' }));
+  return { schema: 'search.opensphere.io/v1alpha1', source: 'ai', items };
+}
+
+function aiManualSource() {
+  return {
+    schema: 'manual.opensphere.io/v1alpha1',
+    sourceId: 'plugin:ai',
+    title: 'OpenSphere AI Hub Manual',
+    route: '/p/ai',
+    manualRoute: '/p/manual',
+    categories: AI_SEARCH_ITEMS.map(([label, , route]) => ({ label, route })),
+  };
+}
+
+function aiOpenApi() {
+  return {
+    openapi: '3.1.0',
+    info: { title: 'OpenSphere AI Hub API', version: VERSION },
+    servers: [{ url: '/api/plugins/ai' }],
+    paths: {
+      '/readyz': { get: { operationId: 'getAiReadiness', responses: { 200: { description: 'AI subShell readiness' } } } },
+      '/search': { get: { operationId: 'searchAiObjects', responses: { 200: { description: 'Search Workbench, Pipeline, Training, Model, Inference, Evaluation and Monitoring objects' } } } },
+      '/admin/native/agent-tools': { get: { operationId: 'getAiToolManifest', responses: { 200: { description: 'os ai tool manifest' } } } },
+      '/operations/ledger': { get: { operationId: 'getAiOperationLedger', responses: { 200: { description: 'Correlated operation and security audit ledger' } } } },
+    },
+  };
+}
+
 const server = http.createServer(async (req, res) => {
+  const requestStartedAt = Date.now();
+  const requestCorrelationId = String(req.headers['x-os-correlation-id'] || '');
+  res.once('finish', () => console.log(JSON.stringify({
+    time: new Date().toISOString(), service: 'opensphere-ai', event: 'http_request',
+    method: req.method, path: new URL(req.url, 'http://ai.local').pathname, status: res.statusCode,
+    durationMs: Date.now() - requestStartedAt, correlationId: requestCorrelationId,
+    traceparent: String(req.headers.traceparent || ''),
+  })));
   // Browser Consumer never receives a raw token. Main Shell injects Authorization;
   // the backend translates it only inside this process for legacy internal helpers.
   const hostBearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
@@ -16318,7 +16390,12 @@ const server = http.createServer(async (req, res) => {
   try {
     await authorizeAiRequest(req, p);
     if (p === '/healthz') { res.writeHead(200); return res.end('ok'); }
+    if (p === '/readyz') return jsonRes(res, 200, { ready: true, service: 'opensphere-ai', version: VERSION, hostContract: '1.0.0', backboneRequired: true });
     if (p === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' }); return res.end(prometheusMetricsText()); }
+    if (p === '/openapi.json') return jsonRes(res, 200, aiOpenApi());
+    if (p === '/search' && req.method === 'GET') return jsonRes(res, 200, aiSearch(req.url));
+    if (p === '/manual/source' && req.method === 'GET') return jsonRes(res, 200, aiManualSource());
+    if (p === '/operations/ledger' && req.method === 'GET') return jsonRes(res, 200, await nativeAuditLog());
     if (p === '/capabilities') return jsonRes(res, 200, await capabilityStatus());
     if (p === '/actions/create' && req.method === 'POST') return jsonRes(res, 201, await createAction(req));
     if (p === '/actions/delete' && req.method === 'DELETE') return jsonRes(res, 200, await deleteAction(req));
