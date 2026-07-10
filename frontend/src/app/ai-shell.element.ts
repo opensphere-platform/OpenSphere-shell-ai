@@ -5180,7 +5180,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/actions/create`, {
+      const res = await this.hostFetch(`${this.apiBase}/actions/create`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.createForm()),
@@ -5206,7 +5206,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/actions/delete`, {
+      const res = await this.hostFetch(`${this.apiBase}/actions/delete`, {
         method: 'DELETE',
         headers: this.actionHeaders(),
         body: JSON.stringify({ page: this.activePage(), kind: item.kind, name, namespace }),
@@ -5240,7 +5240,7 @@ export class AiShellElement implements OnInit, OnDestroy {
         name: item.name,
         namespace: item.namespace || this.createForm().namespace,
       });
-      const res = await fetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Workbench detail failed with HTTP ${res.status}`);
       this.workbenchDetail.set(data as WorkbenchDetailResponse);
@@ -5259,7 +5259,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const session = await fetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
+      const session = await this.hostFetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
       const data = await session.json().catch(() => ({}));
       if (!session.ok) throw new Error(data.error || `Workbench session failed with HTTP ${session.status}`);
       const href = proxyUrl.startsWith('http') ? proxyUrl : `${this.apiBase}${proxyUrl}`;
@@ -5280,7 +5280,7 @@ export class AiShellElement implements OnInit, OnDestroy {
         name: item.name,
         namespace: item.namespace || this.createForm().namespace,
       });
-      const res = await fetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Data connection detail failed with HTTP ${res.status}`);
       this.dataConnectionDetail.set(data as DataConnectionDetailResponse);
@@ -5310,7 +5310,7 @@ export class AiShellElement implements OnInit, OnDestroy {
         namespace: item.namespace || this.createForm().namespace,
         kind: item.kind === 'PipelineRunClaim' ? 'PipelineRunClaim' : 'PipelineClaim',
       });
-      const res = await fetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Pipeline detail failed with HTTP ${res.status}`);
       this.pipelineDetail.set(data as PipelineDetailResponse);
@@ -5331,7 +5331,7 @@ export class AiShellElement implements OnInit, OnDestroy {
         namespace: item.namespace || this.createForm().namespace,
         kind: item.kind === 'InferenceService' ? 'InferenceService' : 'InferenceClaim',
       });
-      const res = await fetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Inference detail failed with HTTP ${res.status}`);
       this.inferenceDetail.set(data as InferenceDetailResponse);
@@ -5381,7 +5381,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadPipelineLogs(item?: ResourceItem): Promise<void> {
     const params = this.itemParams(item);
     try {
-      const res = await fetch(`${this.apiBase}/pipeline/runs/logs?${params}`);
+      const res = await this.hostFetch(`${this.apiBase}/pipeline/runs/logs?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Logs failed with HTTP ${res.status}`);
       this.operationTitle.set(`Logs - ${data.name || item?.name || 'latest run'}`);
@@ -5395,7 +5395,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadPipelineLineage(item?: ResourceItem): Promise<void> {
     const params = this.itemParams(item);
     try {
-      const res = await fetch(`${this.apiBase}/pipeline/runs/lineage?${params}`);
+      const res = await this.hostFetch(`${this.apiBase}/pipeline/runs/lineage?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Lineage failed with HTTP ${res.status}`);
       this.operationTitle.set(`Lineage - ${data.name || item?.name || 'latest run'}`);
@@ -5422,7 +5422,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     try {
       const form = this.createForm();
-      const res = await fetch(`${this.apiBase}/models/registry/upstream/self-test`, {
+      const res = await this.hostFetch(`${this.apiBase}/models/registry/upstream/self-test`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({
@@ -5456,7 +5456,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadNativeCatalog(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/catalog`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/catalog`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Native catalog failed with HTTP ${res.status}`);
       this.nativePlatform.set(data as NativePlatformResponse);
@@ -5467,7 +5467,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadNativeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/backends`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/backends`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Backend detection failed with HTTP ${res.status}`);
       this.nativeBackends.set(data as NativeBackendsResponse);
@@ -5478,7 +5478,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadComputeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/training/compute`);
+      const res = await this.hostFetch(`${this.apiBase}/training/compute`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute backend list failed with HTTP ${res.status}`);
       this.computeBackends.set((data.items ?? []) as ResourceItem[]);
@@ -5490,7 +5490,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadComputeRouting(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/compute-routing`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/compute-routing`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute routing failed with HTTP ${res.status}`);
       this.computeRouting.set(data as ComputeRoutingResponse);
@@ -5510,7 +5510,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/compute-routing`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/compute-routing`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ routes: this.computeRouting().routes.map((route) => ({ id: route.id, primary: route.primary, fallback: route.fallback })) }),
@@ -5529,7 +5529,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadControllerMetrics(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/controller-metrics`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/controller-metrics`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Controller metrics failed with HTTP ${res.status}`);
       this.controllerMetrics.set(data as ControllerMetricsResponse);
@@ -5540,7 +5540,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadAuditLog(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/audit-log`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/audit-log`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Audit log failed with HTTP ${res.status}`);
       this.auditLog.set(data as AuditLogResponse);
@@ -5551,7 +5551,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadFinalReadiness(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/final-readiness`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/final-readiness`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Final readiness failed with HTTP ${res.status}`);
       this.finalReadiness.set(data as FinalReadinessResponse);
@@ -5562,7 +5562,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadGpuInventory(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-inventory`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-inventory`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `GPU inventory failed with HTTP ${res.status}`);
       this.gpuInventory.set(data as GpuInventoryResponse);
@@ -5591,7 +5591,7 @@ export class AiShellElement implements OnInit, OnDestroy {
         credentialSecret: config.credentialSecret,
         maxConcurrency: String(config.maxConcurrency),
       });
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-enablement-plan?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-enablement-plan?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `GPU enablement plan failed with HTTP ${res.status}`);
       this.gpuEnablementPlan.set(data as GpuEnablementPlanResponse);
@@ -5616,7 +5616,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async runGpuBridgeProbe(kind: 'health' | 'capabilities' | 'smoke' | 'register' | 'training-smoke'): Promise<void> {
     try {
       this.saving.set(true);
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-bridge/${kind}`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-bridge/${kind}`, {
         method: 'POST',
         headers: { ...this.actionHeaders(), 'content-type': 'application/json' },
         body: JSON.stringify(this.gpuBridgeRequestBody()),
@@ -5639,7 +5639,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadOahDemoPlan(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-plan`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-plan`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo plan failed with HTTP ${res.status}`);
       this.oahDemoPlan.set(data as OahDemoPlanResponse);
@@ -5652,7 +5652,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadOahDemoRun(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo run status failed with HTTP ${res.status}`);
       this.oahDemoRun.set(data as DemoRunStatusResponse);
@@ -5664,7 +5664,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async previewOahDemoRun(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/preview?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/preview?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo preview failed with HTTP ${res.status}`);
       this.oahDemoPreview.set(data as DemoRunPreviewResponse);
@@ -5677,7 +5677,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadOahDemoEvidence(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/evidence?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/evidence?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo evidence failed with HTTP ${res.status}`);
       this.oahDemoEvidence.set(data as DemoRunEvidenceResponse);
@@ -5689,7 +5689,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadOahDemoSmoke(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke status failed with HTTP ${res.status}`);
       this.oahDemoSmoke.set(data as DemoSmokeStatusResponse);
@@ -5701,7 +5701,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async loadOahDemoSmokeLogs(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke/logs?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke/logs?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke logs failed with HTTP ${res.status}`);
       this.oahDemoSmokeLogs.set(data as DemoSmokeLogsResponse);
@@ -5714,7 +5714,7 @@ export class AiShellElement implements OnInit, OnDestroy {
   async previewOahDemoSmoke(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke/preview?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke/preview?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke preview failed with HTTP ${res.status}`);
       this.oahDemoSmokePreview.set(data as DemoSmokePreviewResponse);
@@ -5729,7 +5729,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -5751,7 +5751,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -5774,7 +5774,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/reset`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/reset`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -6049,7 +6049,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   async loadSetupStatus(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/status`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/status`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Setup status failed with HTTP ${res.status}`);
       this.setupStatus.set(data as SetupStatusResponse);
@@ -6063,7 +6063,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/plan`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/plan`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.setupForm()),
@@ -6083,7 +6083,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/install`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/install`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.setupForm()),
@@ -6107,7 +6107,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(url, {
+      const res = await this.hostFetch(url, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(payload),
@@ -6134,8 +6134,8 @@ export class AiShellElement implements OnInit, OnDestroy {
   private async loadModelVersions(): Promise<void> {
     try {
       const [versionsRes, upstreamRes] = await Promise.all([
-        fetch(`${this.apiBase}/models/registry/versions`),
-        fetch(`${this.apiBase}/models/registry/upstream`),
+        this.hostFetch(`${this.apiBase}/models/registry/versions`),
+        this.hostFetch(`${this.apiBase}/models/registry/upstream`),
       ]);
       const versionsData = await versionsRes.json().catch(() => ({}));
       const upstreamData = await upstreamRes.json().catch(() => ({}));
@@ -6159,7 +6159,7 @@ export class AiShellElement implements OnInit, OnDestroy {
     const params = new URLSearchParams();
     if (item?.name) params.set('target', item.name);
     try {
-      const res = await fetch(`${this.apiBase}/monitoring/trustyai/metrics?${params.toString()}`);
+      const res = await this.hostFetch(`${this.apiBase}/monitoring/trustyai/metrics?${params.toString()}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Metrics failed with HTTP ${res.status}`);
       this.trustyMetrics.set(data.items ?? []);
@@ -6174,7 +6174,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   private async loadOdhComponents(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/odh-components`);
+      const res = await this.hostFetch(`${this.apiBase}/admin/odh-components`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `ODH components failed with HTTP ${res.status}`);
       this.odhComponents.set(data.items ?? []);
@@ -6247,24 +6247,16 @@ export class AiShellElement implements OnInit, OnDestroy {
   }
 
   private actionHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    const token = this.identityToken();
-    if (token) headers['x-os-id-token'] = token;
-    return headers;
+    return { 'content-type': 'application/json' };
   }
 
-  private identityToken(): string {
-    if (typeof window === 'undefined') return '';
+  private hostFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (typeof window === 'undefined') return Promise.reject(new Error('browser Host API unavailable'));
     const w = window as Window & {
-      __OSP_ID_TOKEN__?: string;
-      __OPENSPHERE_ID_TOKEN__?: string;
-      opensphereAuth?: { idToken?: string; token?: string };
-      __OS_AUTH__?: { token?: string | (() => string) };
+      __OPENSPHERE_HOST_CONTEXTS__?: Record<string, { api?: { fetch?: (target: RequestInfo | URL, options?: RequestInit) => Promise<Response> } }>;
     };
-    const shellToken = typeof w.__OS_AUTH__?.token === 'function'
-      ? w.__OS_AUTH__.token()
-      : w.__OS_AUTH__?.token;
-    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || shellToken || '';
+    const mediated = w.__OPENSPHERE_HOST_CONTEXTS__?.['ai']?.api?.fetch;
+    return mediated ? mediated(input, init) : window.fetch(input, init);
   }
 
   async refresh(): Promise<void> {
@@ -6292,7 +6284,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   private async fetchSummary(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/summary`);
+      const res = await this.hostFetch(`${this.apiBase}/summary`);
       if (!res.ok) return;
       this.summary.set(await res.json() as SummaryResponse);
     } catch {
@@ -6302,7 +6294,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   private async fetchProjects(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/projects`);
+      const res = await this.hostFetch(`${this.apiBase}/projects`);
       if (!res.ok) return;
       const data = await res.json() as ProjectListResponse;
       this.projects.set(data.items ?? []);
@@ -6313,7 +6305,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
   private async fetchCapabilities(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/capabilities`);
+      const res = await this.hostFetch(`${this.apiBase}/capabilities`);
       if (!res.ok) return;
       const data = await res.json() as CapabilityResponse;
       this.capabilities.set(data.items ?? []);
@@ -6332,7 +6324,7 @@ export class AiShellElement implements OnInit, OnDestroy {
 
     this.loadingResource.set(true);
     try {
-      const res = await fetch(`${this.apiBase}/${path}`);
+      const res = await this.hostFetch(`${this.apiBase}/${path}`);
       if (!res.ok) {
         this.resourceItems.set([]);
         this.resourceMeta.set({ actualCount: 0, referenceCount: 0, source: 'empty' });

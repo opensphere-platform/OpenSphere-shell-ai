@@ -16309,6 +16309,11 @@ async function k8sProxy(req, res, rawUrl) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Browser Consumer never receives a raw token. Main Shell injects Authorization;
+  // the backend translates it only inside this process for legacy internal helpers.
+  const hostBearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+  if (hostBearer) req.headers['x-os-id-token'] = hostBearer[1];
+  else delete req.headers['x-os-id-token'];
   const p = new URL(req.url, `http://${req.headers.host}`).pathname;
   try {
     await authorizeAiRequest(req, p);

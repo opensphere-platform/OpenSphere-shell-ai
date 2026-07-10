@@ -7452,7 +7452,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/actions/create`, {
+      const res = await this.hostFetch(`${this.apiBase}/actions/create`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.createForm()),
@@ -7478,7 +7478,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/actions/delete`, {
+      const res = await this.hostFetch(`${this.apiBase}/actions/delete`, {
         method: 'DELETE',
         headers: this.actionHeaders(),
         body: JSON.stringify({ page: this.activePage(), kind: item.kind, name, namespace }),
@@ -7531,7 +7531,7 @@ export class AppComponent implements OnInit, OnDestroy {
         name: item.name,
         namespace: item.namespace || this.createForm().namespace,
       });
-      const res = await fetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/workbenches/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Workbench detail failed with HTTP ${res.status}`);
       this.workbenchDetail.set(data as WorkbenchDetailResponse);
@@ -7550,7 +7550,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const session = await fetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
+      const session = await this.hostFetch(`${this.apiBase}/api/session`, { headers: this.actionHeaders() });
       const data = await session.json().catch(() => ({}));
       if (!session.ok) throw new Error(data.error || `Workbench session failed with HTTP ${session.status}`);
       const href = proxyUrl.startsWith('http') ? proxyUrl : `${this.apiBase}${proxyUrl}`;
@@ -7571,7 +7571,7 @@ export class AppComponent implements OnInit, OnDestroy {
         name: item.name,
         namespace: item.namespace || this.createForm().namespace,
       });
-      const res = await fetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/data-connections/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Data connection detail failed with HTTP ${res.status}`);
       this.dataConnectionDetail.set(data as DataConnectionDetailResponse);
@@ -7599,7 +7599,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       const form = this.createForm();
       const namespace = form.namespace || this.projects()[0]?.name || 'opensphere-system';
-      const res = await fetch(`${this.apiBase}/operations/training/lifecycle`, {
+      const res = await this.hostFetch(`${this.apiBase}/operations/training/lifecycle`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({
@@ -7638,7 +7638,7 @@ export class AppComponent implements OnInit, OnDestroy {
         namespace: item.namespace || this.createForm().namespace,
         kind: item.kind === 'PipelineRunClaim' ? 'PipelineRunClaim' : 'PipelineClaim',
       });
-      const res = await fetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/pipelines/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Pipeline detail failed with HTTP ${res.status}`);
       this.pipelineDetail.set(data as PipelineDetailResponse);
@@ -7659,7 +7659,7 @@ export class AppComponent implements OnInit, OnDestroy {
         namespace: item.namespace || this.createForm().namespace,
         kind: item.kind === 'InferenceService' ? 'InferenceService' : 'InferenceClaim',
       });
-      const res = await fetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/inference/detail?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Inference detail failed with HTTP ${res.status}`);
       this.inferenceDetail.set(data as InferenceDetailResponse);
@@ -7709,7 +7709,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadPipelineLogs(item?: ResourceItem): Promise<void> {
     const params = this.itemParams(item);
     try {
-      const res = await fetch(`${this.apiBase}/pipeline/runs/logs?${params}`);
+      const res = await this.hostFetch(`${this.apiBase}/pipeline/runs/logs?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Logs failed with HTTP ${res.status}`);
       this.operationTitle.set(`Logs - ${data.name || item?.name || 'latest run'}`);
@@ -7723,7 +7723,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadPipelineLineage(item?: ResourceItem): Promise<void> {
     const params = this.itemParams(item);
     try {
-      const res = await fetch(`${this.apiBase}/pipeline/runs/lineage?${params}`);
+      const res = await this.hostFetch(`${this.apiBase}/pipeline/runs/lineage?${params}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Lineage failed with HTTP ${res.status}`);
       this.operationTitle.set(`Lineage - ${data.name || item?.name || 'latest run'}`);
@@ -7768,7 +7768,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadVectorMemory(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/memory/vector`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/memory/vector`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || `Vector memory failed with HTTP ${res.status}`);
       this.vectorMemory.set(data as VectorMemoryResponse);
@@ -7788,7 +7788,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     try {
       const namespace = this.createForm().namespace || this.projects()[0]?.name || 'opensphere-system';
-      const res = await fetch(`${this.apiBase}/memory/vector/bootstrap`, {
+      const res = await this.hostFetch(`${this.apiBase}/memory/vector/bootstrap`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace, collection: 'oah-vector-memory' }),
@@ -7811,7 +7811,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     try {
       const namespace = this.createForm().namespace || this.projects()[0]?.name || 'opensphere-system';
-      const res = await fetch(`${this.apiBase}/memory/vector/query`, {
+      const res = await this.hostFetch(`${this.apiBase}/memory/vector/query`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace, collection: 'oah-vector-memory', query: this.vectorQueryText(), limit: 5 }),
@@ -7833,7 +7833,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     try {
       const namespace = this.createForm().namespace || this.projects()[0]?.name || 'opensphere-system';
-      const res = await fetch(`${this.apiBase}/memory/vector/collections`, {
+      const res = await this.hostFetch(`${this.apiBase}/memory/vector/collections`, {
         method: 'PATCH',
         headers: this.actionHeaders(),
         body: JSON.stringify({
@@ -7860,7 +7860,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     try {
       const form = this.createForm();
-      const res = await fetch(`${this.apiBase}/models/registry/upstream/self-test`, {
+      const res = await this.hostFetch(`${this.apiBase}/models/registry/upstream/self-test`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({
@@ -7894,7 +7894,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadNativeCatalog(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/catalog`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/catalog`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Native catalog failed with HTTP ${res.status}`);
       this.nativePlatform.set(data as NativePlatformResponse);
@@ -7905,7 +7905,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadNativeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/backends`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/backends`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Backend detection failed with HTTP ${res.status}`);
       this.nativeBackends.set(data as NativeBackendsResponse);
@@ -7916,7 +7916,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadSupportServices(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Support service detection failed with HTTP ${res.status}`);
       this.supportServices.set(data as SupportServicesResponse);
@@ -7927,7 +7927,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadFoundationServices(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/foundation-services`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/foundation-services`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Foundation service detection failed with HTTP ${res.status}`);
       this.foundationServices.set(data as FoundationServicesResponse);
@@ -7942,7 +7942,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/foundation-services/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/foundation-services/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({}),
@@ -7968,7 +7968,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.servingFoundationPreview.set(null);
     this.servingFoundationManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/serving/preview`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/serving/preview`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Serving foundation preview failed with HTTP ${res.status}`);
       const result = data as ServingFoundationPreviewResponse;
@@ -7987,7 +7987,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/serving/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/serving/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
       });
@@ -8016,7 +8016,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.pipelinesFoundationPreview.set(null);
     this.pipelinesFoundationManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/pipelines/preview`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/pipelines/preview`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Pipelines foundation preview failed with HTTP ${res.status}`);
       const result = data as PipelinesFoundationPreviewResponse;
@@ -8035,7 +8035,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/pipelines/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/pipelines/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
       });
@@ -8064,7 +8064,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.modelRegistryFoundationPreview.set(null);
     this.modelRegistryFoundationManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/model-registry/preview`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/model-registry/preview`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Model Registry foundation preview failed with HTTP ${res.status}`);
       const result = data as ModelRegistryFoundationPreviewResponse;
@@ -8083,7 +8083,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/model-registry/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/model-registry/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: '{}',
@@ -8108,7 +8108,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.observabilityFoundationPreview.set(null);
     this.observabilityFoundationManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/observability/preview`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/observability/preview`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Observability foundation preview failed with HTTP ${res.status}`);
       const result = data as ObservabilityFoundationPreviewResponse;
@@ -8127,7 +8127,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/observability/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/observability/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
       });
@@ -8158,7 +8158,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.distributedFoundationPreview.set(null);
     this.distributedFoundationManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/distributed/preview`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/distributed/preview`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Distributed foundation preview failed with HTTP ${res.status}`);
       const result = data as DistributedFoundationPreviewResponse;
@@ -8177,7 +8177,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/distributed/configure`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/distributed/configure`, {
         method: 'POST',
         headers: this.actionHeaders(),
       });
@@ -8222,7 +8222,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.metadataPreview.set(null);
     this.metadataManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/metadata/preview`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/metadata/preview`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.metadataConfig()),
@@ -8246,7 +8246,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     this.metadataBootstrap.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/metadata`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/metadata`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.metadataConfig()),
@@ -8302,7 +8302,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.backboneClaimPreview.set(null);
     this.backboneClaimManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/backbone/claim/preview`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/backbone/claim/preview`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({}),
@@ -8326,7 +8326,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     this.backboneClaimApply.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/backbone/claim`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/backbone/claim`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({}),
@@ -8352,7 +8352,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.backboneBindingsPreview.set(null);
     this.backboneBindingsManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/backbone/bindings/preview`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/backbone/bindings/preview`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({}),
@@ -8376,7 +8376,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     this.backboneBindingsApply.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/backbone/bindings`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/backbone/bindings`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({}),
@@ -8403,7 +8403,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.objectStoragePreview.set(null);
     this.objectStorageManifestPreview.set('');
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/object-storage/preview`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/object-storage/preview`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.objectStorageConfig()),
@@ -8427,7 +8427,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.actionMessage.set(null);
     this.objectStorageBootstrap.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/support-services/object-storage`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/support-services/object-storage`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.objectStorageConfig()),
@@ -8448,7 +8448,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadComputeBackends(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/training/compute`);
+      const res = await this.hostFetch(`${this.apiBase}/training/compute`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute backend list failed with HTTP ${res.status}`);
       this.computeBackends.set((data.items ?? []) as ResourceItem[]);
@@ -8460,7 +8460,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadComputeRouting(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/compute-routing`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/compute-routing`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Compute routing failed with HTTP ${res.status}`);
       this.computeRouting.set(data as ComputeRoutingResponse);
@@ -8480,7 +8480,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/compute-routing`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/compute-routing`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ routes: this.computeRouting().routes.map((route) => ({ id: route.id, primary: route.primary, fallback: route.fallback })) }),
@@ -8499,7 +8499,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadControllerMetrics(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/controller-metrics`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/controller-metrics`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (res.status === 403) {
         this.controllerMetrics.set({ startedAt: '', source: 'forbidden', summary: { controllers: 0, reconciles: 0, failures: 0, events: 0 }, items: [], events: [] });
@@ -8514,7 +8514,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadAuditLog(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/audit-log`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/audit-log`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (res.status === 403) {
         this.auditLog.set({ summary: { total: 0, warnings: 0, namespaces: 0, kinds: 0, activeEntries: 0, historicalEntries: 0, systemEntries: 0, activeWarnings: 0, historicalWarnings: 0, systemWarnings: 0 }, items: [] });
@@ -8529,7 +8529,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadFinalReadiness(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/final-readiness`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/final-readiness`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (res.status === 403) {
         this.finalReadiness.set({
@@ -8556,7 +8556,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadGpuInventory(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-inventory`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-inventory`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `GPU inventory failed with HTTP ${res.status}`);
       this.gpuInventory.set(data as GpuInventoryResponse);
@@ -8585,7 +8585,7 @@ export class AppComponent implements OnInit, OnDestroy {
         credentialSecret: config.credentialSecret,
         maxConcurrency: String(config.maxConcurrency),
       });
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-enablement-plan?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-enablement-plan?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `GPU enablement plan failed with HTTP ${res.status}`);
       this.gpuEnablementPlan.set(data as GpuEnablementPlanResponse);
@@ -8610,7 +8610,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async runGpuBridgeProbe(kind: 'health' | 'capabilities' | 'smoke' | 'register' | 'training-smoke'): Promise<void> {
     try {
       this.saving.set(true);
-      const res = await fetch(`${this.apiBase}/admin/native/gpu-bridge/${kind}`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/gpu-bridge/${kind}`, {
         method: 'POST',
         headers: { ...this.actionHeaders(), 'content-type': 'application/json' },
         body: JSON.stringify(this.gpuBridgeRequestBody()),
@@ -8633,7 +8633,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadOahDemoPlan(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-plan`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-plan`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo plan failed with HTTP ${res.status}`);
       this.oahDemoPlan.set(data as OahDemoPlanResponse);
@@ -8646,7 +8646,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadOahDemoRun(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo run status failed with HTTP ${res.status}`);
       this.oahDemoRun.set(data as DemoRunStatusResponse);
@@ -8658,7 +8658,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async previewOahDemoRun(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/preview?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/preview?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo preview failed with HTTP ${res.status}`);
       this.oahDemoPreview.set(data as DemoRunPreviewResponse);
@@ -8671,7 +8671,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadOahDemoEvidence(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/evidence?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/evidence?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH demo evidence failed with HTTP ${res.status}`);
       this.oahDemoEvidence.set(data as DemoRunEvidenceResponse);
@@ -8683,7 +8683,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadOahDemoSmoke(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke status failed with HTTP ${res.status}`);
       this.oahDemoSmoke.set(data as DemoSmokeStatusResponse);
@@ -8695,7 +8695,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async loadOahDemoSmokeLogs(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke/logs?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke/logs?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke logs failed with HTTP ${res.status}`);
       this.oahDemoSmokeLogs.set(data as DemoSmokeLogsResponse);
@@ -8708,7 +8708,7 @@ export class AppComponent implements OnInit, OnDestroy {
   async previewOahDemoSmoke(): Promise<void> {
     try {
       const params = new URLSearchParams({ namespace: this.demoRunNamespace() });
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke/preview?${params.toString()}`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke/preview?${params.toString()}`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `OAH smoke preview failed with HTTP ${res.status}`);
       this.oahDemoSmokePreview.set(data as DemoSmokePreviewResponse);
@@ -8723,7 +8723,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-smoke`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-smoke`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -8745,7 +8745,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -8768,7 +8768,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/native/demo-run/reset`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/native/demo-run/reset`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify({ namespace: this.demoRunNamespace() }),
@@ -9043,7 +9043,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   async loadSetupStatus(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/status`, { headers: this.actionHeaders() });
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/status`, { headers: this.actionHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Setup status failed with HTTP ${res.status}`);
       this.setupStatus.set(data as SetupStatusResponse);
@@ -9057,7 +9057,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/plan`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/plan`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.setupForm()),
@@ -9077,7 +9077,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(`${this.apiBase}/admin/setup/install`, {
+      const res = await this.hostFetch(`${this.apiBase}/admin/setup/install`, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(this.setupForm()),
@@ -9101,7 +9101,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.saving.set(true);
     this.actionMessage.set(null);
     try {
-      const res = await fetch(url, {
+      const res = await this.hostFetch(url, {
         method: 'POST',
         headers: this.actionHeaders(),
         body: JSON.stringify(payload),
@@ -9128,8 +9128,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private async loadModelVersions(): Promise<void> {
     try {
       const [versionsRes, upstreamRes] = await Promise.all([
-        fetch(`${this.apiBase}/models/registry/versions`),
-        fetch(`${this.apiBase}/models/registry/upstream`),
+        this.hostFetch(`${this.apiBase}/models/registry/versions`),
+        this.hostFetch(`${this.apiBase}/models/registry/upstream`),
       ]);
       const versionsData = await versionsRes.json().catch(() => ({}));
       const upstreamData = await upstreamRes.json().catch(() => ({}));
@@ -9153,7 +9153,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async loadWorkbenchCatalog(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/workbenches/images`);
+      const res = await this.hostFetch(`${this.apiBase}/workbenches/images`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Notebook images failed with HTTP ${res.status}`);
       this.notebookImages.set(data.items ?? []);
@@ -9169,7 +9169,7 @@ export class AppComponent implements OnInit, OnDestroy {
     try {
       const namespace = this.createForm().namespace || this.projects()[0]?.name || 'opensphere-system';
       const params = new URLSearchParams({ namespace });
-      const res = await fetch(`${this.apiBase}/pipelines/backend?${params.toString()}`);
+      const res = await this.hostFetch(`${this.apiBase}/pipelines/backend?${params.toString()}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Pipeline backend failed with HTTP ${res.status}`);
       this.pipelineBackendStatus.set(data as PipelineBackendStatusResponse);
@@ -9182,7 +9182,7 @@ export class AppComponent implements OnInit, OnDestroy {
     const params = new URLSearchParams();
     if (item?.name) params.set('target', item.name);
     try {
-      const res = await fetch(`${this.apiBase}/monitoring/trustyai/metrics?${params.toString()}`);
+      const res = await this.hostFetch(`${this.apiBase}/monitoring/trustyai/metrics?${params.toString()}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Metrics failed with HTTP ${res.status}`);
       this.trustyMetrics.set(data.items ?? []);
@@ -9197,7 +9197,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async loadOdhComponents(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/admin/odh-components`);
+      const res = await this.hostFetch(`${this.apiBase}/admin/odh-components`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `ODH components failed with HTTP ${res.status}`);
       this.odhComponents.set(data.items ?? []);
@@ -9273,24 +9273,16 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private actionHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    const token = this.identityToken();
-    if (token) headers['x-os-id-token'] = token;
-    return headers;
+    return { 'content-type': 'application/json' };
   }
 
-  private identityToken(): string {
-    if (typeof window === 'undefined') return '';
+  private hostFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    if (typeof window === 'undefined') return Promise.reject(new Error('browser Host API unavailable'));
     const w = window as Window & {
-      __OSP_ID_TOKEN__?: string;
-      __OPENSPHERE_ID_TOKEN__?: string;
-      opensphereAuth?: { idToken?: string; token?: string };
-      __OS_AUTH__?: { token?: string | (() => string) };
+      __OPENSPHERE_HOST_CONTEXTS__?: Record<string, { api?: { fetch?: (target: RequestInfo | URL, options?: RequestInit) => Promise<Response> } }>;
     };
-    const shellToken = typeof w.__OS_AUTH__?.token === 'function'
-      ? w.__OS_AUTH__.token()
-      : w.__OS_AUTH__?.token;
-    return w.__OSP_ID_TOKEN__ || w.__OPENSPHERE_ID_TOKEN__ || w.opensphereAuth?.idToken || w.opensphereAuth?.token || shellToken || '';
+    const mediated = w.__OPENSPHERE_HOST_CONTEXTS__?.['ai']?.api?.fetch;
+    return mediated ? mediated(input, init) : window.fetch(input, init);
   }
 
   async refresh(): Promise<void> {
@@ -9318,7 +9310,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async fetchSummary(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/summary`);
+      const res = await this.hostFetch(`${this.apiBase}/summary`);
       if (!res.ok) return;
       this.summary.set(await res.json() as SummaryResponse);
     } catch {
@@ -9328,7 +9320,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async fetchProjects(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/projects`);
+      const res = await this.hostFetch(`${this.apiBase}/projects`);
       if (!res.ok) return;
       const data = await res.json() as ProjectListResponse;
       this.projects.set(data.items ?? []);
@@ -9339,7 +9331,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private async fetchCapabilities(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBase}/capabilities`);
+      const res = await this.hostFetch(`${this.apiBase}/capabilities`);
       if (!res.ok) return;
       const data = await res.json() as CapabilityResponse;
       this.capabilities.set(data.items ?? []);
@@ -9358,7 +9350,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
     this.loadingResource.set(true);
     try {
-      const res = await fetch(`${this.apiBase}/${path}`);
+      const res = await this.hostFetch(`${this.apiBase}/${path}`);
       if (!res.ok) {
         this.resourceItems.set([]);
         this.resourceMeta.set({ actualCount: 0, referenceCount: 0, source: 'empty' });

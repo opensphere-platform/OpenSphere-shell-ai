@@ -1,13 +1,17 @@
 {
-  "manifestVersion": 2,
+  "manifestVersion": 3,
   "kind": "subShell",
   "id": "ai",
+  "hostRef": "main",
+  "hostApiVersion": "1.0.0",
+  "hostCompat": ">=1.0.0 <2.0.0",
   "version": "0.1.0",
   "title": "OpenSphere AI Hub",
-  "description": "OpenSphere AI Hub subShell for project-centered AI operations.",
+  "description": "OpenSphere OpenSphere AI Hub subShell.",
   "entry": "ui-shell.plugin.js",
-  "entrySha256": "84a805dcf01a2190b34c6be84f602e2abe94c4a230f2355db08900733445c925",
+  "entrySha256": "ed0f3e4922d229d2d89909cbab59b59b3da0216cf4f44485733ddcb92db64141",
   "shellCompat": ">=0.2.0 <0.9.0",
+  "sdkVersion": "0.3.6",
   "permissions": [
     "page:register",
     "api:proxy"
@@ -17,5 +21,47 @@
     "label": "OpenSphere AI Hub"
   },
   "designSystem": "clarity",
-  "apiBase": "/api/plugins/ai"
+  "apiBase": "/api/plugins/ai",
+  "renderMode": "esm",
+  "contributions": {
+    "page": {
+      "enabled": true
+    },
+    "navigation": {
+      "enabled": false,
+      "mode": "none",
+      "reason": "OpenSphere AI Hub owns navigation inside its page"
+    },
+    "api": {
+      "enabled": true,
+      "basePath": "/api/plugins/ai"
+    },
+    "cli": {
+      "enabled": false,
+      "reason": "OpenSphere AI Hub CLI manifest is not published"
+    },
+    "manual": {
+      "enabled": false,
+      "mode": "none",
+      "reason": "OpenSphere AI Hub Manual contribution is not published"
+    },
+    "search": {
+      "enabled": false,
+      "mode": "none",
+      "reason": "OpenSphere AI Hub search contribution is not published"
+    },
+    "notification": {
+      "enabled": false,
+      "frontend": false,
+      "backend": false,
+      "reason": "OpenSphere AI Hub notification contribution is not published"
+    },
+    "observability": {
+      "enabled": false,
+      "logs": false,
+      "metrics": false,
+      "traces": false,
+      "reason": "OpenSphere AI Hub observability contract is not published"
+    }
+  }
 }

@@ -1,0 +1,10 @@
+{
+  "name": "opensphere-ai-server-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "pg": "8.13.1",
+    "undici": "6.27.0",
+    "ws": "8.21.0"
+  }
+}

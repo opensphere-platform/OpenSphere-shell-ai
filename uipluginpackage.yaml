@@ -4,6 +4,10 @@ metadata:
   name: ai
   namespace: opensphere-system
 spec:
+  kind: subShell
+  hostRef: main
+  hostApiVersion: "1.0.0"
+  hostCompat: ">=1.0.0 <2.0.0"
   displayName: "OpenSphere AI Hub"
   owner: platform-experience
   version: 0.1.0
@@ -17,14 +21,14 @@ spec:
     - name: KANIDM_JWKS_URL
       value: "https://kanidm.opensphere-console-auth.svc:8443/oauth2/openid/opensphere-console/public_key.jwk"
   image:
-    repository: ghcr.io/opensphere-platform/ai
-    digest: sha256:9b987a138466ec3eeb3a07f5e36d5a9df01eb85290d508c5b04b96593ff444b7
+    repository: ai
+    digest: sha256:b43bb8d6d39d97ea678cf895f2427451ab9fd5b4c643de23436d5d10d1f1bd4c
   nav:
     band: "Operate"
     label: "OpenSphere AI Hub"
   manifest:
     path: /plugins/ui-shell.manifest.json
-    sha256: "1dd84465b6aeaf9fc2e590931496797786f9d50b73700309dd7f9b457ff6891e"
+    sha256: "9317947886be172674bd5ce4a55a9e9c1ef663b06a9f1d541898ab8c9a1f3aab"
     signaturePath: /plugins/ui-shell.manifest.json.sig
   trust:
     keyId: opensphere-plugins-v1
@@ -34,6 +38,15 @@ spec:
     - api:proxy
   api:
     basePath: /api/plugins/ai
+  contributions:
+    page: { enabled: true }
+    navigation: { enabled: false, mode: "none", reason: "OpenSphere AI Hub owns navigation inside its page" }
+    api: { enabled: true, basePath: "/api/plugins/ai" }
+    cli: { enabled: false, reason: "OpenSphere AI Hub CLI manifest is not published" }
+    manual: { enabled: false, mode: "none", reason: "OpenSphere AI Hub Manual contribution is not published" }
+    search: { enabled: false, mode: "none", reason: "OpenSphere AI Hub search contribution is not published" }
+    notification: { enabled: false, frontend: false, backend: false, reason: "OpenSphere AI Hub notification contribution is not published" }
+    observability: { enabled: false, logs: false, metrics: false, traces: false, reason: "OpenSphere AI Hub observability contract is not published" }
 ---
 apiVersion: plugins.opensphere.io/v1alpha1
 kind: UIPluginRegistration
