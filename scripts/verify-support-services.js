@@ -349,7 +349,8 @@ for (const browserVerifierText of [
 requireText('package scripts', packageJson, 'test:browser-support-services');
 requireText('package scripts', packageJson, 'test:live-browser-support-services');
 requireText('package scripts', packageJson, 'test:ui');
-requirePattern('package test includes ui smoke', packageJson, /"test":\s*"npm run test:contracts && npm run test:ui"/);
+requirePattern('package test includes workspace integration and UI smoke', packageJson, /"test":\s*"npm run test:workspace-contracts && npm run test:ui"/);
+requirePattern('package scripts keep standalone release contracts', packageJson, /"test:contracts":\s*"npm run test:standard && npm run test:rbac && node scripts\/verify-constitution-0003\.js"/);
 requireText('package scripts', packageJson, 'test:upstream-parity');
 requireText('package scripts', packageJson, 'test:product-flow');
 requireText('package scripts', packageJson, 'test:release');
