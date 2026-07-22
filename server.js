@@ -22,8 +22,10 @@ function tokenFromCookie(cookieHeader) {
 const PORT = process.env.PORT || 8080;
 const PLUGINS = process.env.PLUGINS_DIR || '/app/plugins';
 const WWW = process.env.WWW_DIR || '/app/www';
-const VERSION = process.env.APP_VERSION || '1.0.0';
-const WORKBENCH_IMAGE = process.env.WORKBENCH_IMAGE || 'localhost:5000/ai:workbench';
+const VERSION = process.env.APP_VERSION || '1.1.0-edge.1';
+const AI_DOMAIN_NAMESPACE = process.env.AI_DOMAIN_NAMESPACE || 'opensphere-system';
+const MANAGED_RUNTIME = process.env.OSP_AI_RUNTIME_MODE === 'managed';
+const WORKBENCH_IMAGE = process.env.WORKBENCH_IMAGE || (MANAGED_RUNTIME ? '' : 'localhost:5000/ai:workbench');
 const PIPELINE_RUNNER_IMAGE = process.env.PIPELINE_RUNNER_IMAGE || WORKBENCH_IMAGE;
 const INFERENCE_RUNTIME_IMAGE = process.env.INFERENCE_RUNTIME_IMAGE || WORKBENCH_IMAGE;
 const SA = '/var/run/secrets/kubernetes.io/serviceaccount';
@@ -43,13 +45,13 @@ const ADMIN_GROUPS = (process.env.OSP_ADMIN_GROUPS || 'opensphere-console-admins
 
 // ── 쓰기 인가: 호출자 토큰을 검증 → Impersonate-User (SA 광범위 write 금지) ──
 // Kanidm 콘솔 id_token(ES256) 전용 — cutover 완료, 레거시 Keycloak RS256 dual-accept 경로는 제거됨.
-const { createHash, createPublicKey, randomBytes, verify: cryptoVerify } = require('crypto');
+const { createHash, createPublicKey, randomBytes, randomUUID, verify: cryptoVerify } = require('crypto');
 // Kanidm 콘솔 IdP — split-horizon: 토큰 iss는 브라우저값(localhost:8444), JWKS는 in-cluster svc.
 const DEFAULT_KANIDM_ISSUERS = [
   'https://localhost:8444/oauth2/openid/opensphere-console',
   'https://auth.console.opensphere.dev/oauth2/openid/opensphere-console',
 ];
-const KANIDM_ISSUERS = (process.env.KANIDM_ISS || DEFAULT_KANIDM_ISSUERS.join(','))
+const KANIDM_ISSUERS = (process.env.KANIDM_ISSUERS || process.env.KANIDM_ISS || DEFAULT_KANIDM_ISSUERS.join(','))
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
@@ -59,6 +61,85 @@ const KANIDM_AZP = process.env.KANIDM_AZP || 'opensphere-console';
 const KANIDM_CA_PATH = process.env.KANIDM_CA_PATH || '/etc/kanidm-ca/ca.crt';
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const IDENTITY_GROUP_CLAIM_KEYS = ['groups', 'groups_name', 'group_names', 'roles'];
+const SERVICE = 'ai';
+const ENVIRONMENT = process.env.OSP_ENVIRONMENT || 'development';
+const POD_NAME = process.env.POD_NAME || process.env.HOSTNAME || 'local';
+const LOG_SCHEMA = process.env.OSP_LOG_SCHEMA || 'opensphere.v1';
+const standardMetrics = {
+  requests: new Map(),
+  failures: new Map(),
+  latencyCount: new Map(),
+  latencySum: new Map(),
+  emittedEvents: 0,
+};
+
+function safeContextToken(value, fallback) {
+  const text = String(value || '').trim();
+  return /^[A-Za-z0-9._:/-]{1,128}$/.test(text) ? text : fallback;
+}
+
+function requestTraceId(req) {
+  const parent = String(req.headers.traceparent || '').match(/^[\da-f]{2}-([\da-f]{32})-[\da-f]{16}-[\da-f]{2}$/i);
+  return parent?.[1]?.toLowerCase()
+    || safeContextToken(req.headers['x-os-trace-id'], randomBytes(16).toString('hex'));
+}
+
+function normalizedMetricRoute(route) {
+  if (route.startsWith('/plugins/')) return '/plugins/*';
+  if (route.startsWith('/app/')) return '/app/*';
+  if (route.startsWith('/api/k8s/')) return '/api/k8s/*';
+  if (route.startsWith('/api/k8s-exec/')) return '/api/k8s-exec/*';
+  if (route.startsWith('/workbenches/proxy/')) return '/workbenches/proxy/*';
+  return route;
+}
+
+function standardRequestContext(req, route) {
+  return {
+    schema: LOG_SCHEMA,
+    timestamp: new Date().toISOString(),
+    severity: 'info',
+    service: SERVICE,
+    consumerId: 'opensphere-console',
+    environment: ENVIRONMENT,
+    namespace: serviceAccountNamespace(),
+    pod: POD_NAME,
+    resourceKind: 'HTTPRoute',
+    resourceName: normalizedMetricRoute(route),
+    message: '',
+    correlationId: safeContextToken(
+      req.headers['x-os-correlation-id'] || req.headers['x-correlation-id'],
+      randomUUID(),
+    ),
+    operationId: safeContextToken(req.headers['x-os-operation-id'], randomUUID()),
+    traceId: requestTraceId(req),
+    actorType: req.headers.authorization ? 'user' : 'system',
+  };
+}
+
+function standardLog(event) {
+  console.log(JSON.stringify({
+    schema: LOG_SCHEMA,
+    timestamp: new Date().toISOString(),
+    severity: 'info',
+    service: SERVICE,
+    consumerId: 'opensphere-console',
+    environment: ENVIRONMENT,
+    namespace: serviceAccountNamespace(),
+    pod: POD_NAME,
+    resourceKind: 'Process',
+    resourceName: SERVICE,
+    message: '',
+    correlationId: 'startup',
+    operationId: 'startup',
+    traceId: '',
+    actorType: 'system',
+    ...event,
+  }));
+}
+
+function incrementMetric(map, key, amount = 1) {
+  map.set(key, (map.get(key) || 0) + amount);
+}
 // Kanidm JWKS — 자체서명 CA를 명시적 'ca' 옵션으로 신뢰(TLS 검증 비활성화 금지, NODE_EXTRA_CA_CERTS 미접촉).
 let _kjwks = null, _kjwksAt = 0;
 const KJWKS_TTL = 5 * 60 * 1000;
@@ -126,7 +207,7 @@ const jsonRes = (res, code, obj) => { res.writeHead(code, { 'content-type': 'app
 
 const MIME = {
   '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
-  '.html': 'text/html; charset=utf-8', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2',
+  '.html': 'text/html; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.svg': 'image/svg+xml', '.woff': 'font/woff', '.woff2': 'font/woff2',
   '.ttf': 'font/ttf', '.map': 'application/json', '.ico': 'image/x-icon', '.webp': 'image/webp',
 };
 
@@ -1700,9 +1781,41 @@ async function nativeControllerMetricsWithAuditFallback() {
 
 function prometheusMetricsText() {
   const lines = [
+    '# HELP opensphere_subshell_http_requests_total HTTP requests handled by the subShell.',
+    '# TYPE opensphere_subshell_http_requests_total counter',
+  ];
+  for (const [key, value] of standardMetrics.requests.entries()) {
+    const [method, route, status] = key.split('|');
+    lines.push(`opensphere_subshell_http_requests_total{service="${SERVICE}",method="${method}",route="${route}",status="${status}"} ${value}`);
+  }
+  lines.push('# HELP opensphere_subshell_http_failures_total HTTP 5xx responses returned by the subShell.');
+  lines.push('# TYPE opensphere_subshell_http_failures_total counter');
+  for (const [key, value] of standardMetrics.failures.entries()) {
+    const [method, route, status] = key.split('|');
+    lines.push(`opensphere_subshell_http_failures_total{service="${SERVICE}",method="${method}",route="${route}",status="${status}"} ${value}`);
+  }
+  lines.push('# HELP opensphere_subshell_http_request_duration_seconds_count HTTP request latency sample count.');
+  lines.push('# TYPE opensphere_subshell_http_request_duration_seconds_count counter');
+  for (const [key, value] of standardMetrics.latencyCount.entries()) {
+    const [method, route] = key.split('|');
+    lines.push(`opensphere_subshell_http_request_duration_seconds_count{service="${SERVICE}",method="${method}",route="${route}"} ${value}`);
+  }
+  lines.push('# HELP opensphere_subshell_http_request_duration_seconds_sum HTTP request latency total seconds.');
+  lines.push('# TYPE opensphere_subshell_http_request_duration_seconds_sum counter');
+  for (const [key, value] of standardMetrics.latencySum.entries()) {
+    const [method, route] = key.split('|');
+    lines.push(`opensphere_subshell_http_request_duration_seconds_sum{service="${SERVICE}",method="${method}",route="${route}"} ${value}`);
+  }
+  lines.push('# HELP opensphere_subshell_ready SubShell readiness gauge.');
+  lines.push('# TYPE opensphere_subshell_ready gauge');
+  lines.push(`opensphere_subshell_ready{service="${SERVICE}",version="${VERSION}"} 1`);
+  lines.push('# HELP opensphere_subshell_events_emitted_total Console notification events emitted by the subShell.');
+  lines.push('# TYPE opensphere_subshell_events_emitted_total counter');
+  lines.push(`opensphere_subshell_events_emitted_total{service="${SERVICE}"} ${standardMetrics.emittedEvents}`);
+  lines.push(
     '# HELP opensphere_ai_controller_reconcile_total Total OpenSphere AI Hub claim reconciliations.',
     '# TYPE opensphere_ai_controller_reconcile_total counter',
-  ];
+  );
   for (const [key, item] of controllerMetrics.reconciles.entries()) {
     const labels = metricLabelsFromKey(key);
     lines.push(`opensphere_ai_controller_reconcile_total{controller="${labels.controller}",phase="${labels.phase}",backend="${labels.backend}"} ${item.total}`);
@@ -9055,7 +9168,7 @@ function resourceRefFor(obj, fallbackKind = '') {
 }
 
 const BACKBONE_NAMESPACE = 'opensphere-backbone';
-const BACKBONE_CLAIM_NAMESPACE = 'opensphere-system';
+const BACKBONE_CLAIM_NAMESPACE = AI_DOMAIN_NAMESPACE;
 const BACKBONE_CLAIM_NAME = 'ai-hub';
 const BACKBONE_POSTGRES_SECRET = 'ai-hub-backbone-postgres';
 const BACKBONE_POSTGRES_APP_SECRET = 'ai-hub-backbone-postgres-app';
@@ -16238,7 +16351,7 @@ async function summary(req) {
 // ai 백엔드 → 콘솔 audit bus(/api/admin/events) → 셸 단일 인박스.
 // 시작/노드 경고를 콘솔 인박스에 발행 = subShell이 콘솔 알림 core와 '유기적' 작동.
 // best-effort: 발행 실패해도 ai 본 기능엔 영향 없음. (manifest 권한 불요 — 백엔드 in-cluster 호출)
-const CONTROLLER = process.env.OSP_CONTROLLER || 'http://dupa-registry-controller.opensphere-system.svc.cluster.local:8080';
+const CONTROLLER = process.env.OSP_CONTROLLER || 'http://opensphere-console-dupa-controller.opensphere-console.svc.cluster.local:8080';
 async function publishNotify(ev, required = false) {
   try {
     const headers = { 'content-type': 'application/json', 'x-opensphere-source': 'ai', authorization: `Bearer ${tok()}` };
@@ -16249,6 +16362,7 @@ async function publishNotify(ev, required = false) {
       body: JSON.stringify({ source: 'ai', ...ev }),
     });
     if (!response.ok) throw new Error(`Console event HTTP ${response.status}`);
+    standardMetrics.emittedEvents += 1;
     return true;
   } catch (e) {
     if (required) throw Object.assign(new Error(`durable audit unavailable: ${e.message || e}`), { code: 503 });
@@ -16339,6 +16453,19 @@ const AI_SEARCH_ITEMS = [
   ['Monitoring', 'TrustyAI metrics and alerts', '/p/ai/monitoring/trustyai'],
 ];
 
+const STANDARD_CONTRIBUTIONS = Object.freeze({
+  page: 'Ready',
+  navigation: 'Ready',
+  api: 'Ready',
+  cli: 'Ready',
+  manual: 'Ready',
+  search: 'Ready',
+  notification: 'Ready',
+  logs: 'Ready',
+  metrics: 'Ready',
+  traces: 'Ready',
+});
+
 function aiSearch(rawUrl) {
   const q = (new URL(rawUrl, 'http://ai.local').searchParams.get('q') || '').trim().toLowerCase();
   const items = AI_SEARCH_ITEMS
@@ -16350,11 +16477,33 @@ function aiSearch(rawUrl) {
 function aiManualSource() {
   return {
     schema: 'manual.opensphere.io/v1alpha1',
-    sourceId: 'plugin:ai',
+    sourceId: 'opensphere-ai-hub',
     title: 'OpenSphere AI Hub Manual',
     route: '/p/ai',
     manualRoute: '/p/manual',
+    locale: 'ko-KR',
+    contentPath: '/plugins/manual/ai.ko.md',
     categories: AI_SEARCH_ITEMS.map(([label, , route]) => ({ label, route })),
+  };
+}
+
+function aiContract() {
+  return {
+    id: SERVICE,
+    standard: 'OpenSphere production subShell profile',
+    version: VERSION,
+    hostRef: 'main',
+    hostCompat: '>=1.0.0 <2.0.0',
+    capabilities: [
+      'page:register', 'api:proxy', 'nav:contribute', 'search:contribute',
+      'manual:contribute', 'notify:publish',
+    ],
+    contributions: STANDARD_CONTRIBUTIONS,
+    observability: {
+      logs: { format: 'json', schema: LOG_SCHEMA, stream: 'stdout', collector: 'runtime-discovered' },
+      metrics: '/metrics',
+      traces: 'W3C traceparent + x-os-trace-id',
+    },
   };
 }
 
@@ -16365,6 +16514,8 @@ function aiOpenApi() {
     servers: [{ url: '/api/plugins/ai' }],
     paths: {
       '/readyz': { get: { operationId: 'getAiReadiness', responses: { 200: { description: 'AI subShell readiness' } } } },
+      '/api/status': { get: { operationId: 'getAiIntegrationStatus', responses: { 200: { description: 'AI runtime and integration readiness' } } } },
+      '/api/contract': { get: { operationId: 'getAiHostContract', responses: { 200: { description: 'Implemented Main Shell host contract' } } } },
       '/search': { get: { operationId: 'searchAiObjects', responses: { 200: { description: 'Search Workbench, Pipeline, Training, Model, Inference, Evaluation and Monitoring objects' } } } },
       '/admin/native/agent-tools': { get: { operationId: 'getAiToolManifest', responses: { 200: { description: 'os ai tool manifest' } } } },
       '/operations/ledger': { get: { operationId: 'getAiOperationLedger', responses: { 200: { description: 'Correlated operation and security audit ledger' } } } },
@@ -16372,26 +16523,72 @@ function aiOpenApi() {
   };
 }
 
+async function aiRuntimeReadiness() {
+  // Local contract tests intentionally run without a projected ServiceAccount
+  // or a cluster.  A descriptor-installed workload is always marked managed
+  // by the Host and must prove its live prerequisites instead.
+  if (!MANAGED_RUNTIME) return { ready: true, mode: 'local', checks: [] };
+  const checks = [];
+  const tokenPresent = fs.existsSync(`${SA}/token`);
+  checks.push({ name: 'serviceAccountToken', ready: tokenPresent });
+  checks.push({ name: 'kanidmCa', ready: fs.existsSync(KANIDM_CA_PATH) });
+  checks.push({ name: 'workbenchImage', ready: /^.+@sha256:[a-f0-9]{64}$/i.test(WORKBENCH_IMAGE) });
+  const [apiVersion, backbone, workbenchClaimCrd] = await Promise.all([
+    tokenPresent ? k8sJson('/version') : null,
+    tokenPresent ? k8sJson(`/apis/backbone.opensphere.io/v1alpha1/namespaces/${AI_DOMAIN_NAMESPACE}/backboneclaims/${BACKBONE_CLAIM_NAME}`) : null,
+    tokenPresent ? crdInstalled('workbenchclaims.ai.opensphere.io') : false,
+  ]);
+  checks.push({ name: 'kubernetesApi', ready: !!apiVersion });
+  checks.push({ name: 'backboneClaim', ready: !!backbone });
+  checks.push({ name: 'workbenchClaimCrd', ready: !!workbenchClaimCrd });
+  return { ready: checks.every((check) => check.ready), mode: 'managed', checks };
+}
+
 const server = http.createServer(async (req, res) => {
-  const requestStartedAt = Date.now();
-  const requestCorrelationId = String(req.headers['x-os-correlation-id'] || '');
-  res.once('finish', () => console.log(JSON.stringify({
-    time: new Date().toISOString(), service: 'opensphere-ai', event: 'http_request',
-    method: req.method, path: new URL(req.url, 'http://ai.local').pathname, status: res.statusCode,
-    durationMs: Date.now() - requestStartedAt, correlationId: requestCorrelationId,
-    traceparent: String(req.headers.traceparent || ''),
-  })));
+  const requestStartedAt = process.hrtime.bigint();
+  const requestPath = new URL(req.url, 'http://ai.local').pathname;
+  const requestContext = standardRequestContext(req, requestPath);
+  res.setHeader('cache-control', 'no-store');
+  res.setHeader('x-os-correlation-id', requestContext.correlationId);
+  res.setHeader('x-os-operation-id', requestContext.operationId);
+  res.setHeader('x-os-trace-id', requestContext.traceId);
+  res.once('finish', () => {
+    const durationSeconds = Number(process.hrtime.bigint() - requestStartedAt) / 1e9;
+    const status = String(res.statusCode);
+    const route = requestContext.resourceName;
+    incrementMetric(standardMetrics.requests, `${req.method}|${route}|${status}`);
+    if (res.statusCode >= 500) incrementMetric(standardMetrics.failures, `${req.method}|${route}|${status}`);
+    incrementMetric(standardMetrics.latencyCount, `${req.method}|${route}`);
+    incrementMetric(standardMetrics.latencySum, `${req.method}|${route}`, durationSeconds);
+    standardLog({
+      ...requestContext,
+      timestamp: new Date().toISOString(),
+      severity: res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warning' : 'info',
+      message: `${req.method} ${route} ${status}`,
+      status: res.statusCode,
+      durationMs: Math.round(durationSeconds * 1000),
+    });
+  });
   // Browser Consumer never receives a raw token. Main Shell injects Authorization;
   // the backend translates it only inside this process for legacy internal helpers.
   const hostBearer = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
   if (hostBearer) req.headers['x-os-id-token'] = hostBearer[1];
   else delete req.headers['x-os-id-token'];
-  const p = new URL(req.url, `http://${req.headers.host}`).pathname;
+  const p = requestPath;
   try {
     await authorizeAiRequest(req, p);
     if (p === '/healthz') { res.writeHead(200); return res.end('ok'); }
-    if (p === '/readyz') return jsonRes(res, 200, { ready: true, service: 'opensphere-ai', version: VERSION, hostContract: '1.0.0', backboneRequired: true });
+    if (p === '/readyz') {
+      const readiness = await aiRuntimeReadiness();
+      return jsonRes(res, readiness.ready ? 200 : 503, { ...readiness, service: 'opensphere-ai', version: VERSION, hostContract: '1.0.0', backboneRequired: true });
+    }
     if (p === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' }); return res.end(prometheusMetricsText()); }
+    if (p === '/api/info') return jsonRes(res, 200, { id: SERVICE, kind: 'subShell', version: VERSION, hostRef: 'main' });
+    if (p === '/api/status') {
+      const readiness = await aiRuntimeReadiness();
+      return jsonRes(res, readiness.ready ? 200 : 503, { id: SERVICE, version: VERSION, ...readiness, integrations: STANDARD_CONTRIBUTIONS });
+    }
+    if (p === '/api/contract') return jsonRes(res, 200, aiContract());
     if (p === '/openapi.json') return jsonRes(res, 200, aiOpenApi());
     if (p === '/search' && req.method === 'GET') return jsonRes(res, 200, aiSearch(req.url));
     if (p === '/manual/source' && req.method === 'GET') return jsonRes(res, 200, aiManualSource());
@@ -16592,7 +16789,7 @@ server.on('upgrade', async (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`ai v${VERSION} on :${PORT}`);
+  standardLog({ resourceKind: 'HTTPServer', resourceName: `:${PORT}`, message: `${SERVICE} v${VERSION} ready`, readiness: 1 });
   // 콘솔 인박스에 시작 이벤트 발행 + 주기적 노드 헬스(유기적 연동)
   publishNotify({ action: 'started', target: 'ai', result: 'info', reason: `AI 백엔드 v${VERSION} 시작` });
   nodeHealthPublish();

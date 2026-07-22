@@ -240,7 +240,7 @@ requireText('AI plugin package KFP pod label', pluginPackage, 'podLabels:');
 requireText('AI plugin package KFP pod label', pluginPackage, 'pipelines.kubeflow.org/v2_component: "true"');
 requireText('DUPA CRD podLabels schema', dupaCrds, 'podLabels:');
 requirePattern('DUPA controller podLabels support', dupaController, /function podLabels\(pkg\)/);
-requirePattern('DUPA controller podLabels merge', dupaController, /metadata:\s*\{\s*labels:\s*\{\s*\.\.\.podLabels\(pkg\),\s*app:\s*name\s*\}\s*\}/);
+requirePattern('DUPA controller podLabels merge', dupaController, /labels:\s*\{\s*\.\.\.podLabels\(pkg\),\s*app:\s*name\s*\}/);
 
 for (const verifierText of [
   'OAH_ID_TOKEN',
