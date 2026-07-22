@@ -20,7 +20,8 @@ assert.equal(pkg.spec.hostRef, 'main');
 assert.equal(registration.spec.desiredState, 'Enabled');
 
 const requiredCapabilities = [
-  'page:register', 'api:proxy', 'nav:contribute', 'search:contribute', 'notify:publish',
+  'page:register', 'api:proxy', 'nav:contribute', 'search:contribute',
+  'manual:contribute', 'notify:publish',
 ];
 for (const capability of requiredCapabilities) {
   assert.ok(manifest.permissions.includes(capability), `manifest capability missing: ${capability}`);
@@ -33,25 +34,26 @@ for (const name of ['page', 'navigation', 'api', 'cli', 'manual', 'search', 'not
 }
 assert.equal(pkg.spec.cli.namespace, 'ai');
 assert.equal(pkg.spec.cli.manifestPath, '/admin/native/agent-tools');
-assert.equal(pkg.spec.contributions.manual.mode, 'install-time');
-assert.equal(pkg.spec.contributions.manual.sourceId, 'plugin:ai');
+assert.equal(pkg.spec.contributions.manual.mode, 'runtime');
+assert.equal(pkg.spec.contributions.manual.sourceId, 'opensphere-ai-hub');
 assert.deepEqual(pkg.spec.contributions.notification, { enabled: true, frontend: true, backend: true });
 assert.deepEqual(pkg.spec.contributions.observability, { enabled: true, logs: true, metrics: true, traces: true });
 
 for (const marker of [
   'ctx.routing', 'extensions.nav?.contribute', 'extensions.search?.contribute',
-  'ctx.notify?.publish', 'export function deactivate',
+  'extensions.manual.contribute', 'ctx.notify?.publish', 'export function deactivate',
 ]) assert.match(adapter, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
 for (const endpoint of [
   "p === '/readyz'", "p === '/openapi.json'", "p === '/search'",
   "p === '/manual/source'", "p === '/operations/ledger'",
   "p === '/admin/native/agent-tools'", "p === '/metrics'",
+  "p === '/api/status'", "p === '/api/contract'",
 ]) assert.ok(server.includes(endpoint), `backend endpoint missing: ${endpoint}`);
 
 for (const contract of [
   'X-OS-Correlation-ID is required', 'X-OS-Idempotency-Key is required',
-  "event: 'http_request'", 'durable audit unavailable',
+  'schema: LOG_SCHEMA', 'durationMs:', 'durable audit unavailable',
   'opensphere-auth.opensphere-console-auth.svc',
 ]) assert.ok(server.includes(contract), `backend contract missing: ${contract}`);
 

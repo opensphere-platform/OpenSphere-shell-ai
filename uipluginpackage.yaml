@@ -10,7 +10,7 @@ spec:
   hostCompat: ">=1.0.0 <2.0.0"
   displayName: "OpenSphere AI Hub"
   owner: platform-experience
-  version: 1.0.0
+  version: 1.1.0-edge.1
   description: "CONSTITUTION-0003 Production subShell reference for OpenSphere AI operations"
   serviceAccountName: ai-runtime
   podLabels:
@@ -28,7 +28,7 @@ spec:
     label: "OpenSphere AI Hub"
   manifest:
     path: /plugins/ui-shell.manifest.json
-    sha256: "fd2039f2e852d9d70e345f2d33bf1edc9ab2d8202fbbf458025bba6df9dd177b"
+    sha256: "005111dfb5cb6b7d6348e8e921baa3ae8cf13aca58e8c776e61db1f4abb32b6a"
     signaturePath: /plugins/ui-shell.manifest.json.sig
   trust:
     keyId: opensphere-plugins-v1
@@ -38,6 +38,7 @@ spec:
     - api:proxy
     - nav:contribute
     - search:contribute
+    - manual:contribute
     - notify:publish
   api:
     basePath: /api/plugins/ai
@@ -49,7 +50,7 @@ spec:
     navigation: { enabled: true, mode: "runtime" }
     api: { enabled: true, basePath: "/api/plugins/ai" }
     cli: { enabled: true, namespace: "ai", manifestPath: "/admin/native/agent-tools" }
-    manual: { enabled: true, sourceId: "plugin:ai", mode: "install-time" }
+    manual: { enabled: true, sourceId: "opensphere-ai-hub", mode: "runtime" }
     search: { enabled: true, mode: "runtime" }
     notification: { enabled: true, frontend: true, backend: true }
     observability: { enabled: true, logs: true, metrics: true, traces: true }

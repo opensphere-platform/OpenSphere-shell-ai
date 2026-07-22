@@ -1,0 +1,160 @@
+name: Publish OpenSphere AI Hub image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - server.js
+      - server-runtime/**
+      - package.json
+      - package-lock.json
+      - angular.json
+      - src/**
+      - test/**
+      - scripts/**
+      - tools/**
+      - ui-shell/**
+      - .github/scripts/**
+      - .github/workflows/publish-image.yml
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: opensphere-shell-ai-edge-image
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/opensphere-platform/opensphere-shell-ai
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run test:contracts
+      - run: npm run build
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: opensphere-platform/OpenSphere-SDK
+          path: OpenSphere-SDK
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Recreate signed module package from source
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.DUPA_SIGNING_KEY_PEM }}
+          DUPA_SIGNING_KEY_ID: opensphere-plugins-v1
+          OPENSPHERE_SDK: ${{ github.workspace }}/OpenSphere-SDK
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY"
+          printf '%s' "$SIGNING_KEY" > "$RUNNER_TEMP/opensphere-plugins-v1.pem"
+          chmod 600 "$RUNNER_TEMP/opensphere-plugins-v1.pem"
+          export DUPA_SIGNING_KEY="$RUNNER_TEMP/opensphere-plugins-v1.pem"
+          npm --prefix OpenSphere-SDK install --no-audit --no-fund
+          npm --prefix OpenSphere-SDK run build
+          npm ci --no-audit --no-fund
+          npm run package:module
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: package
+        shell: bash
+        run: |
+          descriptor="$(jq -c . module-package.json)"
+          descriptor_build_arg="$(printf 'OS_MODULE_DESCRIPTOR=%s' "$descriptor" | jq -Rr '[.] | @csv')"
+          echo "descriptor-build-arg=$descriptor_build_arg" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -r .version module-package.json)" >> "$GITHUB_OUTPUT"
+          echo "signature=$(tr -d '\r\n' < module-package.json.sig)" >> "$GITHUB_OUTPUT"
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: type=sha,prefix=sha-
+          labels: |
+            io.opensphere.channel=edge
+            io.opensphere.source-revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.package.outputs.version }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ steps.package.outputs.descriptor-build-arg }}
+            OS_MODULE_SIGNATURE=${{ steps.package.outputs.signature }}
+            OS_MODULE_KEY_ID=opensphere-plugins-v1
+          provenance: mode=max
+          cache-from: type=gha,scope=opensphere-shell-ai
+          cache-to: type=gha,mode=max,scope=opensphere-shell-ai
+      - uses: imjasonh/setup-crane@v0.4
+      - name: Verify signed module labels
+        run: bash .github/scripts/verify-module-label.sh "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}" "${{ steps.package.outputs.version }}"
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ runner.temp }}/opensphere-shell-ai.spdx.json
+          upload-artifact: false
+      - uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/opensphere-shell-ai.spdx.json
+          push-to-registry: true
+      - name: Advance edge channel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          crane auth login ghcr.io -u "${{ github.actor }}" -p "$GH_TOKEN"
+          release_epoch="$(git show -s --format=%ct "$GITHUB_SHA")"
+          release_tag="$(TZ=Asia/Seoul date -d "@$release_epoch" +%Y%m%d%H%M)"
+          [[ "$release_tag" =~ ^[0-9]{12}$ ]]
+          existing="$(crane digest "${IMAGE}:${release_tag}" 2>/dev/null || true)"
+          if [[ -n "$existing" && "$existing" != "$DIGEST" ]]; then
+            echo "Immutable release tag collision: ${IMAGE}:${release_tag} is $existing, expected $DIGEST" >&2
+            exit 1
+          fi
+          crane tag "${IMAGE}@${DIGEST}" "$release_tag"
+          test "$(crane digest "${IMAGE}:${release_tag}")" = "$DIGEST"
+          crane tag "${IMAGE}@${DIGEST}" edge
+          test "$(crane digest "${IMAGE}:edge")" = "$DIGEST"

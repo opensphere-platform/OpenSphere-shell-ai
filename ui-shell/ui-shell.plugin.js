@@ -1,6 +1,6 @@
 // OpenSphere AI — CONSTITUTION-0003 Production subShell reference adapter.
 const TAG = 'osp-ai-shell';
-const RELEASE = '1.0.0';
+const RELEASE = '1.1.0-edge.1';
 let injected = false;
 let activeContext = null;
 
@@ -34,7 +34,25 @@ const navigation = [
   ] },
 ];
 
-export function activate(ctx) {
+async function contributeManual(ctx) {
+  if (!ctx.extensions.manual || !ctx.api?.fetch) {
+    throw new Error('Manual contribution contract is unavailable');
+  }
+  const response = await ctx.api.fetch('plugins/manual/ai.ko.md', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`AI Manual fetch failed (HTTP ${response.status})`);
+  const content = await response.text();
+  ctx.extensions.manual.contribute({
+    sourceId: 'opensphere-ai-hub',
+    title: 'OpenSphere AI Hub',
+    locale: 'ko-KR',
+    route: '/p/ai',
+    sourcePath: 'ui-shell/manual/ai.ko.md',
+    content,
+    tags: ['ai', 'workbench', 'pipeline', 'training', 'model', 'inference', 'evaluation', 'monitoring'],
+  });
+}
+
+export async function activate(ctx) {
   activeContext = ctx;
   const base = (ctx.api?.baseUrl ?? '').replace(/\/$/, '');
   const contexts = window.__OPENSPHERE_HOST_CONTEXTS__ ||= Object.create(null);
@@ -50,6 +68,7 @@ export function activate(ctx) {
       return Array.isArray(body.items) ? body.items : [];
     },
   });
+  await contributeManual(ctx);
   ctx.notify?.publish({
     title: 'OpenSphere AI Hub ready',
     detail: 'Production subShell capabilities are connected to the Main Shell.',
@@ -65,6 +84,7 @@ export function activate(ctx) {
 export function deactivate() {
   activeContext?.extensions.nav?.clear();
   activeContext?.extensions.search?.clear();
+  activeContext?.extensions.manual?.clear();
   activeContext?.notify?.clear();
   if (window.__OPENSPHERE_HOST_CONTEXTS__) delete window.__OPENSPHERE_HOST_CONTEXTS__.ai;
   document.querySelectorAll('[data-osp-plugin="ai"]').forEach((node) => node.remove());
